@@ -67,7 +67,15 @@ from gateway.http.security import (
     check_origin,
     require_loopback,
 )
-from gateway.observability import LimitSnapshot, LimitStore, RequestLedger, SOURCE_PUBLISHED_ESTIMATE
+from gateway.observability import (
+    CONFIDENCE_MEDIUM,
+    CONFIDENCE_NONE,
+    LimitSnapshot,
+    LimitStore,
+    RequestLedger,
+    SOURCE_PUBLISHED_ESTIMATE,
+    SOURCE_UNKNOWN,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -722,6 +730,9 @@ class GatewayApp:
                     provider.models[info.model_id] = entry
                 if provider.state == STATE_NOT_CONFIGURED:
                     provider.state = STATE_CONFIGURED_UNTESTED
+            # Publish the published limits as snapshots, so the Status view
+            # can show them with their source and an as-of time.
+            self._publish_limits(provider_id, now)
             return json_response({"ok": True, "model_count": len(models), "observed_at": now})
 
         if action == "disconnect":
@@ -804,6 +815,45 @@ class GatewayApp:
         )
 
     _pending_device: dict[str, Any] = {}
+
+    def _publish_limits(self, provider_id: str, observed_at: str) -> None:
+        """Record the published limits as limit snapshots.
+
+        Every snapshot carries a source and a confidence. A model with no
+        published allowance is recorded as **unknown** - never as zero, and
+        never as unlimited.
+        """
+        config = self.config.snapshot()
+        provider = config.providers.get(provider_id)
+        if provider is None:
+            return
+        for entry in provider.models.values():
+            if entry.monthly_limit_usd is not None:
+                self.limits.put(
+                    LimitSnapshot(
+                        provider=provider_id,
+                        window=f"monthly:{entry.model_id}",
+                        value=entry.monthly_limit_usd,
+                        limit=entry.monthly_limit_usd,
+                        observed_at=observed_at,
+                        source=SOURCE_PUBLISHED_ESTIMATE,
+                        confidence=CONFIDENCE_MEDIUM,
+                        note="published monthly allowance for this model",
+                    )
+                )
+            else:
+                self.limits.put(
+                    LimitSnapshot(
+                        provider=provider_id,
+                        window=f"monthly:{entry.model_id}",
+                        value=None,
+                        limit=None,
+                        observed_at=observed_at,
+                        source=SOURCE_UNKNOWN,
+                        confidence=CONFIDENCE_NONE,
+                        note="no published allowance for this model",
+                    )
+                )
 
     # --- model actions ---------------------------------------------------
 
