@@ -17,6 +17,7 @@
   var state = null;
   var tab = "status";
   var busy = false;
+  var editingAlias = null;
 
   // --- tiny helpers -----------------------------------------------------
 
@@ -649,8 +650,10 @@
 
   function renderAliasEditor() {
     var card = el("div", { class: "card" }, [el("h2", { text: "Aliases and routes" })]);
+    var editing = editingAlias && state.aliases.filter(function (alias) { return alias.name === editingAlias; })[0];
+    if (editingAlias && !editing) editingAlias = null;
 
-    var nameInput = el("input", { placeholder: "coding" });
+    var nameInput = el("input", { placeholder: "coding", value: editing ? editing.name : "", disabled: !!editing });
     var primaryProvider = el("select", {});
     var primaryModel = el("select", {});
     var fallbacks = [];
@@ -667,9 +670,11 @@
       primaryProvider.appendChild(el("option", { value: provider.provider_id, text: providerLabel(provider.provider_id) }));
     });
     primaryProvider.addEventListener("change", refreshModelSelects);
+    if (editing && editing.primary) primaryProvider.value = editing.primary.provider;
     refreshModelSelects();
+    if (editing && editing.primary) primaryModel.value = editing.primary.model;
 
-    function addFallbackRow() {
+    function addFallbackRow(route) {
       var provider = el("select", {});
       var model = el("select", {});
       state.providers.forEach(function (p) {
@@ -683,7 +688,9 @@
         });
       }
       provider.addEventListener("change", fillModels);
+      if (route) provider.value = route.provider;
       fillModels();
+      if (route) model.value = route.model;
       var row = el("div", { class: "row" }, [
         el("label", {}, [el("span", { text: "Provider" }), provider]),
         el("label", {}, [el("span", { text: "Model" }), model]),
@@ -694,12 +701,13 @@
       fallbacks.push({ provider: provider, model: model });
       fallbackList.appendChild(row);
     }
+    if (editing) (editing.fallbacks || []).forEach(addFallbackRow);
 
     var triggerBoxes = {};
     var triggersWrap = el("div", { class: "row" });
     (state.fallback_triggers || []).forEach(function (trigger) {
       var box = el("input", { type: "checkbox", value: trigger });
-      box.checked = false;
+      box.checked = !!(editing && (editing.fallback_triggers || []).indexOf(trigger) !== -1);
       triggerBoxes[trigger] = box;
       triggersWrap.appendChild(el("label", { style: "flex:0 0 auto" }, [
         el("span", { text: trigger.replace(/_/g, " ") }), box
@@ -707,12 +715,14 @@
     });
 
     var authorizeBox = el("input", { type: "checkbox" });
+    authorizeBox.checked = !!(editing && editing.fallback_authorized);
     var confirmProviders = el("div");
 
     function renderConfirmProviders() {
       confirmProviders.innerHTML = "";
       state.providers.forEach(function (provider) {
         var box = el("input", { type: "checkbox", value: provider.provider_id });
+        box.checked = !!(editing && (editing.fallback_confirmed_providers || []).indexOf(provider.provider_id) !== -1);
         confirmProviders.appendChild(el("label", { style: "flex:0 0 auto" }, [
           el("span", { text: "may receive requests: " + providerLabel(provider.provider_id) }), box
         ]));
@@ -720,7 +730,7 @@
     }
     renderConfirmProviders();
 
-    var cooldown = el("input", { type: "number", value: "300", min: "0" });
+    var cooldown = el("input", { type: "number", value: String(editing ? editing.cooldown_seconds : 300), min: "0" });
 
     card.appendChild(el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "Alias name" }), nameInput]),
@@ -744,7 +754,7 @@
       el("label", {}, [el("span", { text: "Local cooldown (seconds)" }), cooldown]),
       el("div", { class: "narrow" }, [
         el("button", {
-          class: "primary", type: "button", text: "Save alias",
+          class: "primary", type: "button", text: editing ? "Save changes" : "Save alias",
           disabled: !state.can_mutate,
           onclick: function () {
             var triggers = Object.keys(triggerBoxes).filter(function (key) { return triggerBoxes[key].checked; });
@@ -762,11 +772,20 @@
                 fallback_triggers: triggers,
                 fallback_authorized: authorizeBox.checked,
                 fallback_confirmed_providers: confirmed,
-                cooldown_seconds: parseInt(cooldown.value, 10) || 0
+                cooldown_seconds: parseInt(cooldown.value, 10) || 0,
+                enabled: editing ? editing.enabled : false
               }
-            })).then(function () { toast("Alias saved.", "ok"); return refresh(); }).catch(function () {});
+            })).then(function () {
+              editingAlias = null;
+              toast(editing ? "Alias updated." : "Alias saved.", "ok");
+              return refresh();
+            }).catch(function () {});
           }
-        })
+        }),
+        editing ? el("button", {
+          type: "button", text: "Cancel edit",
+          onclick: function () { editingAlias = null; draw(); }
+        }) : null
       ])
     ]));
 
@@ -790,6 +809,11 @@
             " · cooldown: " + alias.cooldown_seconds + "s"
         }),
         el("div", { class: "actions" }, [
+          el("button", {
+            type: "button", text: "Edit",
+            disabled: !state.can_mutate,
+            onclick: function () { editingAlias = alias.name; draw(); }
+          }),
           el("button", {
             type: "button", text: alias.enabled ? "Unpublish" : "Publish",
             disabled: !state.can_mutate,

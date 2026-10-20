@@ -146,6 +146,15 @@ check("the direct console does not bootstrap a session or CSRF cookie", function
   assert(!source.includes("/api/session"));
 });
 
+check("editing an alias reuses its existing route configuration", function () {
+  assert(source.includes("var editingAlias = null;"));
+  assert(source.includes("text: \"Edit\""));
+  assert(source.includes("editingAlias = alias.name; draw();"));
+  assert(source.includes("text: editing ? \"Save changes\" : \"Save alias\""));
+  assert(source.includes("enabled: editing ? editing.enabled : false"));
+  assert(source.includes("text: \"Cancel edit\""));
+});
+
 if (failures.length) {
   console.error("\n" + failures.length + " check(s) failed");
   process.exit(1);
