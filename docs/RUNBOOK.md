@@ -57,11 +57,19 @@ The gateway binds `GATEWAY_BIND` (an explicit private LAN address) and
 
 ### 1.4 Create the owner passphrase
 
-On the host:
+On the host, or from any machine on the network:
 
 ```
-http://127.0.0.1:8766/setup/
+http://10.10.11.109:8766/setup/
 ```
+
+If you bound the setup listener to loopback (`GATEWAY_SETUP_BIND=127.0.0.1`),
+open it on the host itself, or tunnel it:
+
+```sh
+ssh -L 8766:127.0.0.1:8766 <host>
+```
+`
 
 The passphrase is created **only** in the setup UI. It is stored as a salted
 PBKDF2 hash in the owner-only credential store and is never displayed again.
@@ -70,12 +78,20 @@ credential store and starting over.
 
 ### 1.5 From a remote workstation
 
-The setup UI is loopback-only. Use an SSH tunnel:
+The setup UI binds the LAN address by default, so open it directly:
+
+```
+http://10.10.11.109:8766/setup/
+```
+
+If you have restricted it to loopback, tunnel it:
 
 ```sh
 ssh -L 8766:127.0.0.1:8766 <host>
 # then open http://127.0.0.1:8766/setup/
 ```
+
+The owner passphrase is required either way.
 
 ---
 
@@ -109,11 +125,15 @@ curl -s http://10.10.11.109:8765/v1/models
 `/version` must report exactly the four keys, and `image_revision` must be
 the digest of the image that is running.
 
-The setup UI must **not** be reachable from the LAN:
+The setup listener must **not** be served on the owner port, and it must
+require a session:
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' http://10.10.11.109:8766/setup/
-# expected: connection refused
+curl -s -o /dev/null -w '%{http_code}\n' http://10.10.11.109:8765/setup/api/state
+# expected: 404 - the setup surface has its own port
+
+curl -s -o /dev/null -w '%{http_code}\n' http://10.10.11.109:8766/setup/api/state
+# expected: 401 - the setup surface requires an owner session
 ```
 
 ---

@@ -305,8 +305,31 @@ def main(argv: list[str]) -> int:
 
         status, payload = http(base + "/setup/api/state")
         gate.record(
-            "the setup surface is not mounted on the LAN listener",
+            "the setup surface is not served on the owner listener",
             status == 404,
+            f"status={status}",
+        )
+
+        # The setup listener may be reachable from the network, by the
+        # operator's choice. What must never change is that it still
+        # requires an owner session before anything can be enrolled.
+        setup_base = "http://127.0.0.1:18776"
+        status, payload = http(setup_base + "/setup/api/state")
+        gate.record(
+            "the setup surface refuses state without a session",
+            status == 401,
+            f"status={status}",
+        )
+
+        status, payload = http(
+            setup_base + "/setup/api/provider",
+            method="POST",
+            headers={"Origin": setup_base},
+            body={"action": "enroll_key", "provider_id": "opencode_go", "api_key": "gate-probe"},
+        )
+        gate.record(
+            "the setup surface refuses credential enrolment without a session",
+            status == 401,
             f"status={status}",
         )
 
