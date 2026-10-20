@@ -242,44 +242,18 @@ class GatewayApp:
     def handle_responses(self, request: Request) -> Any:
         return self._handle_inference(request, DIALECT_OPENAI_RESPONSES)
 
-    def _conversation_session(self, request: Request, profile, alias_name: str) -> str:
-        """Build the upstream conversation identifier.
+    def _session_hint(self, request: Request) -> str:
+        """The client-supplied conversation name, if it sent one.
 
-        OpenCode Go **requires** an ``x-opencode-session`` header and refuses
-        a request without one, so the gateway cannot simply pass through
-        whatever the client sent - most OpenAI-compatible clients send
-        nothing at all.
-
-        The value is derived server-side and namespaced, so that:
-
-        * the same client talking to the same alias gets the same value, and
-          the provider can route and cache the conversation;
-        * two different clients cannot collide on one value;
-        * a caller-supplied value is validated and cannot be used to forge
-          another client's session, or to smuggle arbitrary bytes upstream;
-        * the value is scoped to this process, so a restart ends the
-          session rather than extending it indefinitely.
-
-        The provider scope is added by the router, because the provider that
-        serves a request is not known until a route is chosen.
+        This is only a *hint*. The gateway derives the real upstream
+        identifier itself, in the router, so that every path that reaches a
+        provider carries one.
         """
-        hint = ""
         for header in ("x-opencode-session", "x-session-id"):
             candidate = request.headers.get(header)
             if candidate:
-                hint = candidate.strip()
-                break
-        # A caller-supplied hint is bounded and reduced to a safe alphabet:
-        # no control characters, no separators, nothing that could be read
-        # as a header or a field delimiter.
-        hint = re.sub(r"[^A-Za-z0-9._-]", "", hint)[:32]
-
-        discriminator = profile.profile_id if profile is not None else "anonymous"
-        seed = f"{discriminator}|{alias_name}|{request.client_address[0]}"
-        digest = hmac.new(
-            self._session_secret, seed.encode("utf-8"), hashlib.sha256
-        ).hexdigest()[:24]
-        return f"{digest}.{hint}" if hint else digest
+                return candidate
+        return ""
 
     def _handle_inference(self, request: Request, dialect: str) -> Any:
         profile = self._resolve_profile(request)
@@ -311,7 +285,7 @@ class GatewayApp:
 
         stream = bool(payload.get("stream"))
         request_id = f"req_{int(time.time() * 1000):x}"
-        session_id = self._conversation_session(request, profile, alias.name)
+        session_hint = self._session_hint(request)
 
         routed = self.router.invoke(
             alias.name,
@@ -319,7 +293,7 @@ class GatewayApp:
             source_dialect=dialect,
             stream=stream,
             request_id=request_id,
-            session_id=session_id,
+            session_hint=session_hint,
             profile_id=profile.profile_id,
             client_ip=request.client_address[0],
         )

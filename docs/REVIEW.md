@@ -297,13 +297,20 @@ The adapter only set that header when the *client* supplied one, and most
 OpenAI-compatible clients send none, so every request to an OpenCode Go route
 failed at the provider's router.
 
-**Resolution.** The gateway derives the identifier server-side: stable for
-the same client and alias so the provider can cache the conversation,
-different for different clients so two callers cannot collide, validated so a
-caller-supplied hint cannot smuggle bytes upstream or forge another client's
-session, and namespaced by provider so a fallback does not inherit the
-primary's conversation key. The derivation key is per-process, so a restart
-ends the session.
+**Resolution.** The derivation now lives in the **router**, not in one
+handler, so every path that reaches a provider carries one: the API surface,
+the console's alias test, and any future caller. The gateway derives the
+identifier server-side: stable for the same client and alias so the provider
+can cache the conversation, different for different clients so two callers
+cannot collide, validated so a caller-supplied hint cannot smuggle bytes
+upstream or forge another client's session, and namespaced by provider so a
+fallback does not inherit the primary's conversation key. The derivation key
+is per-process, so a restart ends the session.
+
+The console's alias test was a second instance of this defect: it called the
+router directly and omitted the identifier, so the provider refused the test
+with `MissingSessionID` even though the API path worked. Deriving it in the
+router closes that path too.
 
 Separately, the safe upstream-code pattern only accepted lowercase, so the
 provider's camel-cased `MissingSessionID` was discarded and a generic `error`
@@ -313,7 +320,9 @@ still never echoed - only the code.
 **Evidence:** `tests/test_session_header.py` - the identifier is always
 present and provider-namespaced; it is stable per client and alias; two
 clients differ; a supplied hint is bounded, sanitised and cannot be used to
-collide; a camel-cased upstream code is reported and the body is not echoed.
+collide; a camel-cased upstream code is reported and the body is not echoed;
+and the console's alias-test path carries an identifier and the upstream
+model id.
 
 ### R17 — The alias was sent upstream instead of the model id — **closed**
 **Severity: release blocker for every aliased route.** *(closed; found by live

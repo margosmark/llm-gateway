@@ -58,6 +58,7 @@ class RecordingAdapter:
 
     def invoke(self, request):
         self.sessions.append(request.session_id)
+        self.models.append(request.model)
         return self._response()
 
     @staticmethod
@@ -193,6 +194,46 @@ class SessionHeaderTests(unittest.TestCase):
         self._send(headers=[("x-opencode-session", "shared")], client="10.0.0.5")
         self._send(headers=[("x-opencode-session", "shared")], client="10.0.0.6")
         self.assertNotEqual(self.harness.adapter.sessions[0], self.harness.adapter.sessions[1])
+
+
+class AliasTestPathTests(unittest.TestCase):
+    """The console's "Test alias" action must also carry a session.
+
+    This path calls the router directly rather than going through the API
+    surface. It once omitted the session identifier entirely, so the
+    provider refused the test with ``MissingSessionID`` even though the
+    API path worked. The derivation now lives in the router, so every path
+    that reaches a provider has one.
+    """
+
+    def setUp(self) -> None:
+        self.harness = SessionHeaderHarness()
+        self.addCleanup(self.harness.close)
+
+    def _test_alias(self) -> int:
+        request = Request(
+            method="POST",
+            path="/owner/api/alias",
+            raw_query="",
+            headers=Headers(
+                [("Host", "127.0.0.1:8765"), ("Origin", "http://127.0.0.1:8765")]
+            ),
+            body=json.dumps({"action": "test", "name": "coding"}).encode("utf-8"),
+            client_address=("10.0.0.5", 40000),
+            server_port=8765,
+        )
+        return self.harness.app.handle(request).status
+
+    def test_the_alias_test_sends_a_session_identifier(self) -> None:
+        self._test_alias()
+        self.assertEqual(len(self.harness.adapter.sessions), 1)
+        session = self.harness.adapter.sessions[0]
+        self.assertTrue(session, "the alias test must carry a session id too")
+        self.assertTrue(session.startswith("opencode_go."))
+
+    def test_the_alias_test_sends_the_upstream_model_id(self) -> None:
+        self._test_alias()
+        self.assertEqual(self.harness.adapter.models, ["mimo-v2.6-flash"])
 
 
 class UpstreamCodeTests(unittest.TestCase):
