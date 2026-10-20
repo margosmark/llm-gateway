@@ -13,20 +13,24 @@ boundary and flag the conflict.
 3. `docs/DEVELOPMENT.md` — verification and release discipline.
 4. `docs/REVIEW.md` — open findings; do not treat a finding as fixed without
    a code change and regression evidence.
-5. `docs/CHATGPT_CODEX_CONTRACT.md` before modifying that adapter or flow.
+5. `docs/TRUSTED_LAN_ADMIN_MODE.md` — approved single-console product
+   boundary and acceptance criteria.
+6. `docs/CHATGPT_CODEX_CONTRACT.md` before modifying that adapter or flow.
 
 ## Non-negotiable constraints
 
 - This is private LAN infrastructure. Bind only explicit private or loopback
   addresses. Never add wildcard/public binds, router/firewall rules, or a
   public reverse proxy.
-- Preserve the separate owner/API and setup listeners. Setup may bind only to
-  an explicit private/loopback address; credential enrollment is setup-only.
-- Never permit an unauthenticated LAN client to claim the initial owner
-  passphrase. Bootstrap must be loopback-only or require an explicit
-  out-of-band secret.
-- Preserve forwarded-header rejection and canonical `Host`, `Origin`, owner
-  session, and CSRF protections. Do not invent a proxy-trust model.
+- The approved product is one explicit trusted-LAN owner/API listener. Do not
+  restore an owner passphrase, login/session bootstrap, separate setup
+  listener, `GATEWAY_SETUP_BIND`, SSH-tunnel requirement, or `:8766` port.
+- Any LAN peer reaching that explicit address is an administrator and caller
+  by product decision. State this plainly in the console and docs; do not
+  imply password or profile protection of administration.
+- Preserve forwarded-header rejection and canonical `Host`/`Origin` checks.
+  Cross-site browser mutations must still be refused; do not invent a
+  proxy-trust model.
 - Never access, print, commit, fixture, or log real credentials, tokens,
   device codes, prompts, completions, or provider account identifiers.
 - Keep credentials and caller-token hashes out of `GatewayConfig`, status,
@@ -42,8 +46,9 @@ boundary and flag the conflict.
   returns `list[ModelInfo]`; test it through the generic refresh handler.
 - A converted request must receive a matching converted response on both
   buffered and streaming paths, or the request must be refused.
-- Device authorization needs setup-surface/session enforcement, session-bound
-  pending state, a shown-once user code, and interval/lifecycle tests.
+- Device authorization needs trusted-console enforcement, short-lived
+  in-memory pending state, a shown-once user code, and interval/lifecycle
+  tests.
 - Validate identifiers, routes, enum values, and ordering before persistence.
   Profiles deny access by default; any all-alias access requires explicit,
   reviewable opt-in.
