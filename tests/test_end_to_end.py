@@ -69,6 +69,8 @@ class FakeAdapter:
                 dialect="openai_responses",
                 reasoning_efforts=("none", "low", "medium", "high", "xhigh", "max"),
                 retention_class="30_days",
+                monthly_limit_usd=15.0,
+                limits_source="published_estimate",
             )
         ]
 
@@ -137,8 +139,14 @@ class GatewayHarness:
                     )
                 },
             )
+            snapshot.providers["opencode_go"] = ProviderState(
+                provider_id="opencode_go",
+                kind="opencode_go",
+                state="not_configured",
+            )
 
         self.router = Router(self.config, self.registry, ledger=RequestLedger())
+        self.limits = LimitStore()
         self.owner_auth = OwnerAuth(self.credentials, iterations=1000)
         self.profile_auth = ProfileAuth(self.config, self.credentials)
 
@@ -157,7 +165,7 @@ class GatewayHarness:
             profile_auth=self.profile_auth,
             policy=policy,
             ledger=self.router._ledger,
-            limits=LimitStore(),
+            limits=self.limits,
             release_identity=lambda: {
                 "service": "personal-llm-gateway",
                 "source_revision": "testcommit",
@@ -181,7 +189,7 @@ class GatewayHarness:
             profile_auth=self.profile_auth,
             policy=self.setup_policy,
             ledger=self.router._ledger,
-            limits=LimitStore(),
+            limits=self.limits,
             release_identity=lambda: {},
             base_url=f"http://127.0.0.1:{self.setup_port}",
             mounts=("/setup",),
@@ -711,6 +719,27 @@ class ConsoleApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         # The key is never echoed back.
         self.assertNotIn("not-a-real-key", json.dumps(payload))
+
+    def test_refresh_publishes_limits_with_a_source_and_confidence(self) -> None:
+        headers = self._login()
+        csrf = headers["Cookie"].split("gw_csrf=")[1].split(";")[0]
+        status, _, _ = self.harness.request(
+            "POST",
+            "/setup/api/provider",
+            body={"action": "refresh", "provider_id": FAKE_PROVIDER},
+            headers={"Cookie": headers["Cookie"], "X-Gateway-CSRF": csrf},
+            port=self.harness.setup_port,
+        )
+        self.assertEqual(status, 200)
+        status, state, _ = self.harness.request("GET", "/owner/api/state", headers=headers)
+        self.assertEqual(status, 200)
+        limits = state["limits"]
+        self.assertTrue(limits)
+        for entry in limits:
+            self.assertIn("source", entry)
+            self.assertIn("observed_at", entry)
+            self.assertIn("confidence", entry)
+            self.assertNotEqual(entry["source"], "provider_reported")
 
     def test_state_never_contains_credential_material(self) -> None:
         headers = self._login()
