@@ -48,7 +48,7 @@ class FakeUpstream:
         self.responses = list(responses)
         self.requests: list[dict] = []
 
-    def request(self, method, url, headers, body=None, stream=False, provider_id=""):
+    def request(self, method, url, headers, body=None, stream=False, provider_id="", **kwargs):
         self.requests.append({"method": method, "url": url, "headers": headers, "body": body})
         if not self.responses:
             return UpstreamResponse(200, {}, b"{}", None, "application/json")

@@ -204,6 +204,9 @@ class ChatGPTCodexAdapter:
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 body=body,
                 provider_id=PROVIDER_ID,
+                # Issuing a code may be repeated: an unused code expires
+                # unused, and repeating it costs nothing.
+                retry_safe=True,
             )
         except AdapterError as exc:
             if exc.status is not None:
@@ -274,6 +277,8 @@ class ChatGPTCodexAdapter:
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 body=body,
                 provider_id=PROVIDER_ID,
+                # Polling is a read; repeating it is free.
+                retry_safe=True,
             )
         except AdapterError:
             authorization.state = DEVICE_PENDING
@@ -438,6 +443,8 @@ class ChatGPTCodexAdapter:
             f"{self._chatgpt_base}{MODELS_PATH}",
             headers=self._auth_headers(),
             provider_id=PROVIDER_ID,
+            # A model list may be repeated freely.
+            retry_safe=True,
         )
         if response.status >= 400:
             raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))

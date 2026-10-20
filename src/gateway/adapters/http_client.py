@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import socket
 import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -68,8 +69,38 @@ class UpstreamClient:
         body: bytes | None = None,
         stream: bool = False,
         provider_id: str = "",
+        retry_safe: bool = False,
+        retries: int = 2,
     ) -> UpstreamResponse:
-        """Perform one upstream request."""
+        """Perform one upstream request.
+
+        *retry_safe* enables a bounded retry for a request that may be
+        repeated without cost or effect: a catalogue read, a model list, a
+        device-code issue or poll. It is **never** set for an inference
+        call, because that would bill twice and could repeat a side effect
+        after an ambiguous delivery.
+        """
+        attempts = retries + 1 if retry_safe else 1
+        last: UpstreamResponse | None = None
+        for attempt in range(attempts):
+            last = self._request_once(method, url, headers, body, stream, provider_id)
+            if not retry_safe or last.status < 500 or attempt == attempts - 1:
+                return last
+            # A short, bounded backoff. The upstream often answers a
+            # transient origin error on the next attempt.
+            time.sleep(min(2.0, 0.4 * (attempt + 1)))
+        assert last is not None
+        return last
+
+    def _request_once(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        stream: bool,
+        provider_id: str,
+    ) -> UpstreamResponse:
         request = urllib.request.Request(url=url, data=body, method=method.upper())
         for key, value in headers.items():
             request.add_header(key, value)
