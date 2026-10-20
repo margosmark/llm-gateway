@@ -106,6 +106,13 @@
     }
   }
 
+  function tokens(value) {
+    if (value === null || value === undefined) return "Unknown";
+    if (value >= 1000000) return (value / 1000000).toFixed(value % 1000000 === 0 ? 0 : 2) + "M";
+    if (value >= 1000) return Math.round(value / 1000) + "K";
+    return String(value);
+  }
+
   function money(value) {
     if (value === null || value === undefined) return "Unknown";
     return "$" + Number(value).toFixed(2);
@@ -580,7 +587,7 @@
       var table = el("table", {}, [
         el("thead", {}, [el("tr", {}, [
           el("th", { text: "Model" }), el("th", { text: "Dialect" }), el("th", { text: "Limit" }),
-          el("th", { text: "Retention" }), el("th", { text: "" })
+          el("th", { text: "Context" }), el("th", { text: "Retention" }), el("th", { text: "" })
         ])])
       ]);
       var tbody = el("tbody");
@@ -592,6 +599,7 @@
           ]),
           el("td", { class: "small", text: dialectName(model.dialect) }),
           el("td", {}, [limitCell(model)]),
+          el("td", { class: "small", text: tokens(model.context_limit) }),
           el("td", { class: "small", text: model.retention_class || "unknown" }),
           el("td", { class: "actions" }, [
             el("button", {
@@ -799,6 +807,12 @@
         el("div", {
           class: "small",
           text: "Primary: " + (alias.primary ? providerLabel(alias.primary.provider) + " → " + alias.primary.model : "none")
+        }),
+        el("div", {
+          class: "small muted",
+          text: "Context: " + (alias.context_limit && alias.context_limit.known
+            ? tokens(alias.context_limit.limit) + " of input"
+            : "Unknown - " + (alias.context_limit ? (alias.context_limit.reason || "not published") : "not published"))
         }),
         el("div", {
           class: "small muted",

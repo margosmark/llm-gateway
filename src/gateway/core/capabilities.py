@@ -62,7 +62,12 @@ class Capability:
     reasoning_efforts: tuple[str, ...] = ()
     supports_image_input: bool = False
     supports_previous_response_id: bool = False
+    #: The model's own context window, as the provider reports it.
     context_window: int | None = None
+    #: The context available for **input**, after the provider reserves
+    #: headroom for system prompts, tool overhead and the model's own
+    #: output. This is the number a client can actually rely on.
+    context_limit: int | None = None
     max_output_tokens: int | None = None
     retention_class: str = RETENTION_UNKNOWN
     notes: str | None = None
@@ -77,6 +82,7 @@ class Capability:
             "supports_image_input": self.supports_image_input,
             "supports_previous_response_id": self.supports_previous_response_id,
             "context_window": self.context_window,
+            "context_limit": self.context_limit,
             "max_output_tokens": self.max_output_tokens,
             "retention_class": self.retention_class,
             "retention_label": RETENTION_LABELS.get(self.retention_class, RETENTION_UNKNOWN),
@@ -124,6 +130,8 @@ class ModelInfo:
     supports_builtin_tools: bool = False
     supports_image_input: bool = False
     supports_previous_response_id: bool = False
+    context_window: int | None = None
+    context_limit: int | None = None
     retention_class: str = RETENTION_UNKNOWN
     monthly_limit_usd: float | None = None
     limits_source: str = "unknown"
@@ -141,6 +149,7 @@ class ModelInfo:
             supports_image_input=self.supports_image_input,
             supports_previous_response_id=self.supports_previous_response_id,
             context_window=self.context_window,
+            context_limit=self.context_limit,
             max_output_tokens=self.max_output_tokens,
             retention_class=self.retention_class,
             notes=self.notes,
@@ -157,6 +166,69 @@ class ModelInfo:
             "source": self.source,
             "notes": self.notes,
         }
+
+
+#: The share of a context window a provider considers usable for input,
+#: reserving the rest for system prompts, tool overhead and the model's own
+#: output. This matches the reference client's published default.
+DEFAULT_EFFECTIVE_CONTEXT_PERCENT = 95
+
+
+def resolve_context_window(
+    context_window: int | None,
+    max_context_window: int | None,
+) -> int | None:
+    """The model's own context window.
+
+    ``max_context_window`` is a ceiling that only applies when a client
+    explicitly overrides the limit, so the **smaller** of the two is the
+    window that applies by default.
+    """
+    values = [value for value in (context_window, max_context_window) if isinstance(value, int) and value > 0]
+    if not values:
+        return None
+    return min(values)
+
+
+def effective_context_limit(
+    context_window: int | None,
+    percent: int | None = None,
+) -> int | None:
+    """The context available for input, after the provider's headroom."""
+    if not isinstance(context_window, int) or context_window <= 0:
+        return None
+    share = percent if isinstance(percent, int) and 0 < percent <= 100 else DEFAULT_EFFECTIVE_CONTEXT_PERCENT
+    return (context_window * share) // 100
+
+
+def alias_context_limit(routes: Iterable[tuple[str, int | None]]) -> dict[str, Any]:
+    """The effective input limit for an alias.
+
+    The limit is the **smallest** of the limits of the routes that could
+    serve the request, because a fallback may serve it. If any eligible
+    route's limit is unknown, the alias's limit is unknown too: a bound
+    that cannot be verified is not a bound.
+    """
+    listed = list(routes)
+    if not listed:
+        return {"limit": None, "known": False, "reason": "the alias has no route"}
+    unknown = [label for label, limit in listed if limit is None]
+    if unknown:
+        return {
+            "limit": None,
+            "known": False,
+            "reason": (
+                "the limit of "
+                + ", ".join(unknown)
+                + " is not published, so the limit of the alias cannot be stated"
+            ),
+        }
+    limits = [limit for _, limit in listed if limit is not None]
+    return {
+        "limit": min(limits),
+        "known": True,
+        "reason": "the smallest limit among the routes that could serve this alias",
+    }
 
 
 def merge_capabilities(infos: Iterable[ModelInfo]) -> dict[str, ModelInfo]:
