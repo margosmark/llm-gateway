@@ -23,6 +23,11 @@ function makeNode(tag) {
     tag: tag,
     attributes: {},
     listeners: {},
+    children: [],
+    textContent: "",
+    appendChild(child) {
+      this.children.push(child);
+    },
     setAttribute(key, value) {
       this.attributes[key] = String(value);
     },
@@ -106,6 +111,33 @@ check("an on* attribute becomes a listener, not an attribute", function () {
 
 check("the helper is exported for testing", function () {
   assert.strictEqual(typeof helpers.el, "function");
+});
+
+check("empty-state helper renders a semantic live status", function () {
+  const node = helpers.emptyState("No discovered models yet", "Refresh the catalogue explicitly.");
+  assert.strictEqual(node.className, "empty-state");
+  assert.strictEqual(node.attributes.role, "status");
+  assert.strictEqual(node.attributes["aria-live"], "polite");
+  assert.strictEqual(node.children.length, 2);
+  assert.strictEqual(node.children[0].textContent, "No discovered models yet");
+  assert.strictEqual(node.children[1].textContent, "Refresh the catalogue explicitly.");
+});
+
+check("empty states are conditional on model and alias collections", function () {
+  assert(source.includes("state.providers.some(function (provider) { return provider.models.length > 0; })"));
+  assert(source.includes("if (!hasDiscoveredModels)"));
+  assert(source.includes("if (!state.aliases.length)"));
+  assert(source.includes("explicitly choose Refresh catalogue"));
+  assert(source.includes("then select Save alias"));
+  assert(source.includes("This page does not contact providers automatically."));
+});
+
+check("empty states and model table remain mobile-contained", function () {
+  const css = fs.readFileSync(path.join(__dirname, "..", "src", "gateway", "static", "console.css"), "utf8");
+  assert(css.includes(".empty-state {"));
+  assert(css.includes("button:focus-visible"));
+  assert(css.includes(".table-wrap { max-width: 100%; overflow-x: auto; }"));
+  assert(source.includes('class: "table-wrap"'));
 });
 
 check("the direct console does not bootstrap a session or CSRF cookie", function () {

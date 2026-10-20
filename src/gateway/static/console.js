@@ -146,6 +146,13 @@
     return value || "Unknown";
   }
 
+  function emptyState(title, message) {
+    return el("div", { class: "empty-state", role: "status", "aria-live": "polite" }, [
+      el("strong", { text: title }),
+      el("p", { class: "small", text: message })
+    ]);
+  }
+
   // --- shell ------------------------------------------------------------
 
   var TABS = [
@@ -558,6 +565,13 @@
       el("h2", { text: "Provider models" }),
       el("p", { class: "small muted", text: "Discovered models are staged. A model appears in /v1/models only after it is enabled and published through an alias." })
     ]);
+    var hasDiscoveredModels = state.providers.some(function (provider) { return provider.models.length > 0; });
+    if (!hasDiscoveredModels) {
+      modelsCard.appendChild(emptyState(
+        "No discovered models yet",
+        "Next: open Providers and explicitly choose Refresh catalogue for a connected provider. This page does not contact providers automatically."
+      ));
+    }
     state.providers.forEach(function (provider) {
       if (!provider.models.length) return;
       modelsCard.appendChild(el("h3", { text: providerLabel(provider.provider_id) }));
@@ -592,7 +606,7 @@
         ]));
       });
       table.appendChild(tbody);
-      modelsCard.appendChild(table);
+      modelsCard.appendChild(el("div", { class: "table-wrap" }, [table]));
     });
 
     var manualProvider = el("select", {});
@@ -808,6 +822,12 @@
       existing.appendChild(card2);
     });
     card.appendChild(el("h3", { text: "Existing aliases" }));
+    if (!state.aliases.length) {
+      existing.appendChild(emptyState(
+        "No aliases or routes yet",
+        "To add one, enter an alias name above, choose a primary provider and enabled model, then select Save alias. This will not create a route until you save."
+      ));
+    }
     card.appendChild(existing);
     return card;
   }
@@ -991,7 +1011,7 @@
   // The DOM helper is exported so its behaviour can be tested without a
   // browser. In a browser the console boots normally.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { el: el };
+    module.exports = { el: el, emptyState: emptyState };
     return;
   }
 
