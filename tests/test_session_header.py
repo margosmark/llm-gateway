@@ -35,6 +35,7 @@ from gateway.config import ConfigStore, ModelEntry, ProviderState, RouteRef
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
+from gateway.logging import RequestLogger
 from gateway.http.core import Headers, Request
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
 from gateway.observability import LimitStore, RequestLedger
@@ -109,6 +110,7 @@ class SessionHeaderHarness:
             release_identity=lambda: {},
             base_url="http://127.0.0.1:8765",
             mounts=("/owner",),
+            logger=RequestLogger(enabled=False),
         )
 
     def request(self, headers: list[tuple[str, str]], client: str = "10.0.0.5") -> int:

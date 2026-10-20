@@ -35,6 +35,7 @@ from gateway.config import ConfigStore
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
+from gateway.logging import RequestLogger
 from gateway.http.core import Headers, Request
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
 from gateway.observability import LimitStore, RequestLedger
@@ -104,6 +105,7 @@ class DeviceFlowHarness:
             release_identity=lambda: {},
             base_url="http://127.0.0.1:8765",
             mounts=("/owner",),
+            logger=RequestLogger(enabled=False),
         )
 
     def call(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:

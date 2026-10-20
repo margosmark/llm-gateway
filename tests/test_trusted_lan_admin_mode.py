@@ -17,6 +17,7 @@ from gateway.config import ConfigStore
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
+from gateway.logging import RequestLogger
 from gateway.http.core import Server
 from gateway.http.security import (
     FORWARDED_HEADER_NAMES,
@@ -83,6 +84,7 @@ class TrustedLanHarness:
             },
             base_url=f"http://{host}:{self.port}",
             mounts=("/owner",),
+            logger=RequestLogger(enabled=False),
         )
         self.server = Server(host, self.port, self.app.handle)
         self.server.start_background()

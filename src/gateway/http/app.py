@@ -38,6 +38,7 @@ from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
+from gateway.logging import RequestLogger
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -70,6 +71,7 @@ class GatewayApp:
         release_identity: Callable[[], dict[str, str]] | None = None,
         base_url: str = "",
         mounts: tuple[str, ...] = ("/owner",),
+        logger: RequestLogger | None = None,
     ) -> None:
         self.config = config
         self.credentials = credentials
@@ -91,6 +93,8 @@ class GatewayApp:
         #: identifiers. It is regenerated on every start, which is what
         #: bounds the lifetime of a derived session.
         self._session_secret = secrets.token_bytes(32)
+        #: One metadata-only line per request. Never carries a body.
+        self.logger = logger if logger is not None else RequestLogger()
         #: Device authorisations in flight, keyed by their device auth id.
         #: Held in memory only; nothing about them is persisted.
         self._pending_device: dict[str, Any] = {}
@@ -149,21 +153,71 @@ class GatewayApp:
         # CSRF applies to the cookie-authenticated browser surfaces only.
         # The API authenticates with bearer tokens, which a browser never
         # sends ambiently, so it is not CSRF-relevant there.
+        started = time.monotonic()
         try:
-            return route.handler(request)
+            result = route.handler(request)
         except SecurityError as exc:
-            return exc.to_response()
+            result = exc.to_response()
+            self._log_request(request, result, started)
+            return result
         except RoutingError as exc:
-            return json_response(exc.to_dict(), exc.status)
+            result = json_response(exc.to_dict(), exc.status)
+            self._log_request(request, result, started)
+            return result
         except ConversionError as exc:
-            return json_response(
+            result = json_response(
                 {"error": {"message": exc.message, "type": "conversion_refused", "capability": exc.capability}},
                 422,
             )
+            self._log_request(request, result, started)
+            return result
         except AdapterError as exc:
-            return json_response({"error": {"message": exc.message, "type": exc.error_class}}, 502)
+            result = json_response({"error": {"message": exc.message, "type": exc.error_class}}, 502)
+            self._log_request(request, result, started)
+            return result
         except Exception:  # pragma: no cover - defensive
-            return json_response({"error": {"message": "internal error", "type": "gateway_error"}}, 500)
+            result = json_response({"error": {"message": "internal error", "type": "gateway_error"}}, 500)
+            self._log_request(request, result, started)
+            return result
+        self._log_request(request, result, started)
+        return result
+
+    def _log_request(self, request: Request, result: Any, started: float) -> None:
+        """Record one request outcome.
+
+        The path is logged without its query string, and the body is never
+        logged, so a prompt, a response or a credential cannot reach the
+        log.
+        """
+        status = getattr(result, "status", 0)
+        error_class = None
+        alias = provider = model = None
+        body = getattr(result, "body", None)
+        if isinstance(body, (bytes, bytearray)):
+            try:
+                payload = json.loads(bytes(body).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict) and isinstance(error.get("type"), str):
+                    error_class = error["type"]
+        attribution = request.context.get("attribution")
+        if isinstance(attribution, dict):
+            alias = attribution.get("requested_alias")
+            provider = attribution.get("serving_provider")
+            model = attribution.get("serving_model")
+        self.logger.log(
+            method=request.method,
+            path=request.path,
+            status=status,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            alias=alias,
+            provider=provider,
+            model=model,
+            error_class=error_class,
+            streamed=bool(request.context.get("streamed")),
+        )
 
     # --- surface helpers -------------------------------------------------
 
@@ -297,6 +351,11 @@ class GatewayApp:
             profile_id=profile.profile_id,
             client_ip=request.client_address[0],
         )
+
+        # The attribution is recorded on the request so the access log can
+        # name the alias and the provider that served it.
+        request.context["attribution"] = routed.attribution.to_dict()
+        request.context["streamed"] = stream
 
         if not stream:
             body = routed.response.body or b""

@@ -29,6 +29,7 @@ from gateway.config import ConfigStore, Profile, ProviderState, RouteRef, ModelE
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
+from gateway.logging import RequestLogger
 from gateway.http.core import Server
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
 from gateway.observability import LimitStore, RequestLedger
@@ -169,6 +170,7 @@ class GatewayHarness:
             },
             base_url=f"http://127.0.0.1:{self.port}",
             mounts=("/owner",),
+            logger=RequestLogger(enabled=False),
         )
 
         self.server = Server("127.0.0.1", self.port, self.app.handle)
