@@ -205,6 +205,16 @@ class ChatGPTCodexAdapter:
                 provider_id=PROVIDER_ID,
             )
         except AdapterError as exc:
+            if exc.status is not None:
+                # The service answered; it is failing at its end. Say so,
+                # and keep the upstream status, which is the useful detail.
+                raise AdapterError(
+                    exc.error_class,
+                    f"the OpenAI sign-in service returned an error ({exc.message})",
+                    provider_id=PROVIDER_ID,
+                    status=exc.status,
+                    upstream_code=exc.upstream_code,
+                ) from exc
             raise AdapterError(
                 ERROR_TRANSIENT,
                 "could not reach the OpenAI sign-in service",
