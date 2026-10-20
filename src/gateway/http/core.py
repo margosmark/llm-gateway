@@ -268,10 +268,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         body = self.rfile.read(length) if length else b""
         headers = Headers(self.headers.items())
-        request = Request(method, path, parts.query, headers, body, self.client_address, self.server_port)
+        server_port = int(self.server.server_address[1]) if self.server.server_address else 0
+        request = Request(method, path, parts.query, headers, body, self.client_address, server_port)
 
         try:
-            result = self.server.application.handle(request)  # type: ignore[attr-defined]
+            result = self.server.application(request)  # type: ignore[attr-defined]
         except Exception:  # pragma: no cover - defensive
             traceback.print_exc(file=sys.stderr)
             result = Response(500, [("Content-Type", "application/json; charset=utf-8")],

@@ -110,7 +110,13 @@ class RouteRef:
 
 @dataclass
 class ModelEntry:
-    """One model at one provider."""
+    """One model at one provider.
+
+    The metadata here is what the router uses to decide whether a route may
+    serve a request. It is populated by an *explicit* discovery or refresh
+    action, so the router never has to call a provider to answer a routing
+    question.
+    """
 
     model_id: str
     enabled: bool = False
@@ -119,6 +125,16 @@ class ModelEntry:
     observed_at: str | None = None
     limits_known: bool = False
     notes: str | None = None
+    reasoning_efforts: list[str] = field(default_factory=list)
+    supports_streaming: bool = True
+    supports_function_tools: bool = True
+    supports_builtin_tools: bool = False
+    supports_image_input: bool = False
+    context_window: int | None = None
+    retention_class: str = "unknown"
+    monthly_limit_usd: float | None = None
+    limits_source: str = "unknown"
+    limits_observed_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -130,14 +146,38 @@ class ModelEntry:
         model_id = data.get("model_id")
         if not isinstance(model_id, str) or not model_id:
             return None
+
+        def as_str(key: str) -> str | None:
+            value = data.get(key)
+            return value if isinstance(value, str) else None
+
+        def as_int(key: str) -> int | None:
+            value = data.get(key)
+            return value if isinstance(value, int) else None
+
+        def as_float(key: str) -> float | None:
+            value = data.get(key)
+            return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+        efforts = data.get("reasoning_efforts")
         return cls(
             model_id=model_id,
             enabled=bool(data.get("enabled", False)),
-            dialect=data.get("dialect") if isinstance(data.get("dialect"), str) else None,
+            dialect=as_str("dialect"),
             source=str(data.get("source") or "manual"),
-            observed_at=data.get("observed_at") if isinstance(data.get("observed_at"), str) else None,
+            observed_at=as_str("observed_at"),
             limits_known=bool(data.get("limits_known", False)),
-            notes=data.get("notes") if isinstance(data.get("notes"), str) else None,
+            notes=as_str("notes"),
+            reasoning_efforts=[e for e in efforts or [] if isinstance(e, str)],
+            supports_streaming=bool(data.get("supports_streaming", True)),
+            supports_function_tools=bool(data.get("supports_function_tools", True)),
+            supports_builtin_tools=bool(data.get("supports_builtin_tools", False)),
+            supports_image_input=bool(data.get("supports_image_input", False)),
+            context_window=as_int("context_window"),
+            retention_class=str(data.get("retention_class") or "unknown"),
+            monthly_limit_usd=as_float("monthly_limit_usd"),
+            limits_source=str(data.get("limits_source") or "unknown"),
+            limits_observed_at=as_str("limits_observed_at"),
         )
 
 
@@ -208,6 +248,14 @@ class Alias:
     fallbacks: list[RouteRef] = field(default_factory=list)
     fallback_triggers: list[str] = field(default_factory=list)
     fallback_authorized: bool = False
+    #: Providers the owner has explicitly confirmed may receive requests
+    #: assigned to this alias. Cross-provider fallback is refused unless the
+    #: fallback provider appears here *and* ``fallback_authorized`` is set.
+    fallback_confirmed_providers: list[str] = field(default_factory=list)
+    #: Error classes the owner has explicitly defined a safe policy for.
+    #: Empty by default: authentication, authorisation, policy and
+    #: malformed-request failures never trigger a fallback.
+    fallback_error_classes: list[str] = field(default_factory=list)
     cooldown_seconds: int = 300
 
     def to_dict(self) -> dict[str, Any]:
@@ -218,6 +266,8 @@ class Alias:
             "fallbacks": [ref.to_dict() for ref in self.fallbacks],
             "fallback_triggers": list(self.fallback_triggers),
             "fallback_authorized": self.fallback_authorized,
+            "fallback_confirmed_providers": list(self.fallback_confirmed_providers),
+            "fallback_error_classes": list(self.fallback_error_classes),
             "cooldown_seconds": self.cooldown_seconds,
         }
 
@@ -237,6 +287,8 @@ class Alias:
                 if ref is not None:
                     fallbacks.append(ref)
         triggers = [t for t in data.get("fallback_triggers") or [] if t in FALLBACK_TRIGGERS]
+        confirmed = [p for p in data.get("fallback_confirmed_providers") or [] if isinstance(p, str)]
+        safe_classes = [c for c in data.get("fallback_error_classes") or [] if c in OWNER_OVERRIDABLE_CLASSES]
         cooldown = data.get("cooldown_seconds")
         return cls(
             name=name,
@@ -245,6 +297,8 @@ class Alias:
             fallbacks=fallbacks,
             fallback_triggers=triggers,
             fallback_authorized=bool(data.get("fallback_authorized", False)),
+            fallback_confirmed_providers=confirmed,
+            fallback_error_classes=safe_classes,
             cooldown_seconds=cooldown if isinstance(cooldown, int) and cooldown >= 0 else 300,
         )
 
