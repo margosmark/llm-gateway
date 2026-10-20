@@ -478,6 +478,7 @@
           .then(function (result) {
             pendingDevice[provider.provider_id] = result;
             draw();
+            scheduleDevicePoll(provider.provider_id);
           })
           .catch(function () {});
       }
@@ -491,24 +492,61 @@
         el("p", {}, [el("a", { href: pending.verification_url, target: "_blank", rel: "noreferrer noopener", text: pending.verification_url })]),
         el("div", { style: "font-size:26px;letter-spacing:3px;margin:8px 0", class: "mono", text: pending.user_code }),
         el("div", { class: "notice warn" }, [el("span", { text: info.anti_phishing || "" })]),
+        el("p", { class: "small muted", text: "This page checks the status automatically. The code expires in about 15 minutes." }),
         el("button", {
-          type: "button", text: "I have entered the code — check status",
+          type: "button", text: "Check the status now",
           onclick: function () {
-            run(api(BASE + "/api/provider", { method: "POST", body: { action: "device_poll", provider_id: provider.provider_id, device_auth_id: pending.device_auth_id } }))
-              .then(function (result) {
-                pending.state = result.state;
-                pendingDevice[provider.provider_id] = pending;
-                if (result.state === "approved") toast("Connected. The credential is stored and will not be shown again.", "ok");
-                else if (result.state === "denied") toast(result.error || "The authorisation was denied.", "bad");
-                else if (result.state === "expired") toast(result.error || "The code expired.", "bad");
-                return refresh();
-              })
-              .catch(function () {});
+            pollDevice(provider.provider_id);
           }
         })
       ]));
     }
     return block;
+  }
+
+  /* Poll the pending device authorisation at the interval the provider
+   * asked for. The handle is the gateway's own opaque value; the provider's
+   * device auth id never reaches the browser. */
+  function scheduleDevicePoll(providerId) {
+    var pending = pendingDevice[providerId];
+    if (!pending || pending.state !== "pending") return;
+    var interval = Math.max(2, Number(pending.interval) || 5) * 1000;
+    window.setTimeout(function () {
+      pollDevice(providerId);
+    }, interval);
+  }
+
+  function pollDevice(providerId) {
+    var pending = pendingDevice[providerId];
+    if (!pending || pending.state !== "pending") return;
+    return api(BASE + "/api/provider", {
+      method: "POST",
+      body: { action: "device_poll", provider_id: providerId, poll_handle: pending.poll_handle }
+    })
+      .then(function (result) {
+        pending.state = result.state;
+        pending.error = result.error;
+        pendingDevice[providerId] = pending;
+        if (result.state === "approved") {
+          toast("Connected. The credential is stored and will not be shown again.", "ok");
+          return refresh();
+        }
+        if (result.state === "denied") {
+          toast(result.error || "The authorisation was denied.", "bad");
+          return refresh();
+        }
+        if (result.state === "expired") {
+          toast(result.error || "The code expired.", "bad");
+          return refresh();
+        }
+        // Still pending: keep checking at the provider's interval.
+        scheduleDevicePoll(providerId);
+        return null;
+      })
+      .catch(function (error) {
+        toast(error.message || "could not check the authorisation status", "bad");
+        return null;
+      });
   }
 
   // --- models and routes ------------------------------------------------

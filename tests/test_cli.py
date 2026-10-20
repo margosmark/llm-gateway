@@ -6,6 +6,8 @@ tested directly rather than only through the running service.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -69,7 +71,8 @@ class ParserTests(unittest.TestCase):
     def test_allowed_explicit_private_port_remains_configurable(self) -> None:
         with mock.patch("gateway.cli._address_is_local", return_value=True), \
                 mock.patch("gateway.cli.build_application", return_value=(None, None, None, None)) as build_app:
-            self.assertEqual(main(["--host", "10.10.11.109", "--port", "9876", "--print-url"]), 0)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--host", "10.10.11.109", "--port", "9876", "--print-url"]), 0)
         build_app.assert_called_once()
         self.assertEqual(build_app.call_args.args[1:], ("10.10.11.109", 9876))
 

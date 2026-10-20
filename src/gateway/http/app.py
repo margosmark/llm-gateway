@@ -572,8 +572,11 @@ class GatewayApp:
                     {"error": {"message": "this provider has no device-code flow", "type": "unsupported_action"}},
                     400,
                 )
+            self._prune_pending_device()
             authorization = adapter.start_device_authorization()
-            self._pending_device[authorization.device_auth_id] = authorization
+            # Keyed by the opaque poll handle, never by the provider's own
+            # device auth id, which does not leave this process.
+            self._pending_device[authorization.poll_handle] = authorization
             return json_response(authorization.to_dict())
 
         if action == "device_poll":
@@ -582,16 +585,17 @@ class GatewayApp:
                     {"error": {"message": "this provider has no device-code flow", "type": "unsupported_action"}},
                     400,
                 )
-            device_auth_id = str(payload.get("device_auth_id") or "")
-            authorization = self._pending_device.get(device_auth_id)
+            self._prune_pending_device()
+            poll_handle = str(payload.get("poll_handle") or "")
+            authorization = self._pending_device.get(poll_handle)
             if authorization is None:
                 return json_response(
                     {"error": {"message": "that authorisation is no longer pending", "type": "unknown_authorization"}},
                     404,
                 )
             authorization = adapter.poll_device_authorization(authorization)
-            if authorization.state in ("approved", "denied", "expired"):
-                self._pending_device.pop(device_auth_id, None)
+            if authorization.state in ("approved", "denied", "expired", "cancelled"):
+                self._pending_device.pop(poll_handle, None)
                 if authorization.state == "approved":
                     with self.config.mutate() as config:
                         provider = config.providers.get(provider_id)
@@ -599,11 +603,8 @@ class GatewayApp:
                             provider = _new_provider_state(provider_id, adapter.kind)
                             config.providers[provider_id] = provider
                         provider.state = STATE_CONFIGURED_UNTESTED
-            result = authorization.to_dict()
-            # The one-time code is only echoed while the flow is pending.
-            if authorization.state != "pending":
-                result.pop("user_code", None)
-            return json_response(result)
+            # The status payload never repeats the one-time code.
+            return json_response(authorization.to_status_dict())
 
         if action == "enroll_key":
             api_key = payload.get("api_key")
@@ -663,6 +664,21 @@ class GatewayApp:
                         note="no published allowance for this model",
                     )
                 )
+
+    def _prune_pending_device(self) -> None:
+        """Drop pending device authorisations that can no longer complete.
+
+        The pending state is in memory only. It never outlives the process,
+        and an entry that has expired is removed rather than left to answer
+        a poll with a stale code.
+        """
+        now = time.monotonic()
+        for handle in [
+            handle
+            for handle, authorization in self._pending_device.items()
+            if authorization.expires_at <= now
+        ]:
+            self._pending_device.pop(handle, None)
 
     # --- model actions ---------------------------------------------------
 
