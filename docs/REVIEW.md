@@ -90,8 +90,8 @@ wire contract was also exercised against the live OpenAI endpoint: the start
 request issues a code and the poll reports `pending` until the code is
 approved.
 
-### R2 — Compose deployment has no verified writable-volume initialization
-**Severity: release blocker until exercised and fixed if necessary.**
+### R2 — Compose deployment has no verified writable-volume initialization — **closed**
+**Severity: release blocker until exercised and fixed if necessary.** *(closed)*
 
 The image runs as UID/GID `10001` (`Dockerfile:48-49`), and Compose mounts a
 new named volume at `/var/lib/gateway` (`compose.yaml:36-38`). A Docker named
@@ -108,6 +108,26 @@ starts, or provision the volume ownership out of band. Add a Compose-level
 smoke test which verifies first boot, a persisted config write, and restart.
 Preserve the non-root runtime, read-only root filesystem, and no-new-
 privileges controls.
+
+**Resolution.** A one-shot `state-init` service runs before the gateway and
+executes `scripts/init_state_dir.py`, which touches **exactly one path** - the
+gateway state directory - creates it if missing, sets mode `0700`, and sets
+its owner to the runtime UID/GID. It is the only part of the deployment that
+runs as root, it runs with `no-new-privileges`, `cap_drop: ALL` and only
+`CHOWN`, `FOWNER` and `DAC_OVERRIDE`, and it is idempotent. The gateway
+itself still runs as UID/GID 10001 with a read-only root filesystem.
+
+The Compose deployment is now exercised by a test, not by assumption:
+`tests/test_compose_deployment.py` builds the image, brings the real
+deployment up on its own project and volume, and proves that the volume is
+owned by `10001:10001`, that the gateway writes its configuration as that
+user, that a configuration change **survives a restart**, that the process
+listens only on the configured address with no wildcard and no `:8766`, and
+that the release step publishes an identity that `/version` then reports
+exactly.
+
+**Evidence:** `tests/test_compose_deployment.py`, and
+`scripts/init_state_dir.py` for the narrowly scoped initialiser.
 
 ### R3 — Release gate listener probe does not reliably inspect bind addresses — **closed**
 **Severity: high.** *(closed)*
@@ -350,8 +370,8 @@ provider's model id, the alias does not appear in the upstream payload, the
 caller's mapping is unchanged, and the ledger records both the alias and the
 serving model.
 
-### R11 — Production `/version` identity is not mechanically published
-**Severity: high release-traceability risk.**
+### R11 — Production `/version` identity is not mechanically published — **closed**
+**Severity: high release-traceability risk.** *(closed)*
 
 The release gate writes `release.json` only inside a disposable candidate
 container and deletes it afterwards (`scripts/release_gate.py:203-219`,
@@ -365,6 +385,27 @@ identity.
 atomically write the inspected exact image ID/digest to the actual Compose
 state volume during cutover, then compare that value with `/version` from the
 running Compose service.
+
+**Resolution.** `scripts/release.py` is the cutover step. It resolves the
+immutable identity of an **already built** image - the registry digest if it
+has one, otherwise the image ID - and never rebuilds or retags it. It starts
+the deployment, writes that identity into the state volume atomically
+(temp file plus `os.replace`, mode 0600, as the runtime user), and then
+verifies from outside the container that:
+
+* `/health` answers;
+* `/version` returns the fixed four-key schema;
+* `/version` reports exactly the identity that was published;
+* the running container's image is exactly that identity;
+* the process listens only on the configured address, with no wildcard and no
+  retired `:8766`.
+
+Every step is checked, and a mismatch stops the release rather than leaving a
+deployment that cannot say what it is.
+
+**Evidence:** `tests/test_compose_deployment.py` runs the release step against
+the real deployment and asserts that `/version` reports the exact image that
+is running.
 
 ### R12 — Profile and provider session isolation need explicit policy
 **Severity: medium authorization/privacy risk.**

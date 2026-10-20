@@ -1,9 +1,37 @@
 # Personal LLM Gateway deployment. One explicit private LAN listener; no setup port.
 name: personal-llm-gateway
 services:
+  # Prepares the state volume for the non-root runtime. A Docker named volume
+  # is created root-owned, so the gateway - which runs as UID/GID 10001 -
+  # could not write its own configuration or credential store. This one-shot
+  # service touches exactly one directory and nothing else. It is the only
+  # part of the deployment that runs as root, and it runs before the gateway.
+  state-init:
+    image: "${GATEWAY_IMAGE:-personal-llm-gateway:candidate}"
+    user: "0:0"
+    entrypoint: ["python", "/app/scripts/init_state_dir.py"]
+    command: ["--path", "/var/lib/gateway", "--uid", "10001", "--gid", "10001"]
+    volumes:
+      - gateway-state:/var/lib/gateway
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    restart: "no"
+
   gateway:
-    image: personal-llm-gateway:candidate
-    container_name: personal-llm-gateway
+    image: "${GATEWAY_IMAGE:-personal-llm-gateway:candidate}"
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
     build:
       context: .
       args:
@@ -37,4 +65,7 @@ services:
         max-file: "3"
 volumes:
   gateway-state:
-    name: personal-llm-gateway-state
+    # A stable name, so a redeploy keeps the same configuration and
+    # credentials. Overridable so a test deployment cannot collide with
+    # the live one.
+    name: "${GATEWAY_STATE_VOLUME:-personal-llm-gateway-state}"
