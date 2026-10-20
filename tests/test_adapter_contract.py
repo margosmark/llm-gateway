@@ -57,8 +57,63 @@ class AdapterContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def test_the_codex_catalogue_shape_is_parsed(self) -> None:
+        """The Codex catalogue identifies a model by its ``slug``.
+
+        A parser that looks for ``id`` finds nothing and reports an empty
+        catalogue - which is exactly what a silent refresh did.
+        """
+        payload = json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-6-luna",
+                        "display_name": "GPT-6 Luna",
+                        "supported_in_api": True,
+                        "visibility": "list",
+                        "context_window": 1050000,
+                        "supported_reasoning_levels": [
+                            {"effort": "none", "description": "no reasoning"},
+                            {"effort": "medium", "description": "balanced"},
+                            {"effort": "max", "description": "deepest"},
+                        ],
+                    },
+                    {
+                        "slug": "gpt-6-sol",
+                        "supported_in_api": False,
+                        "visibility": "hide",
+                    },
+                ]
+            }
+        ).encode()
+        store = self._store()
+        store.provider_handle("chatgpt_codex").write({"access_token": "synthetic"})
+        adapter = ChatGPTCodexAdapter(
+            store.provider_handle("chatgpt_codex"), client=ScriptedUpstream(payload)
+        )
+        models = adapter.list_models()
+        by_id = {m.model_id: m for m in models}
+        self.assertIn("gpt-6-luna", by_id)
+        self.assertEqual(by_id["gpt-6-luna"].dialect, DIALECT_OPENAI_RESPONSES)
+        self.assertEqual(by_id["gpt-6-luna"].context_window, 1050000)
+        self.assertEqual(
+            by_id["gpt-6-luna"].reasoning_efforts, ("none", "medium", "max")
+        )
+        # A model the account cannot use through the API is not offered.
+        self.assertNotIn("gpt-6-sol", by_id)
+
+    def test_an_openai_shaped_catalogue_is_still_parsed(self) -> None:
+        payload = json.dumps({"data": [{"id": "gpt-6-luna"}]}).encode()
+        store = self._store()
+        store.provider_handle("chatgpt_codex").write({"access_token": "synthetic"})
+        adapter = ChatGPTCodexAdapter(
+            store.provider_handle("chatgpt_codex"), client=ScriptedUpstream(payload)
+        )
+        models = adapter.list_models()
+        self.assertEqual([m.model_id for m in models], ["gpt-6-luna"])
+
     def test_the_chatgpt_adapter_returns_model_info(self) -> None:
-        payload = json.dumps({"models": [{"id": "gpt-6-luna"}, {"id": "gpt-6-sol"}]}).encode()
+        payload = json.dumps({"models": [{"slug": "gpt-6-luna"}, {"slug": "gpt-6-sol"}]}).encode()
         store = self._store()
         store.provider_handle("chatgpt_codex").write({"access_token": "synthetic"})
         adapter = ChatGPTCodexAdapter(
@@ -164,7 +219,7 @@ class AdapterContractTests(unittest.TestCase):
     def test_the_generic_refresh_handler_works_for_the_chatgpt_adapter(self) -> None:
         store = self._store()
         store.provider_handle("chatgpt_codex").write({"access_token": "synthetic"})
-        payload = json.dumps({"models": [{"id": "gpt-6-luna"}]}).encode()
+        payload = json.dumps({"models": [{"slug": "gpt-6-luna"}]}).encode()
         adapter = ChatGPTCodexAdapter(
             store.provider_handle("chatgpt_codex"), client=ScriptedUpstream(payload)
         )

@@ -458,9 +458,11 @@ class ChatGPTCodexAdapter:
 
         The shared adapter contract is ``list[ModelInfo]``, so the generic
         refresh handler can use this adapter exactly as it uses any other.
-        Only the wire dialect is known for certain: the ChatGPT-authenticated
-        upstream is the Responses protocol. Everything else that depends on
-        the account is reported as unknown rather than guessed.
+
+        The Codex model catalogue has its own shape. It is a list under
+        ``models``, and a model is identified by its ``slug`` - not by an
+        ``id``. A model also carries the reasoning levels it supports, its
+        context window, and whether it is usable through the API at all.
         """
         response = self._client.request(
             "GET",
@@ -485,9 +487,38 @@ class ChatGPTCodexAdapter:
 
         models: list[ModelInfo] = []
         for entry in entries if isinstance(entries, list) else []:
-            model_id = entry.get("id") if isinstance(entry, dict) else entry
+            if not isinstance(entry, dict):
+                continue
+            # The catalogue identifies a model by its slug. An OpenAI-shaped
+            # ``id`` is accepted too, so the same parser serves both.
+            model_id = entry.get("slug") or entry.get("id")
             if not isinstance(model_id, str) or not model_id:
                 continue
+
+            # A model the account cannot use through the API is not
+            # offered: the gateway would only fail on it later.
+            supported_in_api = entry.get("supported_in_api")
+            if supported_in_api is False:
+                continue
+
+            efforts: list[str] = []
+            for level in entry.get("supported_reasoning_levels") or []:
+                if isinstance(level, dict):
+                    effort = level.get("effort")
+                    if isinstance(effort, str) and effort and effort not in efforts:
+                        efforts.append(effort)
+                elif isinstance(level, str) and level and level not in efforts:
+                    efforts.append(level)
+
+            context_window = entry.get("context_window")
+            if not isinstance(context_window, int):
+                context_window = entry.get("max_context_window")
+
+            notes: list[str] = []
+            visibility = entry.get("visibility")
+            if isinstance(visibility, str) and visibility not in ("list", ""):
+                notes.append(f"visibility: {visibility}")
+
             models.append(
                 ModelInfo(
                     model_id=model_id,
@@ -499,13 +530,14 @@ class ChatGPTCodexAdapter:
                     supports_function_tools=True,
                     # What an account may actually reach, and at what
                     # limits, depends on the account. Unknown.
-                    context_window=None,
-                    reasoning_efforts=(),
+                    context_window=context_window if isinstance(context_window, int) else None,
+                    reasoning_efforts=tuple(efforts),
                     retention_class="unknown",
                     limits_source="unknown",
                     source="discovered",
                     notes=(
-                        "the wire dialect is known; availability, limits and "
+                        "; ".join(notes)
+                        or "the wire dialect is known; availability, limits and "
                         "retention for this account are not published"
                     ),
                 )
