@@ -150,6 +150,11 @@ class ProcessSocketTests(unittest.TestCase):
             target = fd_dir / str(index)
             target.symlink_to(f"socket:[{inode}]")
 
+    def _make_cmdline(self, pid: int, *args: str) -> None:
+        process = self.root / str(pid)
+        process.mkdir(parents=True, exist_ok=True)
+        (process / "cmdline").write_bytes("\0".join(args).encode() + b"\0")
+
     def test_socket_inodes_are_collected_from_the_process(self) -> None:
         self._make_process(42, [100, 200])
         inodes = release_gate.process_socket_inodes(42, str(self.root))
@@ -197,6 +202,57 @@ class ProcessSocketTests(unittest.TestCase):
             str(proc_net), pid=42, process_root=str(self.root)
         )
         self.assertEqual(sockets, [])
+
+    def test_missing_gateway_pid_fails_closed_instead_of_scanning_host(self) -> None:
+        proc_net = self.root / "net"
+        proc_net.mkdir()
+        (proc_net / "tcp").write_text(
+            TCP_HEADER
+            + "\n   0: 0100007F:4967 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 111 1",
+            encoding="utf-8",
+        )
+        self.assertEqual(release_gate.gateway_listening_sockets(str(self.root)), [])
+
+    def test_wrong_process_is_not_attributed_as_gateway(self) -> None:
+        self._make_cmdline(42, "python", "-c", "gateway")
+        self._make_process(42, [111])
+        proc_net = self.root / "net"
+        proc_net.mkdir()
+        (proc_net / "tcp").write_text(
+            TCP_HEADER
+            + "\n   0: 0100007F:4967 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 111 1",
+            encoding="utf-8",
+        )
+        self.assertEqual(release_gate.gateway_listening_sockets(str(self.root)), [])
+
+    def test_gateway_listener_scan_excludes_unrelated_host_listener(self) -> None:
+        self._make_cmdline(42, "python", "-m", "gateway", "--port", "18775")
+        self._make_process(42, [111])
+        proc_net = self.root / "net"
+        proc_net.mkdir()
+        (proc_net / "tcp").write_text(
+            TCP_HEADER
+            + "\n   0: 0100007F:4967 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 111 1"
+            + "\n   1: 00000000:1F91 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 222 1",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            release_gate.gateway_listening_sockets(str(self.root)),
+            [{"address": "127.0.0.1", "port": 0x4967, "family": "tcp"}],
+        )
+
+
+class ExpectedListenerTests(unittest.TestCase):
+    def test_only_exact_expected_loopback_listener_passes(self) -> None:
+        self.assertTrue(release_gate._has_expected_listener([("127.0.0.1", 18775)]))
+        self.assertFalse(release_gate._has_expected_listener([("127.0.0.1", 8765)]))
+        self.assertFalse(release_gate._has_expected_listener([("127.0.0.1", 8766)]))
+        self.assertFalse(release_gate._has_expected_listener([("0.0.0.0", 18775)]))
+        self.assertFalse(
+            release_gate._has_expected_listener(
+                [("127.0.0.1", 18775), ("127.0.0.1", 8766)]
+            )
+        )
 
 
 if __name__ == "__main__":
