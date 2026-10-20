@@ -39,9 +39,16 @@ jobs:
             --build-arg SOURCE_TREE="$(git rev-parse HEAD^{tree})" \
             -t personal-llm-gateway:candidate .
       - name: Record the candidate digest
+        # A locally built image has no registry digest, so fall back to the
+        # image ID, which is the same value the release gate resolves and
+        # writes into the release identity.
         run: |
-          docker image inspect personal-llm-gateway:candidate \
-            --format '{{index .RepoDigests 0}}' > candidate-digest.txt
+          DIGEST="$(docker image inspect personal-llm-gateway:candidate \
+            --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
+          if [ -z "$DIGEST" ]; then
+            DIGEST="$(docker image inspect personal-llm-gateway:candidate --format '{{.Id}}')"
+          fi
+          printf '%s\n' "$DIGEST" > candidate-digest.txt
           cat candidate-digest.txt
       - name: Run the release gate against the exact candidate
         run: python3 scripts/release_gate.py personal-llm-gateway:candidate

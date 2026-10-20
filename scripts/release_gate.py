@@ -79,6 +79,148 @@ class Gate:
         }
 
 
+def _decode_ipv4_hex(hex_address: str) -> str:
+    """Decode a /proc/net/tcp local address.
+
+    The kernel writes the address as four hex bytes in host byte order, so
+    ``0100007F`` is ``127.0.0.1`` and ``00000000`` is the wildcard.
+    """
+    if len(hex_address) != 8:
+        return ""
+    try:
+        raw = bytes.fromhex(hex_address)
+    except ValueError:
+        return ""
+    return ".".join(str(byte) for byte in raw[::-1])
+
+
+def _decode_ipv6_hex(hex_address: str) -> str:
+    """Decode a /proc/net/tcp6 local address (four 32-bit words)."""
+    if len(hex_address) != 32:
+        return ""
+    try:
+        raw = bytes.fromhex(hex_address)
+    except ValueError:
+        return ""
+    import ipaddress
+
+    words = b"".join(raw[index : index + 4][::-1] for index in range(0, 16, 4))
+    try:
+        return str(ipaddress.IPv6Address(words))
+    except ValueError:
+        return ""
+
+
+def process_socket_inodes(pid: int, proc_root: str = "/proc") -> set[int]:
+    """The socket inodes owned by a process.
+
+    A container with host networking shares the host's network namespace, so
+    ``/proc/net/tcp`` lists every socket on the machine, not just the
+    gateway's. The inodes in ``/proc/<pid>/fd`` identify which sockets
+    actually belong to the process.
+    """
+    import os
+
+    inodes: set[int] = set()
+    fd_dir = os.path.join(proc_root, str(pid), "fd")
+    try:
+        entries = os.listdir(fd_dir)
+    except OSError:
+        return inodes
+    for entry in entries:
+        try:
+            target = os.readlink(os.path.join(fd_dir, entry))
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            try:
+                inodes.add(int(target[len("socket:[") : -1]))
+            except ValueError:
+                continue
+    return inodes
+
+
+def listening_sockets(
+    proc_root: str = "/proc/net",
+    pid: int | None = None,
+    process_root: str = "/proc",
+) -> list[dict[str, Any]]:
+    """Every socket this host is listening on.
+
+    Parses ``/proc/net/tcp`` and ``/proc/net/tcp6``. State ``0A`` is
+    ``LISTEN``. The addresses are hexadecimal, so a textual comparison for
+    ``0.0.0.0`` would never match. When *pid* is given, only the sockets
+    that belong to that process are returned.
+    """
+    import os
+
+    allowed = process_socket_inodes(pid, process_root) if pid is not None else None
+    results: list[dict[str, Any]] = []
+    for name, decoder in (("tcp", _decode_ipv4_hex), ("tcp6", _decode_ipv6_hex)):
+        path = os.path.join(proc_root, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4 or fields[3] != "0A":
+                continue
+            if allowed is not None:
+                inode = fields[9] if len(fields) > 9 else ""
+                if not inode.isdigit() or int(inode) not in allowed:
+                    continue
+            address_hex, _, port_hex = fields[1].partition(":")
+            address = decoder(address_hex)
+            if not address:
+                continue
+            try:
+                port = int(port_hex, 16)
+            except ValueError:
+                continue
+            results.append({"address": address, "port": port, "family": name})
+    return results
+
+
+def gateway_listening_sockets() -> list[dict[str, Any]]:
+    """The sockets the gateway process itself is listening on.
+
+    Finds the gateway process and returns only its own listening sockets.
+    A container with host networking shares the host's network namespace,
+    so the whole host's socket table is visible from inside it.
+    """
+    import os
+
+    pid: int | None = None
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join("/proc", entry, "cmdline"), "rb") as handle:
+                cmdline = handle.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        if "-m" in cmdline and "gateway" in cmdline:
+            pid = int(entry)
+            break
+    return listening_sockets(pid=pid)
+
+
+def _parse_bound_listeners(raw: str) -> list[tuple[str, int]]:
+    """Parse the JSON the in-container probe printed."""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    bound: list[tuple[str, int]] = []
+    for entry in data if isinstance(data, list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get("address"), str):
+            port = entry.get("port")
+            bound.append((entry["address"], port if isinstance(port, int) else 0))
+    return bound
+
+
 def run(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
 
@@ -213,7 +355,6 @@ def main(argv: list[str]) -> int:
             "GATEWAY_BIND=127.0.0.1",
             "-e",
             "GATEWAY_PORT=18775",
-            "-e",
             reference,
         ],
         timeout=60,
@@ -329,19 +470,25 @@ def main(argv: list[str]) -> int:
                 "python",
                 "-c",
                 (
-                    "import socket,json;"
-                    "s=socket.socket();s.settimeout(2);"
-                    "print(json.dumps(sorted(x[4][0] for x in "
-                    "open('/proc/net/tcp').read().splitlines()[1:] if x[3]=='0A')))"
+                    "import json,sys;"
+                    "sys.path.insert(0,'/app/scripts');"
+                    "import release_gate;"
+                    "print(json.dumps(release_gate.gateway_listening_sockets()))"
                 ),
             ]
         )
         listening = listeners.stdout.strip()
-        wildcard_bound = "0.0.0.0" in listening or "::" in listening
+        bound = _parse_bound_listeners(listening)
+        wildcard_bound = [entry for entry in bound if entry[0] in ("0.0.0.0", "::")]
         gate.record(
             "the container does not listen on a wildcard address",
-            not wildcard_bound,
-            listening[:120],
+            not wildcard_bound and bool(bound),
+            f"listening={bound} raw={listening[:120]}",
+        )
+        gate.record(
+            "the container listens only on the configured address",
+            all(entry[0] in ("127.0.0.1", "::1") for entry in bound) if bound else False,
+            f"listening={bound}",
         )
     finally:
         run(["docker", "rm", "-f", container])
