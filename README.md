@@ -56,6 +56,13 @@ you expose it to the network, the network is your perimeter and the
 passphrase is the only thing standing between a LAN host and your provider
 credentials. Tighten it at the firewall if that matters to you.
 
+> **First boot:** until an owner passphrase exists, a LAN-reachable setup
+> listener lets the first reachable client choose it. Start the first setup
+> listener on loopback (`GATEWAY_SETUP_BIND=127.0.0.1`) and create the
+> passphrase from the host or an SSH tunnel; only then restart with a
+> LAN-reachable setup listener if that is the chosen operating model. This is
+> an active code-review blocker, tracked as R0 in `docs/REVIEW.md`.
+
 The gateway binds an **explicit private address**. A wildcard bind is refused
 at startup, and there is no flag that enables one. It never creates a
 firewall or router rule, and it is never publicly exposed.
@@ -84,6 +91,8 @@ git clone https://github.com/margosmark/llm-gateway.git
 cd llm-gateway
 
 export GATEWAY_BIND=10.10.11.109          # your explicit private LAN address
+# Protect the initial owner-passphrase bootstrap; optional after first setup.
+export GATEWAY_SETUP_BIND=127.0.0.1
 export SOURCE_REVISION="$(git rev-parse HEAD)"
 export SOURCE_TREE="$(git rev-parse HEAD^{tree})"
 
@@ -135,12 +144,11 @@ the console says so rather than implying otherwise.
 
 `Providers → OpenCode Go → Connect OpenCode Go`.
 
-Paste the API key into the protected form and choose **Save**; then use
-**Test connection** to validate it against
-`https://opencode.ai/inference/go/v1/models`. The two actions are explicit:
-saving never creates an implicit provider call. The key is stored in an
-owner-only credential store, separately from any other provider, and is
-**never displayed again**.
+Paste the API key into the protected form and choose **Save and test**. The
+explicit action stores the key and then validates it against
+`https://opencode.ai/inference/go/v1/models`; ordinary page loads still never
+call a provider. The key is stored in an owner-only credential store,
+separately from any other provider, and is **never displayed again**.
 
 ---
 

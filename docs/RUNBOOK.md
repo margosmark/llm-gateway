@@ -52,33 +52,41 @@ docker compose up -d
 docker compose logs -f gateway
 ```
 
-The gateway binds `GATEWAY_BIND` (an explicit private LAN address) and
-`127.0.0.1:8766` for the setup UI. It refuses a wildcard bind.
+The gateway binds `GATEWAY_BIND` (an explicit private LAN address) and starts
+setup on `GATEWAY_SETUP_BIND` (the same private LAN address by default) at
+port `8766`. Set `GATEWAY_SETUP_BIND=127.0.0.1` for host-only setup. It
+refuses wildcard binds for either listener.
+
+**Bootstrap safety:** before an owner passphrase exists, do not use a
+LAN-reachable setup listener. Start the first boot with
+`GATEWAY_SETUP_BIND=127.0.0.1`, create the passphrase locally or through an
+SSH tunnel, then restart with the desired private setup bind. The current code
+does not otherwise distinguish the first LAN client from the intended owner;
+see R0 in `REVIEW.md`.
 
 ### 1.4 Create the owner passphrase
 
-On the host, or from any machine on the network:
+On the host, with setup bound to loopback for first boot:
 
 ```
-http://10.10.11.109:8766/setup/
+http://127.0.0.1:8766/setup/
 ```
 
-If you bound the setup listener to loopback (`GATEWAY_SETUP_BIND=127.0.0.1`),
-open it on the host itself, or tunnel it:
+Open it on the host itself, or tunnel it:
 
 ```sh
 ssh -L 8766:127.0.0.1:8766 <host>
 ```
-`
 
 The passphrase is created **only** in the setup UI. It is stored as a salted
 PBKDF2 hash in the owner-only credential store and is never displayed again.
 There is no default passphrase and no recovery path other than removing the
 credential store and starting over.
 
-### 1.5 From a remote workstation
+### 1.5 Optional LAN-reachable setup after bootstrap
 
-The setup UI binds the LAN address by default, so open it directly:
+After the owner passphrase is set, the setup UI may bind the private LAN
+address. Open it directly:
 
 ```
 http://10.10.11.109:8766/setup/
@@ -112,8 +120,8 @@ Everything else happens in the browser.
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load never calls a provider.
 
-The OpenCode Go key form stores a key only. Select **Test connection** after
-storing it; saving a key never makes an implicit upstream call.
+The OpenCode Go **Save and test** action stores the key and explicitly runs a
+connection test. Ordinary page loads never call a provider.
 
 ---
 
@@ -199,7 +207,7 @@ The credential store is separate and is never touched by a rollback.
 | Symptom | Cause | Action |
 |---|---|---|
 | `refusing to start: a wildcard bind...` | `GATEWAY_BIND` is `0.0.0.0` | Set it to the explicit private LAN address |
-| The setup UI will not load from the host | The setup listener binds `127.0.0.1` only | Use an SSH local tunnel, or open it on the host itself |
+| The setup UI will not load | `GATEWAY_SETUP_BIND` does not match the address you opened, or is not assigned to the host | Use the configured setup address; use `127.0.0.1` plus an SSH tunnel only for loopback-only setup |
 | The console asks for a passphrase and there is none | The passphrase has not been created yet | Create it in the setup UI |
 | A provider shows *Failed* | The credential was rejected or the provider is unreachable | **Test connection** and read the message; the stored credential is never displayed |
 | A model shows an empty dialect | The provider serves it but does not document the endpoint | Enter it manually and set the dialect, or use an OpenAI-dialect model |

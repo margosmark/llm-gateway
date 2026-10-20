@@ -13,9 +13,13 @@ finding register, not as proof that a finding is fixed.
 - This is private LAN infrastructure. Bind only an explicit private or
   loopback address. Never add a wildcard bind, public address, router/firewall
   rule, or public reverse proxy.
-- Preserve the two-listener design: LAN owner/API surface and loopback-only
-  setup surface. Raw credential enrollment is setup-only, even in
-  authenticated mode.
+- Preserve the two-listener design: LAN owner/API surface and separately bound
+  setup surface. `GATEWAY_SETUP_BIND` may be private-LAN or loopback, never
+  wildcard/public; raw credential enrollment stays setup-only and requires an
+  owner session in either mode.
+- Never allow an unauthenticated LAN client to claim the first owner
+  passphrase. First-boot passphrase enrollment must be loopback-only or use an
+  explicitly provisioned bootstrap secret outside the LAN browser surface.
 - Reject, rather than trust, forwarded/proxy headers. Preserve canonical Host,
   Origin, owner-session, and CSRF checks for browser mutations.
 - Do not introduce a dependency, external database, background provider probe,
@@ -80,7 +84,8 @@ finding register, not as proof that a finding is fixed.
   not proof of volume ownership or persistence.
 - Verify live deployment behavior from outside the container only when a
   deployment is explicitly authorized. Check `/health`, fixed-schema
-  `/version`, intended listener addresses, and setup inaccessibility from LAN.
+  `/version`, intended listener addresses, and setup reachability exactly
+  matches `GATEWAY_SETUP_BIND`.
 - Update README/runbook/architecture/contract material when a behavior,
   endpoint, UI label, security invariant, or deployment procedure changes.
   Close a finding in `docs/REVIEW.md` only with a cited fix and regression
