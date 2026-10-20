@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Run the test suite
+        # The suite is standard library only: no install step, no dependency
+        # to resolve, and nothing that could reach a provider.
+        run: PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+  build:
+    name: candidate image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Build the immutable candidate
+        run: |
+          docker build \
+            --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
+            --build-arg SOURCE_TREE="$(git rev-parse HEAD^{tree})" \
+            -t personal-llm-gateway:candidate .
+      - name: Record the candidate digest
+        run: |
+          docker image inspect personal-llm-gateway:candidate \
+            --format '{{index .RepoDigests 0}}' > candidate-digest.txt
+          cat candidate-digest.txt
+      - name: Run the release gate against the exact candidate
+        run: python3 scripts/release_gate.py personal-llm-gateway:candidate
+      - name: Upload the gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-report
+          path: candidate-digest.txt

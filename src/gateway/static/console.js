@@ -202,12 +202,13 @@
       main.appendChild(el("p", { class: "muted", text: "Loading…" }));
       return;
     }
-    if (!state.authenticated && state.passphrase_set === false) {
-      main.appendChild(renderSetupPassphrase());
-      return;
-    }
     if (!state.authenticated) {
+      if (state.passphrase_set === false && state.surface === "setup") {
+        main.appendChild(renderSetupPassphrase());
+        return;
+      }
       main.appendChild(renderLogin());
+      main.appendChild(el("section", {}, [renderPublicSummary()]));
       return;
     }
     var renderer = {
@@ -425,6 +426,33 @@
       ]));
     });
     return list;
+  }
+
+  function renderPublicSummary() {
+    var card = el("div", { class: "card" }, [el("h2", { text: "Set up your gateway" })]);
+    card.appendChild(el("p", {
+      class: "small muted",
+      text: "Sign in with the owner passphrase to configure providers, models, routes and profiles. The summary below is safe to show without a session."
+    }));
+    card.appendChild(renderChecklist());
+    if (state.providers.length) {
+      card.appendChild(el("h3", { text: "Providers" }));
+      state.providers.forEach(function (provider) {
+        card.appendChild(el("div", { class: "route" }, [
+          el("div", { class: "head" }, [
+            el("strong", { text: providerLabel(provider.provider_id) }),
+            statePill(provider.state)
+          ])
+        ]));
+      });
+    }
+    card.appendChild(el("p", {
+      class: "small muted",
+      text: "The published catalogue is " + (state.published_models.length
+        ? state.published_models.join(", ")
+        : "empty. It stays empty until at least one enabled alias is published.")
+    }));
+    return card;
   }
 
   // --- providers --------------------------------------------------------
@@ -1028,10 +1056,50 @@
   // --- bootstrap --------------------------------------------------------
 
   function refresh() {
-    return api(BASE + "/api/state").then(function (data) {
-      state = data;
-      draw();
-      return data;
+    return api(BASE + "/api/session").then(function (session) {
+      return api(BASE + "/api/status").then(function (publicState) {
+        if (session.authenticated) {
+          return api(BASE + "/api/state").then(function (full) {
+            state = full;
+            draw();
+            return full;
+          });
+        }
+        // Not signed in: show only the safe status the gateway publishes
+        // without a session. Everything else needs the owner passphrase.
+        state = {
+          initialized: publicState.initialized,
+          revision: 0,
+          access_mode: publicState.access_mode,
+          access_mode_description: publicState.access_mode_description,
+          surface: session.surface,
+          can_mutate: false,
+          can_enroll_credentials: false,
+          authenticated: false,
+          passphrase_set: session.passphrase_set,
+          providers: (publicState.providers || []).map(function (provider) {
+            return {
+              provider_id: provider.provider_id,
+              state: provider.state,
+              models: [],
+              credential_present: false
+            };
+          }),
+          aliases: [],
+          profiles: [],
+          published_models: publicState.published_models || [],
+          limits: [],
+          ledger: [],
+          totals: {},
+          cooldowns: {},
+          release: publicState.release || {},
+          base_url: "",
+          checklist: publicState.checklist || [],
+          device_code: { prerequisite: "", anti_phishing: "" }
+        };
+        draw();
+        return state;
+      });
     }).catch(function (error) {
       app.innerHTML = "";
       app.appendChild(el("main", {}, [
@@ -1043,20 +1111,5 @@
     });
   }
 
-  api(BASE + "/api/session").then(function (session) {
-    return api(BASE + "/api/state").then(function (data) {
-      state = data;
-      state.passphrase_set = session.passphrase_set;
-      state.authenticated = session.authenticated;
-      draw();
-    });
-  }).catch(function () {
-    app.innerHTML = "";
-    app.appendChild(el("main", {}, [
-      el("div", { class: "card" }, [
-        el("h2", { text: "Cannot reach the console API" }),
-        el("p", { class: "small", text: "The gateway did not answer on this origin." })
-      ])
-    ]));
-  });
+  refresh();
 })();

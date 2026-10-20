@@ -28,6 +28,7 @@ on every call: a **self-identifying user agent** and a **stable
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +66,25 @@ SNAPSHOT_FILENAME = "go_catalog.json"
 
 
 def _default_snapshot_path() -> Path:
-    return Path(__file__).resolve().parent.parent.parent / "data" / SNAPSHOT_FILENAME
+    """Locate the catalogue snapshot.
+
+    The layout differs between the source tree (``<repo>/data/``) and the
+    container (``/app/data/`` beside ``/app/src/``), so both are checked,
+    along with an explicit override.
+    """
+    override = os.environ.get("GATEWAY_GO_CATALOG")
+    if override:
+        return Path(override)
+    package_dir = Path(__file__).resolve().parent
+    candidates = (
+        package_dir.parent.parent.parent / "data" / SNAPSHOT_FILENAME,
+        package_dir.parent.parent / "data" / SNAPSHOT_FILENAME,
+        package_dir.parent.parent.parent.parent / "data" / SNAPSHOT_FILENAME,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
 
 
 class OpenCodeGoAdapter:

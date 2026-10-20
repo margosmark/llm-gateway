@@ -1,0 +1,34 @@
+# Build context exclusions. Nothing here may end up in an image layer.
+
+.git/
+.github/
+.gitignore
+.dockerignore
+
+# Runtime state. The credential store lives here; copying it into an image
+# would publish provider secrets.
+data/runtime/
+data/runtime.*
+*.secret
+secrets/
+
+# Development-only material
+tests/
+docs/
+compose.yaml
+Dockerfile
+
+# Python build artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
