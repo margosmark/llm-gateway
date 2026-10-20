@@ -107,6 +107,7 @@ class GatewayApp:
         r = self._routes
         r.add(["GET"], "/version", self.handle_version)
         r.add(["GET"], "/health", self.handle_health)
+        r.add(["GET"], "/favicon.ico", self.handle_favicon)
 
         r.add(["GET"], "/v1/models", self.handle_models)
         r.add(["POST"], "/v1/chat/completions", self.handle_chat_completions)
@@ -136,16 +137,20 @@ class GatewayApp:
         except SecurityError as exc:
             return exc.to_response()
 
+        started = time.monotonic()
         route, params, path_matched = self._routes.match(request.method, request.path)
         if route is None:
             if path_matched:
                 allowed = self._routes.allowed_methods(request.path)
-                return json_response(
+                result = json_response(
                     {"error": {"message": "method not allowed", "type": "method_not_allowed", "allowed": allowed}},
                     405,
                     [("Allow", ", ".join(allowed))],
                 )
-            return json_response({"error": {"message": "not found", "type": "not_found"}}, 404)
+            else:
+                result = json_response({"error": {"message": "not found", "type": "not_found"}}, 404)
+            self._log_request(request, result, started)
+            return result
 
         request.params = params
         request.context["surface"] = SURFACE_OWNER
@@ -153,7 +158,6 @@ class GatewayApp:
         # CSRF applies to the cookie-authenticated browser surfaces only.
         # The API authenticates with bearer tokens, which a browser never
         # sends ambiently, so it is not CSRF-relevant there.
-        started = time.monotonic()
         try:
             result = route.handler(request)
         except SecurityError as exc:
@@ -250,6 +254,10 @@ class GatewayApp:
 
     def handle_health(self, request: Request) -> Response:
         return json_response({"status": "ok"})
+
+    def handle_favicon(self, request: Request) -> Response:
+        """No icon, but no 404 noise in the browser console either."""
+        return Response(204, [("Cache-Control", "max-age=86400")], b"")
 
     # --- API surface -----------------------------------------------------
 
