@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -69,6 +70,11 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 #: The documented ChatGPT-authenticated inference base.
 CHATGPT_BASE = "https://chatgpt.com/backend-api/codex"
 MODELS_PATH = "/models"
+
+#: The Codex client appends its own version to the model-list request, and
+#: the backend expects it. The gateway identifies itself honestly with its
+#: own version rather than impersonating the Codex client.
+CHATGPT_CLIENT_VERSION = os.environ.get("GATEWAY_CLIENT_VERSION", "2.0.0")
 RESPONSES_PATH = "/responses"
 
 USER_AGENT = "personal-llm-gateway/2.0"
@@ -233,7 +239,13 @@ class ChatGPTCodexAdapter:
                 status=response.status,
             )
         if response.status >= 400:
-            raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))
+            raise error_from_response(
+                response.status,
+                response.body,
+                PROVIDER_ID,
+                parse_json_body(response.body),
+                operation="the ChatGPT / Codex device code request",
+            )
 
         payload = parse_json_body(response.body)
         if not isinstance(payload, dict):
@@ -288,7 +300,13 @@ class ChatGPTCodexAdapter:
             authorization.state = DEVICE_PENDING
             return authorization
         if response.status >= 400:
-            error = error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))
+            error = error_from_response(
+                response.status,
+                response.body,
+                PROVIDER_ID,
+                parse_json_body(response.body),
+                operation="the ChatGPT / Codex device code poll",
+            )
             authorization.state = DEVICE_DENIED
             authorization.error = error.message
             return authorization
@@ -331,7 +349,13 @@ class ChatGPTCodexAdapter:
             provider_id=PROVIDER_ID,
         )
         if response.status >= 400:
-            raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))
+            raise error_from_response(
+                response.status,
+                response.body,
+                PROVIDER_ID,
+                parse_json_body(response.body),
+                operation="the ChatGPT / Codex token exchange",
+            )
         self._store_tokens(parse_json_body(response.body))
 
     def _store_tokens(self, payload: Any) -> None:
@@ -440,14 +464,20 @@ class ChatGPTCodexAdapter:
         """
         response = self._client.request(
             "GET",
-            f"{self._chatgpt_base}{MODELS_PATH}",
+            f"{self._chatgpt_base}{MODELS_PATH}?client_version={CHATGPT_CLIENT_VERSION}",
             headers=self._auth_headers(),
             provider_id=PROVIDER_ID,
             # A model list may be repeated freely.
             retry_safe=True,
         )
         if response.status >= 400:
-            raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))
+            raise error_from_response(
+                response.status,
+                response.body,
+                PROVIDER_ID,
+                parse_json_body(response.body),
+                operation="the ChatGPT / Codex model list request",
+            )
         payload = parse_json_body(response.body)
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
@@ -529,7 +559,13 @@ class ChatGPTCodexAdapter:
                 )
 
         if response.status >= 400:
-            raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))
+            raise error_from_response(
+                response.status,
+                response.body,
+                PROVIDER_ID,
+                parse_json_body(response.body),
+                operation="the ChatGPT / Codex responses request",
+            )
 
         return ProviderResponse(
             status=response.status,

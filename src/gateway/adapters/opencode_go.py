@@ -158,7 +158,13 @@ class OpenCodeGoAdapter:
             retry_safe=True,
         )
         if response.status >= 400:
-            raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))
+            raise error_from_response(
+                response.status,
+                response.body,
+                PROVIDER_ID,
+                parse_json_body(response.body),
+                operation="the OpenCode Go catalogue request",
+            )
 
         payload = parse_json_body(response.body)
         entries = payload.get("data") if isinstance(payload, dict) else None
@@ -265,7 +271,13 @@ class OpenCodeGoAdapter:
             provider_id=PROVIDER_ID,
         )
         if response.status >= 400:
-            raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))
+            raise error_from_response(
+                response.status,
+                response.body,
+                PROVIDER_ID,
+                parse_json_body(response.body),
+                operation="the OpenCode Go inference request",
+            )
 
         return ProviderResponse(
             status=response.status,
