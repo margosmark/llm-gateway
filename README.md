@@ -102,8 +102,9 @@ Then, on the host:
 6. Create an alias, pick a primary, publish it.
 7. Point a LAN client at the alias.
 
-The console opens on **Set up your gateway** with that checklist. Nothing is
-pre-configured: a fresh install has zero providers, zero credentials, zero
+The console opens on **Set up your gateway** with that checklist. The two
+supported provider *cards* are visible so the owner can choose one, but a
+fresh install has zero provider credentials, zero discovered models, zero
 profiles, zero aliases and zero published models.
 
 ---
@@ -134,10 +135,12 @@ the console says so rather than implying otherwise.
 
 `Providers → OpenCode Go → Connect OpenCode Go`.
 
-Paste the API key into the protected form and choose **Save and test**. The
-gateway validates the key against `https://opencode.ai/inference/go/v1/models`.
-The key is stored in an owner-only credential store, separately from any
-other provider, and is **never displayed again**.
+Paste the API key into the protected form and choose **Save**; then use
+**Test connection** to validate it against
+`https://opencode.ai/inference/go/v1/models`. The two actions are explicit:
+saving never creates an implicit provider call. The key is stored in an
+owner-only credential store, separately from any other provider, and is
+**never displayed again**.
 
 ---
 
@@ -206,11 +209,16 @@ owner's single upstream account.
 
 ---
 
-## What the gateway never stores
+## Sensitive data and observability
 
-* prompts, responses, or any response content;
-* provider credentials, bearer tokens, device codes, or caller tokens;
-* any environment value beyond the four release fields.
+* It does **not** store prompts, responses, or response content.
+* Provider credentials, bearer tokens, device codes, and caller tokens are
+  stored only when required for operation, in an owner-only credential store.
+  They are never returned by a normal state or status response, ledger,
+  export, URL, or routine log. A caller token is shown only in the direct
+  response that issues it.
+* `/version` exposes no arbitrary environment value: it has only its fixed
+  four-key release schema.
 
 Status, analytics and exports are metadata only. A request ledger records
 which alias was asked for, which provider and model actually served it, how
@@ -219,6 +227,11 @@ long it took and how it ended — never what it said.
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
 never as unlimited.
+
+See [the architecture map](docs/ARCHITECTURE.md),
+[development guide](docs/DEVELOPMENT.md), and
+[current codebase review](docs/REVIEW.md) for implementation boundaries,
+verification commands, and known delivery blockers.
 
 ---
 
