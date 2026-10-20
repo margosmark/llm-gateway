@@ -154,6 +154,15 @@ listener to the gateway.
 The gate additionally asserts that the gateway listens *only* on the
 configured address, which also proves the retired `:8766` port is not bound.
 
+**Additional regression hardening.** Candidate PID discovery now requires one
+unique `python -m gateway` process; missing or ambiguous attribution returns
+no sockets rather than falling back to the host-wide listener table. Gate
+acceptance requires exactly the candidate-owned `127.0.0.1:18775` listener, so
+an unrelated listener, another port (including retired `:8766`), wildcard, or
+additional socket fails. Evidence: `test_release_gate.py` covers missing and
+wrong PID, unrelated host listener, exact expected port, wildcard, and retired
+port refusal.
+
 **Evidence:** `tests/test_release_gate.py` — hexadecimal IPv4 and IPv6
 decoding, wildcard recognition in both families, explicit loopback binds,
 non-listening sockets ignored, and process-scoped filtering that excludes a
