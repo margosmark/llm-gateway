@@ -48,7 +48,7 @@ Response:
 
 ### 1.2 Show the owner the code
 
-The setup UI shows:
+The owner console shows:
 
 * the verification URL `https://auth.openai.com/codex/device`;
 * the one-time code;
@@ -61,7 +61,16 @@ The code is shown once, as part of the explicit "Connect ChatGPT" action. It
 is never logged, never written to the ledger, and never returned by a later
 read.
 
+The start response also carries an **opaque poll handle** — a random value
+the gateway minted. The provider's own `device_auth_id` never leaves the
+process: the browser is given the handle, and the gateway uses it to find
+the pending record again. The pending record lives in memory only and
+expires with the code.
+
 ### 1.3 Poll for approval
+
+The console polls the gateway with the opaque handle, and the gateway polls
+the provider with its own `device_auth_id`:
 
 ```
 POST https://auth.openai.com/api/accounts/deviceauth/token
@@ -75,6 +84,9 @@ Content-Type: application/json
 | `2xx` | Approved. The body carries `authorization_code`, `code_challenge` and `code_verifier`. |
 | `403`, `404` | Not yet. Keep polling, sleeping `interval` seconds. |
 | anything else | The attempt failed. Report it and stop. |
+
+The console polls at the interval the provider asked for. The poll response
+never repeats the one-time code.
 
 Maximum wait: **15 minutes**.
 

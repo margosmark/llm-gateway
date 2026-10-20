@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import json
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -102,20 +103,45 @@ class DeviceAuthorization:
     The ``user_code`` is shown to the owner once, as part of the explicit
     "Connect ChatGPT" action. It is never written to a log, a ledger, or a
     later read.
+
+    ``device_auth_id`` is the provider's own identifier for this
+    authorisation. It never leaves this process: the browser is given
+    ``poll_handle``, an opaque value the gateway uses to find this record
+    again.
     """
 
     verification_url: str
     user_code: str
     device_auth_id: str
+    poll_handle: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     interval: int = 5
     state: str = DEVICE_PENDING
     expires_at: float = field(default_factory=lambda: time.monotonic() + DEVICE_CODE_TTL_SECONDS)
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """The payload for the explicit *start* action.
+
+        This is the only response that carries the one-time code. It carries
+        the opaque poll handle, never the provider's device auth id.
+        """
         return {
+            "poll_handle": self.poll_handle,
             "verification_url": self.verification_url,
             "user_code": self.user_code,
+            "interval": self.interval,
+            "state": self.state,
+            "expires_at": self.expires_at,
+            "error": self.error,
+        }
+
+    def to_status_dict(self) -> dict[str, Any]:
+        """The payload for a *poll*.
+
+        The one-time code is not repeated: it was shown once, at the start.
+        """
+        return {
+            "poll_handle": self.poll_handle,
             "interval": self.interval,
             "state": self.state,
             "expires_at": self.expires_at,

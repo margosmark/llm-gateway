@@ -58,8 +58,8 @@ Add a LAN-peer refusal test for uninitialized setup plus a successful
 loopback/bootstrap test. Until then, bind setup to `127.0.0.1` for first boot
 and switch only after the passphrase exists.
 
-### R1 — ChatGPT/Codex device flow cannot complete in the current UI
-**Severity: release blocker for the ChatGPT/Codex setup flow.**
+### R1 — ChatGPT/Codex device flow cannot complete in the current UI — **closed**
+**Severity: release blocker for the ChatGPT/Codex setup flow.** *(closed)*
 
 `DeviceAuthorization.to_dict()` deliberately omits `device_auth_id`
 (`src/gateway/adapters/chatgpt_codex.py:115-123`). The browser stores only
@@ -72,6 +72,23 @@ is absent, so the server receives an empty ID and returns
 present, bind it to the in-memory pending authorization, and add an end-to-end
 browser/API test covering start → poll → approved. Do not expose stored tokens
 or a device code through a later read endpoint.
+
+**Resolution.** The start action now returns an opaque `poll_handle` minted by
+the gateway. The provider's `device_auth_id` never leaves the process. The
+pending record is keyed by that handle, is in memory only, and is pruned when
+it expires. The one-time code is returned only by the start action; the poll
+response carries the handle, state, interval and expiry only. The console
+polls at the interval the provider asked for, and keeps polling until the
+state is terminal.
+
+**Evidence:** `tests/test_device_flow.py` — start returns an opaque handle;
+the provider identifier is absent from the response; poll with the handle
+reaches `approved` and stores the credential; the one-time code is absent from
+the poll response; an unknown, missing or expired handle is refused with
+`unknown_authorization`; the flow is unreachable from the API surface. The
+wire contract was also exercised against the live OpenAI endpoint: the start
+request issues a code and the poll reports `pending` until the code is
+approved.
 
 ### R2 — Compose deployment has no verified writable-volume initialization
 **Severity: release blocker until exercised and fixed if necessary.**
@@ -191,8 +208,9 @@ conversion, not this response shape.
 unsupported non-streaming combination until conversion exists; cover both
 endpoint/dialect permutations with end-to-end assertions.
 
-### R10 — Device authorization is neither setup-only nor shown-once
-**Severity: high credential-boundary and flow-correctness risk.**
+### R10 — Device authorization is neither setup-only nor shown-once — **partly closed**
+**Severity: high credential-boundary and flow-correctness risk.** *(shown-once
+and interval closed; the surface rule is superseded)*
 
 The device start/poll actions do not require `_can_enroll_credentials()`
 (`src/gateway/http/app.py:751-788`), while API-key enrollment does
@@ -206,6 +224,24 @@ the provider-supplied poll interval (`src/gateway/static/console.js:595-615`).
 owner session, bind each pending flow to that session, return the code only
 from the initial explicit start action, honor the interval, and test pending,
 denied, expired, approved, and owner-console-refusal cases.
+
+**Resolution.** The shown-once rule now holds: the code is returned only by
+the start action and never by a poll. The console polls at the provider's
+interval, and keeps polling until the state is terminal. The pending record
+is in memory, keyed by an opaque handle, and is pruned on expiry.
+
+The *surface* requirement is superseded rather than implemented: there is no
+longer a separate setup surface or an owner session, because
+`docs/TRUSTED_LAN_ADMIN_MODE.md` makes the single owner console the
+administration surface and states that any peer able to reach the configured
+address is an administrator. The device actions are reachable only through
+the owner console routes, never from the API surface, which is covered by a
+regression test.
+
+**Evidence:** `tests/test_device_flow.py` — the code is absent from the poll
+response; an unknown, missing or expired handle is refused; the flow is
+unreachable from the API surface; pending, approved and denied states are
+exercised.
 
 ### R11 — Production `/version` identity is not mechanically published
 **Severity: high release-traceability risk.**
