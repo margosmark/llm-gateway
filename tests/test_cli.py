@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from gateway.cli import _is_private_or_loopback, _is_wildcard, build_application, build_parser
+from gateway.cli import _is_private_or_loopback, _is_wildcard, build_application, build_parser, main
 
 
 class BindRuleTests(unittest.TestCase):
@@ -40,6 +42,36 @@ class ParserTests(unittest.TestCase):
         args = build_parser().parse_args(["--host", "10.10.11.109"])
         self.assertFalse(hasattr(args, "setup_bind"))
         self.assertFalse(hasattr(args, "setup_port"))
+
+    def test_reserved_setup_port_is_rejected_from_cli_before_startup(self) -> None:
+        error = StringIO()
+        with redirect_stderr(error), mock.patch("gateway.cli.build_application") as build_app, \
+                mock.patch("gateway.cli.Server") as server:
+            with self.assertRaises(SystemExit) as raised:
+                main(["--host", "10.10.11.109", "--port", "8766"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("port 8766 is reserved", error.getvalue())
+        build_app.assert_not_called()
+        server.assert_not_called()
+
+    def test_reserved_setup_port_is_rejected_from_environment_before_startup(self) -> None:
+        error = StringIO()
+        with mock.patch.dict("os.environ", {"GATEWAY_PORT": "8766"}), \
+                redirect_stderr(error), mock.patch("gateway.cli.build_application") as build_app, \
+                mock.patch("gateway.cli.Server") as server:
+            with self.assertRaises(SystemExit) as raised:
+                main(["--host", "10.10.11.109"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("port 8766 is reserved", error.getvalue())
+        build_app.assert_not_called()
+        server.assert_not_called()
+
+    def test_allowed_explicit_private_port_remains_configurable(self) -> None:
+        with mock.patch("gateway.cli._address_is_local", return_value=True), \
+                mock.patch("gateway.cli.build_application", return_value=(None, None, None, None)) as build_app:
+            self.assertEqual(main(["--host", "10.10.11.109", "--port", "9876", "--print-url"]), 0)
+        build_app.assert_called_once()
+        self.assertEqual(build_app.call_args.args[1:], ("10.10.11.109", 9876))
 
 
 class ApplicationTests(unittest.TestCase):

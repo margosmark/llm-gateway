@@ -16,6 +16,8 @@ The owner console, credential forms, provider actions, and client API share the
 same listener. `cli.py` refuses wildcard and non-private binds. No setup
 listener or setup-port setting exists. Forwarded headers are rejected rather
 than trusted.
+The gateway port is configurable, but `8766` is reserved and rejected so the
+retired setup port cannot be reused.
 
 ## State boundaries
 

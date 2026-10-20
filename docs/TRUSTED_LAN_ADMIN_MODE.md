@@ -61,6 +61,8 @@ direct requests from a trusted LAN peer are allowed by the product decision.
    flows from trusted-LAN operation. The console must open directly.
 4. Keep the normal API and owner-console paths on port `8765`; do not add a
    redirect, reverse proxy, or new public listener.
+   The gateway port may be configured, but port `8766` is reserved and must be
+   rejected from both CLI and `GATEWAY_PORT` configuration.
 
 ### Console
 

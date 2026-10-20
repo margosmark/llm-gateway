@@ -50,6 +50,10 @@ sessions, or CSRF bootstrap values; cross-origin browser mutations, hostile
 Host values, and forwarded headers remain rejected. Credentials are entered
 only into write-only form fields and are never read back.
 
+The gateway port is configurable with `--port` or `GATEWAY_PORT`, except port
+`8766`, which is reserved and rejected because the retired setup listener must
+not be reused.
+
 ---
 
 ## Quick start
