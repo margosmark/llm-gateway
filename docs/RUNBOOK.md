@@ -29,6 +29,13 @@ docker image inspect personal-llm-gateway:candidate \
   --format '{{index .RepoDigests 0}}'
 ```
 
+A locally built image has no registry digest, so the release gate falls back
+to the **image ID** (`{{.Id}}`), which is the content hash of the image
+config. That value is what gets written to `release.json` and what
+`/version` then reports. If the image is pushed to a registry, the registry
+digest is used instead. Either way the value is immutable and identifies
+exactly one artifact.
+
 ### 1.2 Run the release gate
 
 ```sh
