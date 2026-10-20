@@ -74,7 +74,7 @@ Everything else happens in the browser.
 | Test a provider | Owner console → Providers → *Test connection* |
 | Refresh a catalogue | Owner console → Providers → *Refresh model catalog* |
 | Enable a model | Owner console → Models & Routes |
-| Create or publish an alias | Owner console → Models & Routes |
+| Create, edit, or publish an alias | Owner console → Models & Routes (use **Edit** on an existing alias; its name remains fixed while its route policy is changed) |
 | Manage profile metadata | Owner console → Profiles (does not restrict LAN invocation) |
 | Read status and limits | Owner console → Status |
 
