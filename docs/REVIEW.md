@@ -109,8 +109,8 @@ smoke test which verifies first boot, a persisted config write, and restart.
 Preserve the non-root runtime, read-only root filesystem, and no-new-
 privileges controls.
 
-### R3 — Release gate listener probe does not reliably inspect bind addresses
-**Severity: high.**
+### R3 — Release gate listener probe does not reliably inspect bind addresses — **closed**
+**Severity: high.** *(closed)*
 
 The gate reads `/proc/net/tcp` as raw strings and indexes character positions
 rather than parsing the local address/state fields
@@ -122,6 +122,23 @@ that a wildcard listener is absent. It also does not inspect IPv6.
 a small standard-library socket/proc parser with unit fixtures. Add negative
 fixtures for wildcard IPv4 and IPv6 plus the expected explicit loopback/LAN
 binds.
+
+**Resolution.** The gate now decodes the hexadecimal local address of both
+`/proc/net/tcp` and `/proc/net/tcp6`, and it scopes the result to the
+**gateway process's own sockets** by matching the socket inodes in
+`/proc/<pid>/fd`. That scoping matters: a container with host networking
+shares the host's network namespace, so an unscoped probe reports every
+socket on the machine, including unrelated ones, and cannot attribute a
+listener to the gateway.
+
+The gate additionally asserts that the gateway listens *only* on the
+configured address, which also proves the retired `:8766` port is not bound.
+
+**Evidence:** `tests/test_release_gate.py` — hexadecimal IPv4 and IPv6
+decoding, wildcard recognition in both families, explicit loopback binds,
+non-listening sockets ignored, and process-scoped filtering that excludes a
+wildcard socket belonging to another process. The gate itself now reports
+`listening=[('127.0.0.1', 18775)]` for the candidate.
 
 ### R4 — Published aliases and profile identifiers are insufficiently validated
 **Severity: high correctness/recoverability risk.**
@@ -168,8 +185,8 @@ which makes short-TTL tests misleading.
 **Required fix:** carry the configured expiry/TTL into the session or evaluate
 expiry in `OwnerAuth`; add boundary tests for expiry and pruning.
 
-### R7 — CI artifact recording can fail for locally built images
-**Severity: medium CI robustness risk.**
+### R7 — CI artifact recording can fail for locally built images — **closed**
+**Severity: medium CI robustness risk.** *(closed)*
 
 `image_digest()` has a fallback to the image ID when `RepoDigests` is absent
 (`scripts/release_gate.py:86-94`). The CI workflow independently evaluates
@@ -179,6 +196,10 @@ repo digest, so this reporting step may fail despite a valid image and gate.
 
 **Required fix:** share the release gate's ID/digest resolution logic or make
 the workflow use a safe shell fallback. Test the empty-`RepoDigests` case.
+
+**Resolution.** The workflow now falls back to the image ID when
+`RepoDigests` is empty, so it records the same value the release gate
+resolves and writes into the release identity.
 
 ### R8 — ChatGPT/Codex model refresh violates the shared adapter contract
 **Severity: release blocker for the ChatGPT/Codex onboarding flow.**
