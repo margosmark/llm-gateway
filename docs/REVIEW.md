@@ -280,6 +280,67 @@ response; an unknown, missing or expired handle is refused; the flow is
 unreachable from the API surface; pending, approved and denied states are
 exercised.
 
+### R16 — The upstream conversation session was never supplied — **closed**
+**Severity: release blocker for every OpenCode Go route.** *(closed; found by
+live testing against the provider)*
+
+OpenCode Go **requires** an `x-opencode-session` header and refuses a
+request without one:
+
+```json
+{"type": "error", "error": {"type": "MissingSessionID",
+ "message": "Request is missing x-opencode-session and cannot be routed
+ efficiently"}}
+```
+
+The adapter only set that header when the *client* supplied one, and most
+OpenAI-compatible clients send none, so every request to an OpenCode Go route
+failed at the provider's router.
+
+**Resolution.** The gateway derives the identifier server-side: stable for
+the same client and alias so the provider can cache the conversation,
+different for different clients so two callers cannot collide, validated so a
+caller-supplied hint cannot smuggle bytes upstream or forge another client's
+session, and namespaced by provider so a fallback does not inherit the
+primary's conversation key. The derivation key is per-process, so a restart
+ends the session.
+
+Separately, the safe upstream-code pattern only accepted lowercase, so the
+provider's camel-cased `MissingSessionID` was discarded and a generic `error`
+was reported instead. The pattern now accepts uppercase. The upstream body is
+still never echoed - only the code.
+
+**Evidence:** `tests/test_session_header.py` - the identifier is always
+present and provider-namespaced; it is stable per client and alias; two
+clients differ; a supplied hint is bounded, sanitised and cannot be used to
+collide; a camel-cased upstream code is reported and the body is not echoed.
+
+### R17 — The alias was sent upstream instead of the model id — **closed**
+**Severity: release blocker for every aliased route.** *(closed; found by live
+testing against the provider)*
+
+The client asks for an alias such as `coding`, but the provider only knows
+its own model ids. The gateway forwarded the payload unchanged, so the
+provider received `"model": "coding"` and answered:
+
+```json
+{"error": {"type": "server_error", "message": "Upstream request failed:
+ Model is unavailable."}}
+```
+
+The gateway classified that as a malformed request, which is a confusing
+message for a substitution the gateway owns.
+
+**Resolution.** The router replaces the payload's `model` with the upstream
+model id of the chosen route. The caller's own request is not mutated, and
+the ledger still records the requested alias alongside the provider and
+model that actually served the request.
+
+**Evidence:** `tests/test_upstream_model.py` - the upstream receives the
+provider's model id, the alias does not appear in the upstream payload, the
+caller's mapping is unchanged, and the ledger records both the alias and the
+serving model.
+
 ### R11 — Production `/version` identity is not mechanically published
 **Severity: high release-traceability risk.**
 
