@@ -47,6 +47,7 @@ from gateway.adapters.base import (
     error_from_response,
 )
 from gateway.adapters.http_client import UpstreamClient, parse_json_body
+from gateway.core.capabilities import DIALECT_OPENAI_RESPONSES, ModelInfo
 from gateway.config import ERROR_AUTH, ERROR_TRANSIENT, STATE_CONNECTED, STATE_FAILED
 
 PROVIDER_ID = "chatgpt_codex"
@@ -423,8 +424,15 @@ class ChatGPTCodexAdapter:
             headers["ChatGPT-Account-ID"] = account_id
         return headers
 
-    def list_models(self) -> list:
-        """Fetch the model list. Never called implicitly."""
+    def list_models(self) -> list[ModelInfo]:
+        """Fetch the model list. Never called implicitly.
+
+        The shared adapter contract is ``list[ModelInfo]``, so the generic
+        refresh handler can use this adapter exactly as it uses any other.
+        Only the wire dialect is known for certain: the ChatGPT-authenticated
+        upstream is the Responses protocol. Everything else that depends on
+        the account is reported as unknown rather than guessed.
+        """
         response = self._client.request(
             "GET",
             f"{self._chatgpt_base}{MODELS_PATH}",
@@ -437,11 +445,34 @@ class ChatGPTCodexAdapter:
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
             entries = payload.get("models") if isinstance(payload, dict) else None
-        models = []
+
+        models: list[ModelInfo] = []
         for entry in entries if isinstance(entries, list) else []:
             model_id = entry.get("id") if isinstance(entry, dict) else entry
-            if isinstance(model_id, str) and model_id:
-                models.append(model_id)
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            models.append(
+                ModelInfo(
+                    model_id=model_id,
+                    # The ChatGPT-authenticated upstream is the Responses
+                    # protocol. That is a protocol fact, not a per-account
+                    # guess.
+                    dialect=DIALECT_OPENAI_RESPONSES,
+                    supports_streaming=True,
+                    supports_function_tools=True,
+                    # What an account may actually reach, and at what
+                    # limits, depends on the account. Unknown.
+                    context_window=None,
+                    reasoning_efforts=(),
+                    retention_class="unknown",
+                    limits_source="unknown",
+                    source="discovered",
+                    notes=(
+                        "the wire dialect is known; availability, limits and "
+                        "retention for this account are not published"
+                    ),
+                )
+            )
         return models
 
     def test_connection(self) -> TestResult:
