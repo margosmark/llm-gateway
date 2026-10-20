@@ -1,0 +1,25 @@
+[project]
+name = "personal-llm-gateway"
+version = "2.0.0"
+description = "Personal, LAN-only OpenAI-compatible LLM gateway with provider adapters, alias routing, and safe fallback."
+requires-python = ">=3.11"
+
+# Deliberately empty.
+#
+# The charter forbids introducing dependencies without explicit owner approval,
+# so this project runs on the Python standard library alone: http.server,
+# urllib.request, unittest, hashlib, hmac, secrets, json.
+#
+# There is no [build-system] table either. The package is used from the source
+# tree via PYTHONPATH=src, so there is no build step and nothing to install:
+#
+#   PYTHONPATH=src python3 -m gateway --help
+#
+# The container image installs nothing at all (see Dockerfile).
+dependencies = []
+
+[project.scripts]
+personal-llm-gateway = "gateway.cli:main"
+
+[tool.unittest]
+start-directory = "tests"
