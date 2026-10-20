@@ -53,6 +53,7 @@ from gateway.core.capabilities import (
     Capability,
 )
 from gateway.observability import RequestEvent, utc_now_iso
+from gateway.session import derive_session
 
 #: Maps an error class onto the fallback trigger it satisfies.
 TRIGGER_FOR_ERROR = {
@@ -361,7 +362,7 @@ class Router:
         source_dialect: str = DIALECT_OPENAI_CHAT,
         stream: bool = False,
         request_id: str = "",
-        session_id: str | None = None,
+        session_hint: str | None = None,
         profile_id: str | None = None,
         client_ip: str | None = None,
     ) -> RoutedResponse:
@@ -396,6 +397,11 @@ class Router:
         attribution = Attribution(requested_alias=alias_name)
         last_error: AdapterError | None = None
         started = time.monotonic()
+        # The upstream conversation identifier is derived here, so that every
+        # path that reaches a provider has one - the API surface, the
+        # console's alias test, and any future caller. OpenCode Go refuses a
+        # request without it.
+        conversation = derive_session(profile_id, alias_name, client_ip, session_hint)
 
         for index, candidate in enumerate(eligible):
             is_last = index == len(eligible) - 1
@@ -443,7 +449,7 @@ class Router:
                 # The upstream session identifier is namespaced by provider, so
                 # two providers never share a conversation key and a fallback
                 # does not inherit the primary's session.
-                session_id=(f"{candidate.route.provider}.{session_id}" if session_id else None),
+                session_id=f"{candidate.route.provider}.{conversation}",
                 dialect=candidate.dialect,
                 client_ip=client_ip,
             )
