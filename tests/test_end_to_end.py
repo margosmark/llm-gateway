@@ -388,6 +388,22 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(call.model, "gpt-6-luna")
         self.assertEqual(call.dialect, "openai_responses")
 
+    def test_chat_reasoning_disabled_does_not_require_reasoning_capability(self) -> None:
+        with self.harness.config.mutate() as config:
+            config.providers[FAKE_PROVIDER].models["gpt-6-luna"].reasoning_efforts = []
+        status, payload, _ = self.harness.request(
+            "POST",
+            "/v1/chat/completions",
+            body={
+                "model": "coding",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning": {"enabled": False, "effort": "none"},
+            },
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(len(self.harness.adapter.calls), 1)
+        self.assertNotIn("reasoning_effort", self.harness.adapter.calls[0].payload)
+
     def test_chat_request_is_converted_to_the_responses_dialect(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True

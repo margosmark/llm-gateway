@@ -67,6 +67,18 @@ TRIGGER_FOR_ERROR = {
 OWNER_POLICY_CLASSES = (ERROR_AUTH, ERROR_POLICY, ERROR_MALFORMED)
 
 
+def _requested_reasoning_effort(payload: dict[str, Any]) -> str | None:
+    """Return an enabled reasoning effort, never treating an explicit disable as a capability request."""
+    effort = payload.get("reasoning_effort")
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict):
+        if reasoning.get("enabled") is False:
+            return None
+        if effort is None:
+            effort = reasoning.get("effort")
+    return effort if isinstance(effort, str) and effort != "none" else None
+
+
 class RoutingError(Exception):
     """A routing failure that the caller turns into an HTTP response."""
 
@@ -370,9 +382,7 @@ class Router:
         alias = self.resolve_alias(alias_name)
 
         needs_tools = bool(payload.get("tools"))
-        reasoning_effort = payload.get("reasoning_effort")
-        if reasoning_effort is None and isinstance(payload.get("reasoning"), dict):
-            reasoning_effort = payload["reasoning"].get("effort")
+        reasoning_effort = _requested_reasoning_effort(payload)
 
         candidates = self.candidates(
             alias,
