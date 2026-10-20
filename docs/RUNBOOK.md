@@ -122,26 +122,42 @@ candidate has passed its gates. Cut over side-by-side-safe:
 
 The gateway's state lives in one volume. Rollback is either:
 
-**Rollback the image.** Redeploy the previous digest. The volume is
-compatible, because the configuration format has not changed.
+**Rollback the image.** Redeploy the previous image, without rebuilding
+it, and publish that identity the same way.
 
 ```sh
 docker compose down
-# edit compose.yaml to reference the previous digest, then:
-docker compose up -d
+GATEWAY_IMAGE=personal-llm-gateway:<previous> \
+  python3 scripts/release.py --image personal-llm-gateway:<previous>
 ```
 
-**Rollback the configuration.** The configuration is a single JSON file on the
-volume:
+**Rollback the configuration.** The configuration is a single JSON file on
+the volume. **Back it up before every upgrade**, and restore it explicitly.
 
 ```sh
-docker compose down
-docker run --rm -v personal-llm-gateway-state:/state alpine \
-  cp /state/config.json /state/config.json.before-upgrade
-docker compose up -d
+# before an upgrade
+docker run --rm -v personal-llm-gateway-state:/state \
+  python:3.14-slim cp /state/config.json /state/config.json.before-upgrade
 ```
 
-The credential store is separate and is never touched by a rollback.
+```sh
+# to restore
+docker compose down
+docker run --rm -v personal-llm-gateway-state:/state \
+  python:3.14-slim cp /state/config.json.before-upgrade /state/config.json
+python3 scripts/release.py --image personal-llm-gateway:candidate
+```
+
+Validate the restored file before starting:
+
+```sh
+docker run --rm -v personal-llm-gateway-state:/state \
+  python:3.14-slim python -c "import json;json.load(open('/state/config.json'));print('valid')"
+```
+
+The credential store is a separate file and is never touched by a
+configuration rollback. Tokens the provider has already issued are not
+revoked by a rollback; the gateway will refresh or reject them on its own.
 
 ---
 
