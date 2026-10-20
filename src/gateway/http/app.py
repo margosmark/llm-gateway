@@ -35,7 +35,11 @@ from gateway.config import (
     RouteRef,
     utc_now_iso,
 )
-from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
+from gateway.core.capabilities import (
+    DIALECT_OPENAI_CHAT,
+    DIALECT_OPENAI_RESPONSES,
+    alias_context_limit,
+)
 from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
@@ -501,6 +505,8 @@ class GatewayApp:
                         "source": entry.source,
                         "observed_at": entry.observed_at,
                         "retention_class": entry.retention_class,
+                        "context_window": entry.context_window,
+                        "context_limit": entry.context_limit,
                         "monthly_limit_usd": entry.monthly_limit_usd,
                         "limits_source": entry.limits_source,
                         "notes": entry.notes,
@@ -523,6 +529,11 @@ class GatewayApp:
         aliases = []
         for name in sorted(config.aliases):
             alias = config.aliases[name]
+            route_limits: list[tuple[str, int | None]] = []
+            for ref in alias.all_routes():
+                provider = config.providers.get(ref.provider)
+                entry = provider.models.get(ref.model) if provider else None
+                route_limits.append((ref.label(), entry.context_limit if entry else None))
             aliases.append(
                 {
                     "name": alias.name,
@@ -534,6 +545,7 @@ class GatewayApp:
                     "fallback_confirmed_providers": list(alias.fallback_confirmed_providers),
                     "fallback_error_classes": list(alias.fallback_error_classes),
                     "cooldown_seconds": alias.cooldown_seconds,
+                    "context_limit": alias_context_limit(route_limits),
                 }
             )
 
@@ -659,6 +671,7 @@ class GatewayApp:
                         supports_builtin_tools=info.supports_builtin_tools,
                         supports_image_input=info.supports_image_input,
                         context_window=info.context_window,
+                        context_limit=info.context_limit,
                         retention_class=info.retention_class,
                         monthly_limit_usd=info.monthly_limit_usd,
                         limits_source=info.limits_source,

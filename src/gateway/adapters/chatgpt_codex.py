@@ -48,7 +48,12 @@ from gateway.adapters.base import (
     error_from_response,
 )
 from gateway.adapters.http_client import UpstreamClient, parse_json_body
-from gateway.core.capabilities import DIALECT_OPENAI_RESPONSES, ModelInfo
+from gateway.core.capabilities import (
+    DIALECT_OPENAI_RESPONSES,
+    ModelInfo,
+    effective_context_limit,
+    resolve_context_window,
+)
 from gateway.config import ERROR_AUTH, ERROR_TRANSIENT, STATE_CONNECTED, STATE_FAILED
 
 PROVIDER_ID = "chatgpt_codex"
@@ -510,9 +515,16 @@ class ChatGPTCodexAdapter:
                 elif isinstance(level, str) and level and level not in efforts:
                     efforts.append(level)
 
-            context_window = entry.get("context_window")
-            if not isinstance(context_window, int):
-                context_window = entry.get("max_context_window")
+            # The provider publishes a working window and a ceiling for
+            # config overrides. The smaller is the window that applies by
+            # default, and the provider reserves a share of it for its own
+            # system prompt, tool overhead and output.
+            context_window = resolve_context_window(
+                entry.get("context_window"), entry.get("max_context_window")
+            )
+            context_limit = effective_context_limit(
+                context_window, entry.get("effective_context_window_percent")
+            )
 
             notes: list[str] = []
             visibility = entry.get("visibility")
@@ -530,7 +542,8 @@ class ChatGPTCodexAdapter:
                     supports_function_tools=True,
                     # What an account may actually reach, and at what
                     # limits, depends on the account. Unknown.
-                    context_window=context_window if isinstance(context_window, int) else None,
+                    context_window=context_window,
+                    context_limit=context_limit,
                     reasoning_efforts=tuple(efforts),
                     retention_class="unknown",
                     limits_source="unknown",

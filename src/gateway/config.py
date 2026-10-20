@@ -131,6 +131,7 @@ class ModelEntry:
     supports_builtin_tools: bool = False
     supports_image_input: bool = False
     context_window: int | None = None
+    context_limit: int | None = None
     retention_class: str = "unknown"
     monthly_limit_usd: float | None = None
     limits_source: str = "unknown"
@@ -174,6 +175,7 @@ class ModelEntry:
             supports_builtin_tools=bool(data.get("supports_builtin_tools", False)),
             supports_image_input=bool(data.get("supports_image_input", False)),
             context_window=as_int("context_window"),
+            context_limit=as_int("context_limit"),
             retention_class=str(data.get("retention_class") or "unknown"),
             monthly_limit_usd=as_float("monthly_limit_usd"),
             limits_source=str(data.get("limits_source") or "unknown"),

@@ -174,6 +174,31 @@ routes it excluded and why. It never silently serves a different model.
 
 ---
 
+## Context limits
+
+A provider publishes a **working context window** and a **ceiling for
+config overrides** (`max_context_window`), and reserves a share of the
+window for its own system prompt, tool overhead and output. The number a
+client can rely on is the smallest of those constraints:
+
+```text
+gpt-6-luna:  context_window 272,000
+              max_context_window 872,000   ← a ceiling for overrides, not a competing limit
+              effective limit 258,400       ← 272,000 less the provider's 5% headroom
+```
+
+At the **alias** level the same rule applies, and it matters more: an alias
+may be served by a fallback, so its limit is the **smallest limit among the
+routes that could serve it**. If any eligible route's limit is not
+published, the alias's limit is **Unknown** - a bound that cannot be
+verified is not a bound. An alias that mixes a ChatGPT route with an
+OpenCode Go route therefore reports Unknown, because the Go provider
+publishes no context windows.
+
+The limit is **reported, not enforced**. The gateway has no tokenizer, so
+it does not count a prompt's tokens; the provider is the authority on what
+fits, and a prompt that is too long fails upstream as a malformed request.
+
 ## Profiles and clients
 
 LAN API invocation is anonymous by design. On a fresh zero-profile installation,
