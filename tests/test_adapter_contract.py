@@ -44,7 +44,7 @@ class ScriptedUpstream:
         self.body = body
         self.requests: list[dict] = []
 
-    def request(self, method, url, headers, body=None, stream=False, provider_id=""):
+    def request(self, method, url, headers, body=None, stream=False, provider_id="", **kwargs):
         self.requests.append({"method": method, "url": url, "headers": headers})
         return UpstreamResponse(200, {}, self.body, None, "application/json")
 

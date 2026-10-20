@@ -154,6 +154,8 @@ class OpenCodeGoAdapter:
             f"{self._base_url}{CATALOG_PATH}",
             headers=self._headers(),
             provider_id=PROVIDER_ID,
+            # A catalogue read may be repeated freely.
+            retry_safe=True,
         )
         if response.status >= 400:
             raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body))
