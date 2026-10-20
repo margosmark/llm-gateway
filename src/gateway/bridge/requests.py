@@ -49,6 +49,19 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _without_disabled_reasoning(payload: dict[str, Any]) -> dict[str, Any]:
+    """Copy a same-dialect payload without non-portable disabled-reasoning controls."""
+    forwarded = dict(payload)
+    reasoning = forwarded.get("reasoning")
+    disabled = forwarded.get("reasoning_effort") == "none"
+    if isinstance(reasoning, dict):
+        disabled = disabled or reasoning.get("enabled") is False or reasoning.get("effort") == "none"
+    if disabled:
+        forwarded.pop("reasoning", None)
+        forwarded.pop("reasoning_effort", None)
+    return forwarded
+
+
 def _chat_content_to_parts(content: Any) -> list[ContentPart]:
     """Convert Chat Completions message content into content parts."""
     if content is None:
@@ -493,7 +506,7 @@ def to_responses(request: NormalisedRequest) -> dict[str, Any]:
 def convert_request(payload: dict[str, Any], source: str, target: str) -> dict[str, Any]:
     """Convert a request between two dialects."""
     if source == target:
-        return dict(payload)
+        return _without_disabled_reasoning(payload)
     if source == DIALECT_OPENAI_CHAT and target == DIALECT_OPENAI_RESPONSES:
         return to_responses(from_chat_completions(payload))
     if source == DIALECT_OPENAI_RESPONSES and target == DIALECT_OPENAI_CHAT:

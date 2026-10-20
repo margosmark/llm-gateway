@@ -127,6 +127,19 @@ class RequestConversionTests(unittest.TestCase):
         )
         self.assertEqual(as_responses["reasoning"], {"effort": "high"})
 
+    def test_disabled_reasoning_is_not_forwarded_to_same_dialect(self) -> None:
+        forwarded = convert_request(
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning": {"enabled": False, "effort": "none"},
+            },
+            DIALECT_OPENAI_CHAT,
+            DIALECT_OPENAI_CHAT,
+        )
+        self.assertNotIn("reasoning", forwarded)
+        self.assertNotIn("reasoning_effort", forwarded)
+
     def test_stateful_continuation_is_refused_by_chat_dialect(self) -> None:
         with self.assertRaises(ConversionError) as ctx:
             convert_request(
