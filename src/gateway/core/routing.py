@@ -427,6 +427,13 @@ class Router:
                 attribution.fallback_used = True
                 continue
 
+            # The client asked for an *alias*. The provider only knows its
+            # own model ids, so the payload must carry the upstream model
+            # id, never the alias. Sending the alias upstream makes the
+            # provider answer "model is unavailable".
+            upstream_payload = dict(upstream_payload)
+            upstream_payload["model"] = candidate.route.model
+
             request = ProviderRequest(
                 model=candidate.route.model,
                 payload=upstream_payload,
