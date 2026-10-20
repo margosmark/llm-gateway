@@ -33,14 +33,29 @@ never breaks your client's configuration.
 
 | Surface | Address | Who can reach it | What it does |
 |---|---|---|---|
-| Owner console | `http://10.10.11.109:8765/owner/` | LAN | Safe status without a session; full configuration with the owner passphrase |
-| Setup UI | `http://127.0.0.1:8766/setup/` | **The host only** (or an SSH tunnel) | Credential enrolment, provider tests, catalogue refresh |
+| Owner console | `http://10.10.11.109:8765/owner/` | LAN | Safe status without a session. Read-only in LAN no-auth mode; configurable with the owner passphrase in authenticated mode |
+| Setup UI | `http://127.0.0.1:8766/setup/` | **The host only** (or an SSH tunnel) | Everything: credential enrolment, provider tests, catalogue refresh, and all configuration |
 | API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
 
 The gateway binds an **explicit private address**. A wildcard bind is refused
 at startup, and there is no flag that enables one. It never creates a
 firewall or router rule, and it is never publicly exposed.
+
+### Where the configuration happens
+
+The setup UI and the owner console are the **same application** on two
+listeners. The setup UI is mounted on loopback, so it is reachable from the
+host itself or through an SSH tunnel, and nowhere else.
+
+* In **LAN no-auth mode** the owner console is read-only, even with the
+  passphrase — otherwise any host on the network could reconfigure the
+  gateway. All configuration happens in the setup UI.
+* In **authenticated mode** the owner console is configurable once you sign
+  in, but credential enrolment is still setup-only.
+
+Either way, **a credential can only ever be entered on the setup UI.** The
+owner console shows that a credential is stored, never its value.
 
 ---
 

@@ -117,6 +117,9 @@ class GatewayApp:
         #: separate listeners because a wildcard bind is forbidden, so
         #: 127.0.0.1 is only reachable if something binds it explicitly.
         self.mounts = mounts
+        #: Device authorisations in flight, keyed by their device auth id.
+        #: Held in memory only; nothing about them is persisted.
+        self._pending_device: dict[str, Any] = {}
         self._routes = HttpRouter()
         self._build_routes()
 
@@ -813,8 +816,6 @@ class GatewayApp:
         return json_response(
             {"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400
         )
-
-    _pending_device: dict[str, Any] = {}
 
     def _publish_limits(self, provider_id: str, observed_at: str) -> None:
         """Record the published limits as limit snapshots.
