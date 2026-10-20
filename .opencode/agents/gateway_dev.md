@@ -7,21 +7,24 @@ safe change that preserves the browser-managed, LAN-only gateway boundary.
 Read `README.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, and any
 relevant provider contract before editing. Treat `docs/REVIEW.md` as an open
 finding register, not as proof that a finding is fixed.
+Read `docs/TRUSTED_LAN_ADMIN_MODE.md` before modifying listeners, owner
+actions, authentication, or console flows.
 
 ## Non-negotiable boundaries
 
 - This is private LAN infrastructure. Bind only an explicit private or
   loopback address. Never add a wildcard bind, public address, router/firewall
   rule, or public reverse proxy.
-- Preserve the two-listener design: LAN owner/API surface and separately bound
-  setup surface. `GATEWAY_SETUP_BIND` may be private-LAN or loopback, never
-  wildcard/public; raw credential enrollment stays setup-only and requires an
-  owner session in either mode.
-- Never allow an unauthenticated LAN client to claim the first owner
-  passphrase. First-boot passphrase enrollment must be loopback-only or use an
-  explicitly provisioned bootstrap secret outside the LAN browser surface.
-- Reject, rather than trust, forwarded/proxy headers. Preserve canonical Host,
-  Origin, owner-session, and CSRF checks for browser mutations.
+- Implement the approved single-listener trusted-LAN product: one explicit
+  private address hosts the owner console, configuration, credential forms,
+  and API. Do not restore `GATEWAY_SETUP_BIND`, `:8766`, a login page, owner
+  passphrase, session cookie, or loopback/SSH bootstrap.
+- Any device that can reach the configured LAN address is intentionally an
+  administrator and caller. Render that warning visibly and do not imply that
+  passwords or profiles restrict administrative access.
+- Reject, rather than trust, forwarded/proxy headers. Preserve canonical Host
+  and Origin checks; cross-site browser mutations must remain refused even
+  though valid trusted-LAN requests have no owner session or CSRF token.
 - Do not introduce a dependency, external database, background provider probe,
   analytics service, or automatic provider test without explicit approval.
 - Never use, inspect, print, copy, commit, or create fixtures from real
@@ -53,10 +56,10 @@ finding register, not as proof that a finding is fixed.
   for streams, tools/side effects, ambiguous delivery, and unsafe errors.
   Fail closed rather than silently choose another model.
 - Make provider/device-flow identifiers short-lived and scoped. Return only
-  the opaque data the active setup flow needs; never return stored access,
-  refresh, ID, caller, or API tokens after storage. Device start, poll, and
-  token exchange are credential-enrollment actions: require the setup surface
-  and owner session, bind pending state to that session, show a user code once,
+  the opaque data the active trusted-console flow needs; never return stored
+  access, refresh, ID, caller, or API tokens after storage. Device start,
+  poll, and token exchange are credential-enrollment actions: require the
+  trusted console, retain pending state only in memory, show a user code once,
   and honor the provider polling interval.
 - Preserve response dialects on both buffered and streaming paths. A converted
   request needs the corresponding converted response, or an explicit refusal;
@@ -98,8 +101,8 @@ finding register, not as proof that a finding is fixed.
   running service's `/version` response.
 - Verify live deployment behavior from outside the container only when a
   deployment is explicitly authorized. Check `/health`, fixed-schema
-  `/version`, intended listener addresses, and setup reachability exactly
-  matches `GATEWAY_SETUP_BIND`.
+  `/version`, intended listener addresses, direct console use with no login,
+  and the absence of a setup listener on `:8766`.
 - Update README/runbook/architecture/contract material when a behavior,
   endpoint, UI label, security invariant, or deployment procedure changes.
   Close a finding in `docs/REVIEW.md` only with a cited fix and regression
