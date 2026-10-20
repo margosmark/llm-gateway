@@ -104,13 +104,16 @@ Everything else happens in the browser.
 | Connect a provider | Setup UI → Providers |
 | Test a provider | Setup UI → Providers → *Test connection* |
 | Refresh a catalogue | Setup UI → Providers → *Refresh model catalog* |
-| Enable a model | Console → Models & Routes |
-| Create or publish an alias | Console → Models & Routes |
-| Issue a caller token | Console → Profiles (authenticated mode) |
-| Read status and limits | Console → Status |
+| Enable a model | Setup UI in LAN no-auth mode; owner console only in authenticated mode |
+| Create or publish an alias | Setup UI in LAN no-auth mode; owner console only in authenticated mode |
+| Issue a caller token | Setup UI in LAN no-auth mode; owner console only in authenticated mode |
+| Read status and limits | Owner console or Setup UI → Status |
 
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load never calls a provider.
+
+The OpenCode Go key form stores a key only. Select **Test connection** after
+storing it; saving a key never makes an implicit upstream call.
 
 ---
 
