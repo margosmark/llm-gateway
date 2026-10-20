@@ -24,6 +24,19 @@ from gateway.observability import LimitStore, RequestLedger
 
 DEFAULT_DATA_DIR = "/var/lib/gateway"
 DEFAULT_PORT = 8765
+RETIRED_SETUP_PORT = 8766
+
+
+def _gateway_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if port == RETIRED_SETUP_PORT:
+        raise argparse.ArgumentTypeError(
+            "port 8766 is reserved and cannot be used; choose another gateway port"
+        )
+    return port
 
 
 def _is_wildcard(host: str) -> bool:
@@ -59,7 +72,7 @@ def _is_private_or_loopback(host: str) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="personal-llm-gateway", description="Trusted-LAN OpenAI-compatible LLM gateway.")
     parser.add_argument("--host", default=os.environ.get("GATEWAY_BIND", "127.0.0.1"), help="Explicit private address to bind; wildcard binds are refused.")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("GATEWAY_PORT", DEFAULT_PORT)), help="Port for the gateway listener.")
+    parser.add_argument("--port", type=_gateway_port, default=os.environ.get("GATEWAY_PORT", str(DEFAULT_PORT)), help="Port for the gateway listener; 8766 is reserved.")
     parser.add_argument("--data-dir", default=os.environ.get("GATEWAY_DATA_DIR", DEFAULT_DATA_DIR), help="Directory holding configuration and credentials.")
     parser.add_argument("--print-url", action="store_true", help="Print gateway URLs and exit.")
     return parser

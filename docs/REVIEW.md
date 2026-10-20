@@ -318,3 +318,11 @@ The focused suite currently exercises the direct console, same-origin mutation,
 cross-origin refusal, hostile Host/forwarded-header rejection, anonymous fresh
 API behavior, and write-only credential state. Deployment/image/volume claims
 remain unverified here.
+
+The retired setup-port reuse finding is fixed in `gateway.cli`: `--port` and
+`GATEWAY_PORT` both reject `8766` during argument parsing with an actionable
+error, before application construction or listener startup. Regression tests
+`test_reserved_setup_port_is_rejected_from_cli_before_startup`,
+`test_reserved_setup_port_is_rejected_from_environment_before_startup`, and
+`test_allowed_explicit_private_port_remains_configurable` cover refusal and
+the valid configurable-port path.
