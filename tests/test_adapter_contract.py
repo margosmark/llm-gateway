@@ -85,6 +85,26 @@ class AdapterContractTests(unittest.TestCase):
         self.assertEqual(model.retention_class, "unknown")
         self.assertEqual(model.limits_source, "unknown")
 
+    def test_the_model_list_request_carries_the_client_version(self) -> None:
+        """The Codex client appends its version, and the backend expects it."""
+        from gateway.adapters.chatgpt_codex import CHATGPT_CLIENT_VERSION
+
+        store = self._store()
+        store.provider_handle("chatgpt_codex").write({"access_token": "synthetic"})
+        upstream = ScriptedUpstream(json.dumps({"models": [{"id": "gpt-6-luna"}]}).encode())
+        adapter = ChatGPTCodexAdapter(
+            store.provider_handle("chatgpt_codex"), client=upstream
+        )
+        adapter.list_models()
+        url = upstream.requests[0]["url"]
+        self.assertIn("/models", url)
+        self.assertIn(f"client_version={CHATGPT_CLIENT_VERSION}", url)
+
+    def test_the_client_version_is_a_whole_semantic_version(self) -> None:
+        from gateway.adapters.chatgpt_codex import CHATGPT_CLIENT_VERSION
+
+        self.assertRegex(CHATGPT_CLIENT_VERSION, r"^\d+\.\d+\.\d+$")
+
     def test_the_opencode_go_adapter_returns_model_info(self) -> None:
         payload = json.dumps({"data": [{"id": "gpt-6-luna"}, {"id": "mimo-v2.6-flash"}]}).encode()
         adapter = OpenCodeGoAdapter(

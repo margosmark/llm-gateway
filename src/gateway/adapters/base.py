@@ -256,8 +256,13 @@ def error_from_response(
     body: bytes | None,
     provider_id: str,
     payload: Any = None,
+    operation: str | None = None,
 ) -> AdapterError:
-    """Build a classified, safe error from an upstream response."""
+    """Build a classified, safe error from an upstream response.
+
+    *operation* names what was being attempted, so a failure says which
+    upstream call it was rather than only how it was classified.
+    """
     code = _extract_upstream_code(payload)
     error_class = classify_status(status, payload, code)
     message = CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
@@ -267,6 +272,8 @@ def error_from_response(
     if code:
         details.append(f"upstream code: {code}")
     message = f"{message} ({'; '.join(details)})"
+    if operation:
+        message = f"{operation}: {message}"
     return AdapterError(
         error_class=error_class,
         message=message,
