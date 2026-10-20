@@ -1,0 +1,86 @@
+{
+  "_comment": "Golden corpus for the Responses <-> Chat Completions bridge. Recorded provider-shaped payloads (fake data only - no real prompts, responses, credentials or tokens) with the expected normalised forms. Extended with owner-sanitised real captures as the bridge gains coverage.",
+  "cases": [
+    {
+      "name": "simple_text",
+      "chat_request": {
+        "model": "m",
+        "messages": [{ "role": "user", "content": "hello" }]
+      },
+      "chat_request_round_trip": {
+        "messages": [{ "role": "user", "content": "hello" }]
+      },
+      "chat_stream": [
+        { "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m",
+          "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "Hello" }, "finish_reason": null }] },
+        { "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m",
+          "choices": [{ "index": 0, "delta": { "content": " world" }, "finish_reason": null }] },
+        { "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m",
+          "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }
+      ],
+      "stream_text": "Hello world"
+    },
+    {
+      "name": "system_and_function_tool",
+      "chat_request": {
+        "model": "m",
+        "messages": [
+          { "role": "system", "content": "Be terse." },
+          { "role": "user", "content": "hi" }
+        ],
+        "tools": [
+          { "type": "function", "function": { "name": "lookup", "description": "d", "parameters": { "type": "object" } } }
+        ]
+      },
+      "chat_request_round_trip": {
+        "messages": [
+          { "role": "system", "content": "Be terse." },
+          { "role": "user", "content": "hi" }
+        ],
+        "tools": [
+          { "type": "function", "function": { "name": "lookup", "description": "d", "parameters": { "type": "object" } } }
+        ]
+      },
+      "chat_stream": [
+        { "id": "c2", "object": "chat.completion.chunk", "created": 1, "model": "m",
+          "choices": [{ "index": 0, "delta": { "tool_calls": [
+            { "index": 0, "id": "call_1", "type": "function", "function": { "name": "lookup", "arguments": "" } }
+          ] }, "finish_reason": null }] },
+        { "id": "c2", "object": "chat.completion.chunk", "created": 1, "model": "m",
+          "choices": [{ "index": 0, "delta": { "tool_calls": [
+            { "index": 0, "function": { "arguments": "{\"q\":\"x\"}" } }
+          ] }, "finish_reason": null }] },
+        { "id": "c2", "object": "chat.completion.chunk", "created": 1, "model": "m",
+          "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] }
+      ],
+      "stream_text": ""
+    },
+    {
+      "name": "tool_call_and_result",
+      "chat_request": {
+        "model": "m",
+        "messages": [
+          { "role": "assistant", "content": null, "tool_calls": [
+            { "id": "call_1", "type": "function", "function": { "name": "lookup", "arguments": "{}" } }
+          ] },
+          { "role": "tool", "tool_call_id": "call_1", "content": "42" }
+        ]
+      },
+      "chat_request_round_trip": {
+        "messages": [
+          { "role": "assistant", "content": null, "tool_calls": [
+            { "id": "call_1", "type": "function", "function": { "name": "lookup", "arguments": "{}" } }
+          ] },
+          { "role": "tool", "tool_call_id": "call_1", "content": "42" }
+        ]
+      },
+      "chat_stream": [
+        { "id": "c3", "object": "chat.completion.chunk", "created": 1, "model": "m",
+          "choices": [{ "index": 0, "delta": { "content": "done" }, "finish_reason": null }] },
+        { "id": "c3", "object": "chat.completion.chunk", "created": 1, "model": "m",
+          "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }
+      ],
+      "stream_text": "done"
+    }
+  ]
+}
