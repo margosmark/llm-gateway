@@ -212,9 +212,9 @@ def main(argv: list[str]) -> int:
             "-e",
             "GATEWAY_BIND=127.0.0.1",
             "-e",
-            "GATEWAY_PORT=18765",
+            "GATEWAY_PORT=18775",
             "-e",
-            "GATEWAY_SETUP_PORT=18766",
+            "GATEWAY_SETUP_PORT=18776",
             reference,
         ],
         timeout=60,
@@ -225,11 +225,23 @@ def main(argv: list[str]) -> int:
         return 1
     gate.record("the candidate container starts", True)
 
-    base = "http://127.0.0.1:18765"
+    base = "http://127.0.0.1:18775"
     try:
         reachable = wait_for(base + "/health")
-        gate.record("the candidate answers /health", reachable)
-        if not reachable:
+        # The probe must have reached *this* container. A stray listener on
+        # the same port would otherwise make the gate pass against the wrong
+        # process - which is exactly what happened once during development.
+        state = run(["docker", "inspect", container, "--format", "{{.State.Running}}"])
+        running = state.stdout.strip() == "true"
+        gate.record(
+            "the candidate container is still running",
+            running,
+            state.stdout.strip() or state.stderr.strip()[:120],
+        )
+        gate.record("the candidate answers /health", reachable and running)
+        if not reachable or not running:
+            logs = run(["docker", "logs", "--tail", "20", container])
+            print(logs.stdout or logs.stderr, file=sys.stderr)
             print(json.dumps(gate.to_dict(), indent=2))
             return 1
 
