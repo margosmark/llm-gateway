@@ -24,7 +24,10 @@ class ProfileAuth:
             profile_id=ANONYMOUS_PROFILE_ID,
             name="Anonymous LAN profile",
             enabled=True,
-            allowed_aliases=sorted(alias.name for alias in config.published_aliases()),
+            # LAN API invocation is anonymous by design, so this profile is
+            # explicitly granted every published alias.
+            all_aliases=True,
+            allowed_aliases=[],
             anonymous=True,
         )
 
@@ -69,9 +72,12 @@ class ProfileAuth:
 def profile_allows(profile: Profile, alias_name: str) -> bool:
     """Whether a profile may use an alias.
 
-    A profile with no explicit allow-list may use every published alias.
+    A profile **denies by default**. It may use an alias it was explicitly
+    granted, or any published alias when the owner granted access to all of
+    them with the separate, explicit flag. An empty allow-list is not a
+    grant.
     """
-    if not profile.allowed_aliases:
+    if profile.all_aliases:
         return True
     return alias_name in profile.allowed_aliases
 

@@ -322,6 +322,10 @@ class Profile:
     name: str
     enabled: bool = True
     allowed_aliases: list[str] = field(default_factory=list)
+    #: Whether this profile may use every published alias. It is **not** the
+    #: default: a new profile denies until the owner grants access, either
+    #: alias by alias or with this explicit flag.
+    all_aliases: bool = False
     routing_policy: dict[str, Any] = field(default_factory=dict)
     #: Whether a caller token exists. The token *hash* lives in the credential
     #: store, never in the configuration, so no config read can leak it.
@@ -336,6 +340,7 @@ class Profile:
             "name": self.name,
             "enabled": self.enabled,
             "allowed_aliases": list(self.allowed_aliases),
+            "all_aliases": self.all_aliases,
             "routing_policy": dict(self.routing_policy),
             "has_token": self.has_token,
             "token_created_at": self.token_created_at,
@@ -358,6 +363,7 @@ class Profile:
             name=name,
             enabled=bool(data.get("enabled", True)),
             allowed_aliases=allowed,
+            all_aliases=bool(data.get("all_aliases", False)),
             routing_policy=dict(policy) if isinstance(policy, dict) else {},
             has_token=bool(data.get("has_token", False)),
             token_created_at=(
