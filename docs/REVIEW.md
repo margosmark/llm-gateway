@@ -2,7 +2,7 @@
 
 ## Scope and evidence
 
-This review covers the repository at commit `a4ab1ef` before the documentation
+This review covers the repository through `c577b50` plus the documentation
 changes listed below. It is a static code review plus local, credential-free
 verification; it is **not** a provider-account or deployed-container test.
 
@@ -10,7 +10,7 @@ Verified locally:
 
 ```text
 PYTHONPATH=src python3 -m unittest discover -s tests -q
-Ran 181 tests ... OK
+Ran 197 tests ... OK
 
 python3 -m compileall -q src tests
 OK
@@ -29,8 +29,9 @@ runtime-verified here.
   be owner-only.
 * Browser controls are layered: canonical Host, forwarded-header rejection,
   origin validation for browser mutations, owner sessions, and CSRF.
-* Setup is a separate loopback listener and credential enrollment is rejected
-  on the LAN console.
+* Setup is a separate listener and credential enrollment is rejected on the
+  owner console. It is owner-session/CSRF protected whether the operator
+  binds it privately to LAN (default) or loopback.
 * Cross-provider fallback is opt-in and has hard stops for tools and unsafe
   classes. The test suite covers most of those safety decisions.
 * `/version` has a deliberately fixed, metadata-only schema.
@@ -39,6 +40,23 @@ These are code/test observations, not a claim that a provider account or a
 container deployment has been exercised.
 
 ## Findings requiring implementation work
+
+### R0 — A LAN client can claim the first owner passphrase
+**Severity: release blocker for LAN-reachable first boot.**
+
+Setup now binds to the private LAN address by default (`src/gateway/cli.py:159-
+162` and `compose.yaml:30-36`). When no passphrase exists,
+`handle_login` accepts any request reaching the setup surface and immediately
+stores the submitted passphrase (`src/gateway/http/app.py:467-490`). There is
+no prior owner session by definition and no loopback/bootstrap check in that
+branch. A different LAN host can therefore become the owner before the
+intended owner visits setup.
+
+**Required fix:** make initial passphrase creation loopback-only even if later
+setup is LAN-reachable, or require an explicit out-of-band bootstrap secret.
+Add a LAN-peer refusal test for uninitialized setup plus a successful
+loopback/bootstrap test. Until then, bind setup to `127.0.0.1` for first boot
+and switch only after the passphrase exists.
 
 ### R1 — ChatGPT/Codex device flow cannot complete in the current UI
 **Severity: release blocker for the ChatGPT/Codex setup flow.**
@@ -145,6 +163,15 @@ repo digest, so this reporting step may fail despite a valid image and gate.
 **Required fix:** share the release gate's ID/digest resolution logic or make
 the workflow use a safe shell fallback. Test the empty-`RepoDigests` case.
 
+### R8 — Setup-surface helper text still claims host-only access
+**Severity: low documentation/UI honesty defect.**
+
+When credential enrollment is unavailable, the browser says setup is reachable
+only from the host or an SSH tunnel (`src/gateway/static/console.js:563-566`).
+That conflicts with the configurable LAN setup listener. It should render the
+actual setup base URL or say "the configured setup listener" without
+inventing a host-only restriction.
+
 ## Documentation corrections made in this review
 
 * `README.md` no longer claims the gateway never stores operational
@@ -152,8 +179,9 @@ the workflow use a safe shell fallback. Test the empty-`RepoDigests` case.
   data.
 * The fresh-install text now accurately says provider cards exist while
   credentials and discovered/published models do not.
-* OpenCode Go setup now says Save, then explicit Test connection—the UI does
-  not test as part of saving.
+* OpenCode Go setup now accurately says **Save and test**: that explicit UI
+  action stores then tests the key, while ordinary page loads never call a
+  provider.
 * `RUNBOOK.md` now reflects the actual default: in LAN no-auth mode all
   mutation remains in setup, not the LAN owner console.
 * `ARCHITECTURE.md` and `DEVELOPMENT.md` establish the verified runtime map,
@@ -161,12 +189,13 @@ the workflow use a safe shell fallback. Test the empty-`RepoDigests` case.
 
 ## Recommended order
 
-1. Fix and test **R1** before presenting ChatGPT/Codex setup as usable.
-2. Fix/prove **R2**, then run a real Compose deployment test before any live
+1. Fix and test **R0** before allowing LAN-reachable first boot.
+2. Fix and test **R1** before presenting ChatGPT/Codex setup as usable.
+3. Fix/prove **R2**, then run a real Compose deployment test before any live
    release.
-3. Repair **R3** and **R7** so release evidence is trustworthy.
-4. Tighten **R4**, then make observability truthful and complete in **R5**.
-5. Fix **R6** with its targeted tests.
+4. Repair **R3** and **R7** so release evidence is trustworthy.
+5. Tighten **R4**, then make observability truthful and complete in **R5**.
+6. Fix **R6** and **R8** with their targeted tests.
 
 No provider credentials, provider calls, subscriptions, or deployment state
 were accessed during this review.

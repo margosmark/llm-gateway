@@ -32,7 +32,7 @@ Before changing code, identify the boundary being touched:
 
 | Change | Required checks |
 |---|---|
-| HTTP/browser surface | Host, Origin, forwarded-header, loopback, session, and CSRF tests |
+| HTTP/browser surface | Host, Origin, forwarded-header, configured setup bind, session, and CSRF tests |
 | Credential/auth path | no secret in config/state/log/error; private-file permissions; one-time token/code behavior |
 | Adapter | explicit connection/catalog action; safe error classification; no redirect/credential leak; fixture-based tests |
 | Router/bridge | capability compatibility; fallback hard stops; stream and tool-bearing behavior |
@@ -54,7 +54,7 @@ developing or reviewing the code.
 
 A credential may cross only this narrow path:
 
-1. owner-controlled setup UI on loopback;
+1. owner-controlled setup UI on its separately configured private listener;
 2. request body handled by the relevant adapter action;
 3. owner-only credential store;
 4. provider adapter request headers.
@@ -85,7 +85,8 @@ The release gate is necessary but not enough: it runs a disposable container.
 Before a deployment can be approved, separately prove the Compose deployment
 with its **actual named state volume** can start as UID/GID `10001`, write
 `config.json` and credentials, expose the LAN listener only on the intended
-private address, and keep setup on `127.0.0.1`. Then verify externally:
+private address, and expose setup only on the explicit `GATEWAY_SETUP_BIND`
+address. Then verify externally:
 
 ```sh
 curl -sS http://<private-ip>:<port>/health

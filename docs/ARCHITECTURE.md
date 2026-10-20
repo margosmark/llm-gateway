@@ -12,17 +12,18 @@ The gateway starts two independent standard-library HTTP servers from
 | Listener | Default bind | Mount | Purpose |
 |---|---|---|---|
 | LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version` | owner console and OpenAI-compatible client API |
-| setup | `127.0.0.1`, port `8766` | `/setup/`, `/health`, `/version`, `/v1/` | loopback-only setup surface |
+| setup | LAN bind by default; configurable, port `8766` | `/setup/`, `/health`, `/version`, `/v1/` | protected setup surface |
 
 The setup and LAN applications share one configuration store, credential
 store, adapter registry, router, owner-session authority, request ledger, and
 limit store. They differ only in their mounted browser surface and the
 canonical host/origin policy. `cli.py` refuses wildcard and non-private binds.
 
-The setup route is independently guarded by the actual peer address. A request
-to `/setup/` from a non-loopback address is rejected; it is not protected by a
-client-supplied forwarding header. Forwarded headers are rejected rather than
-trusted.
+`GATEWAY_SETUP_BIND` controls where setup binds. It defaults to the explicit
+LAN bind address; set it to `127.0.0.1` for host-only setup. In either mode it
+uses its own listener, canonical-host/origin checks, owner session, and CSRF.
+The loopback peer-address check applies only when the listener is configured
+to bind loopback. Forwarded headers are rejected rather than trusted.
 
 ## State boundaries
 
@@ -53,15 +54,17 @@ audit or billing system.
 ### Browser configuration
 
 1. A browser reaches `/setup/` or `/owner/` on its canonical listener.
-2. `GatewayApp.handle` rejects forwarded headers, invalid `Host`, invalid
-   `Origin` for browser mutations, and non-loopback setup requests.
+2. `GatewayApp.handle` rejects forwarded headers, invalid `Host`, and invalid
+   `Origin` for browser mutations. It also rejects non-loopback peers when
+   setup is explicitly configured as a loopback-only listener.
 3. Owner login establishes an `HttpOnly`, `SameSite=Strict` session cookie and
    a separate CSRF cookie. Mutating browser requests require a matching CSRF
    header and an owner session.
 4. In default LAN no-auth mode the LAN owner console is deliberately
    read-only; configuration and credential enrollment happen through setup.
    Authenticated mode permits non-credential mutation in the LAN owner
-   console after owner sign-in. Credential enrollment remains setup-only.
+   console after owner sign-in. Credential enrollment remains setup-only and
+   requires an owner session whether setup is LAN-reachable or loopback-only.
 5. Provider tests and catalogue refreshes are explicit actions. No page load
    should call a provider.
 
