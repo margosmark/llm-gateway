@@ -18,6 +18,7 @@ from gateway.adapters.chatgpt_codex import (
     ChatGPTCodexAdapter,
 )
 from gateway.auth import ProfileAuth, access_mode_description, profile_allows
+from gateway.bridge.aggregate import aggregate_stream
 from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_chat
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import convert_stream, sse_done
@@ -371,12 +372,21 @@ class GatewayApp:
         request.context["streamed"] = stream
 
         if not stream:
-            body = routed.response.body or b""
+            upstream_dialect = routed.request.dialect or dialect
+            if routed.response.stream is not None:
+                # The upstream is streaming only. Consume it and present the
+                # result as the single object the client asked for.
+                body = json.dumps(
+                    aggregate_stream(list(routed.response.stream), upstream_dialect),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            else:
+                body = routed.response.body or b""
             # A converted request must receive a converted response. The
             # upstream dialect and the caller's dialect are the same for a
             # passthrough, and different when the bridge converted the
             # request.
-            upstream_dialect = routed.request.dialect or dialect
             if upstream_dialect != dialect and body:
                 body = _convert_buffered(body, upstream_dialect, dialect)
             return Response(
