@@ -163,7 +163,108 @@ repo digest, so this reporting step may fail despite a valid image and gate.
 **Required fix:** share the release gate's ID/digest resolution logic or make
 the workflow use a safe shell fallback. Test the empty-`RepoDigests` case.
 
-### R8 — Setup-surface helper text still claims host-only access
+### R8 — ChatGPT/Codex model refresh violates the shared adapter contract
+**Severity: release blocker for the ChatGPT/Codex onboarding flow.**
+
+`ChatGPTCodexAdapter.list_models()` returns strings
+(`src/gateway/adapters/chatgpt_codex.py:390-409`), whereas the generic refresh
+handler requires `ModelInfo` attributes such as `model_id` and `dialect`
+(`src/gateway/http/app.py:703-733`). A normal ChatGPT refresh therefore hits
+the generic 500 path instead of populating selectable models.
+
+**Required fix:** make every adapter return `list[ModelInfo]`, with the known
+Responses dialect for ChatGPT/Codex, and add HTTP-level refresh tests for both
+real adapters.
+
+### R9 — Non-streaming responses are returned in the upstream dialect
+**Severity: release blocker for OpenAI-compatible Chat Completions clients.**
+
+When the source and upstream dialect differ, request conversion runs, but the
+non-streaming response body is returned verbatim
+(`src/gateway/http/app.py:382-400`). ChatGPT/Codex responds in the Responses
+dialect (`src/gateway/adapters/chatgpt_codex.py:428-467`), so a request to
+`/v1/chat/completions` can receive a Responses object rather than a Chat
+Completions object. The existing tests cover request conversion and stream
+conversion, not this response shape.
+
+**Required fix:** add bidirectional buffered-response conversion or refuse the
+unsupported non-streaming combination until conversion exists; cover both
+endpoint/dialect permutations with end-to-end assertions.
+
+### R10 — Device authorization is neither setup-only nor shown-once
+**Severity: high credential-boundary and flow-correctness risk.**
+
+The device start/poll actions do not require `_can_enroll_credentials()`
+(`src/gateway/http/app.py:751-788`), while API-key enrollment does
+(`app.py:790-814`). In authenticated mode, the LAN owner console can therefore
+initiate a device flow even though credential enrollment is documented as
+setup-only. Separately, pending poll responses serialize the user code again
+(`app.py:774-788`), contradicting the shown-once contract; the UI does not use
+the provider-supplied poll interval (`src/gateway/static/console.js:595-615`).
+
+**Required fix:** gate device start/poll/exchange on the setup surface and
+owner session, bind each pending flow to that session, return the code only
+from the initial explicit start action, honor the interval, and test pending,
+denied, expired, approved, and owner-console-refusal cases.
+
+### R11 — Production `/version` identity is not mechanically published
+**Severity: high release-traceability risk.**
+
+The release gate writes `release.json` only inside a disposable candidate
+container and deletes it afterwards (`scripts/release_gate.py:203-219`,
+`264-287`, `370-371`). Compose uses a distinct named volume
+(`compose.yaml:36-38`) and there is no production cutover step that writes the
+verified digest to that volume. A normal Compose start can consequently report
+`image_revision: "unknown"` despite the README/runbook claiming exact running
+identity.
+
+**Required fix:** deploy an immutable image reference without rebuilding,
+atomically write the inspected exact image ID/digest to the actual Compose
+state volume during cutover, then compare that value with `/version` from the
+running Compose service.
+
+### R12 — Profile and provider session isolation need explicit policy
+**Severity: medium authorization/privacy risk.**
+
+An empty profile allow-list permits every published alias
+(`src/gateway/auth.py:262-269`), so a newly issued profile token is broad by
+default. Separately, clients can supply `X-Session-ID`/`X-OpenCode-Session`,
+which is forwarded upstream without profile/provider namespacing or validation
+(`src/gateway/http/app.py:367-380`, `src/gateway/adapters/opencode_go.py:133-
+147`).
+
+**Required fix:** deny a new profile until aliases are explicitly granted (or
+use a separately confirmed all-alias flag), and generate/bind upstream session
+identifiers server-side with profile/provider scope, expiry, size limits, and
+cross-profile collision tests.
+
+### R13 — Plain HTTP is an explicit but high-risk LAN trust assumption
+**Severity: decision required before using owner/caller credentials on an
+untrusted LAN.**
+
+The implementation intentionally serves HTTP and has no TLS (`README.md`,
+"Known limitations"), yet LAN traffic includes owner cookies, bearer tokens,
+and request content. This is acceptable only where the LAN itself is trusted;
+it is not safe against an on-path LAN attacker. The current forwarded-header
+rejection also means the documented TLS-terminator suggestion needs an
+explicit proxy-trust design before adoption.
+
+**Required action:** either make the trusted-LAN assumption a clear deployment
+precondition, or design a tested TLS/loopback/proxy model. Do not advertise a
+proxy topology the request-hardening layer rejects.
+
+### R14 — Configuration rollback instructions currently only make a copy
+**Severity: medium operator-recovery defect.**
+
+The runbook's “Rollback the configuration” command copies current
+`config.json` to a `.before-upgrade` file and restarts; it never restores a
+prior snapshot (`docs/RUNBOOK.md:183-193`).
+
+**Required fix:** document separate pre-upgrade backup and restore commands,
+validate restored JSON/permissions before startup, and state the limits around
+provider-side tokens and restart-lost state.
+
+### R15 — Setup-surface helper text still claims host-only access
 **Severity: low documentation/UI honesty defect.**
 
 When credential enrollment is unavailable, the browser says setup is reachable
@@ -190,12 +291,17 @@ inventing a host-only restriction.
 ## Recommended order
 
 1. Fix and test **R0** before allowing LAN-reachable first boot.
-2. Fix and test **R1** before presenting ChatGPT/Codex setup as usable.
-3. Fix/prove **R2**, then run a real Compose deployment test before any live
-   release.
-4. Repair **R3** and **R7** so release evidence is trustworthy.
-5. Tighten **R4**, then make observability truthful and complete in **R5**.
-6. Fix **R6** and **R8** with their targeted tests.
+2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or
+   cross-dialect OpenAI compatibility as usable.
+3. Fix **R10** before treating device authorization as a setup-only,
+   shown-once credential flow.
+4. Fix/prove **R2** and **R11**, then run a real Compose deployment test before
+   any live release.
+5. Repair **R3** and **R7** so release evidence is trustworthy.
+6. Tighten **R4** and **R12**, then make observability truthful and complete in
+   **R5**.
+7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6**, **R14**,
+   and **R15** with targeted tests and runbook changes.
 
 No provider credentials, provider calls, subscriptions, or deployment state
 were accessed during this review.

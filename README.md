@@ -308,11 +308,12 @@ docker build --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
 python3 scripts/release_gate.py personal-llm-gateway:candidate
 ```
 
-The gate runs against **one exact image digest** and never rebuilds or
-substitutes the artifact it checks. It verifies the release identity, the
-wildcard refusal, the forwarded-header / `Host` / `Origin` / CSRF probes,
-the unauthenticated surface, and that no credential material is in the
-image.
+The gate runs against **one exact candidate image** and never rebuilds or
+substitutes the artifact it checks. It verifies candidate-level release
+identity, wildcard refusal, forwarded-header / `Host` / `Origin` / CSRF probes,
+the unauthenticated surface, and that no credential material is in the image.
+It is not a substitute for a Compose-equivalent deployment check: state-volume
+ownership and production `/version` identity still require explicit proof.
 
 ---
 
@@ -330,11 +331,21 @@ them.
   The gateway does not call undocumented endpoints, so actual remaining
   allowance and reset times are Unknown. Published estimates are shown with
   their source and date.
+* **ChatGPT/Codex onboarding is not ready for use yet.** The current UI cannot
+  complete device-code polling, and ChatGPT catalogue refresh does not satisfy
+  the common model-metadata contract. These release blockers are R1 and R8 in
+  `docs/REVIEW.md`.
+* **Cross-dialect buffered replies are not ready for use yet.** A request can
+  be converted to an upstream dialect while its non-streaming response is
+  returned unchanged. This is R9 in `docs/REVIEW.md`; use only matching
+  dialects until it is fixed.
 * **The device-code flow is a beta path** implemented from provider
   integration behaviour, not from a published third-party contract. OpenAI
   does not endorse this gateway.
-* **No TLS.** The gateway is LAN-only. Put it behind a TLS terminator if you
-  need one, and keep it on a private network.
+* **No TLS.** The gateway is HTTP-only and its owner cookies, bearer tokens,
+  and request content require a trusted LAN. Do not place it behind a TLS
+  terminator or proxy until an explicit proxy-trust/forwarded-header design is
+  implemented; the current server rejects forwarded headers.
 * **The setup UI is reachable from the network by default.** It requires the
   owner passphrase, but a network perimeter is not something the gateway
   provides. Bind it to loopback with `GATEWAY_SETUP_BIND=127.0.0.1` if you

@@ -40,7 +40,9 @@ finding register, not as proof that a finding is fixed.
 
 - A provider is an adapter, not a conditional in the routing core. Add an
   adapter, registry entry, model capability handling, safe error
-  classification, UI/state support, documentation, and tests together.
+  classification, UI/state support, documentation, and tests together. Every
+  `list_models()` implementation must return the shared `list[ModelInfo]`
+  contract; test it through the generic refresh endpoint.
 - A model ID is provider-qualified. Never guess its wire dialect or silently
   translate an unsupported protocol/capability.
 - Provider tests, catalog refreshes, alias tests, and device authorization are
@@ -52,14 +54,23 @@ finding register, not as proof that a finding is fixed.
   Fail closed rather than silently choose another model.
 - Make provider/device-flow identifiers short-lived and scoped. Return only
   the opaque data the active setup flow needs; never return stored access,
-  refresh, ID, caller, or API tokens after storage.
+  refresh, ID, caller, or API tokens after storage. Device start, poll, and
+  token exchange are credential-enrollment actions: require the setup surface
+  and owner session, bind pending state to that session, show a user code once,
+  and honor the provider polling interval.
+- Preserve response dialects on both buffered and streaming paths. A converted
+  request needs the corresponding converted response, or an explicit refusal;
+  never return an upstream wire object under another public API contract.
 
 ## Implementation quality
 
 - Validate every externally supplied identifier, route reference, enum,
-  ordering value, and timeout before a config transaction. Invalid state must
-  fail with a safe actionable `4xx`, not persist and fail later during routing
-  or credential access.
+  ordering value, and timeout before a config transaction. New client profiles
+  deny access by default; an all-alias grant must be a separate explicit,
+  reviewable opt-in. Never forward caller-controlled upstream conversation IDs
+  without server-side profile/provider namespacing, validation, and expiry.
+  Invalid state must fail with a safe actionable `4xx`, not persist and fail
+  later during routing or credential access.
 - Preserve atomic persistence and restrictive modes. A container change must
   keep the runtime non-root, read-only root filesystem, and credential/config
   storage writable only through the intentional state mount.
@@ -81,7 +92,10 @@ finding register, not as proof that a finding is fixed.
 - For image/Compose changes, build one exact candidate and run the release
   gate without rebuilding it. Separately prove first boot and restart with the
   actual Compose state volume as UID/GID 10001; the disposable image gate is
-  not proof of volume ownership or persistence.
+  not proof of volume ownership or persistence. Deploy only the inspected
+  immutable image ID/digest with no post-gate `build:`/rebuild path, write that
+  identity into the actual state volume atomically, then compare it with the
+  running service's `/version` response.
 - Verify live deployment behavior from outside the container only when a
   deployment is explicitly authorized. Check `/health`, fixed-schema
   `/version`, intended listener addresses, and setup reachability exactly
