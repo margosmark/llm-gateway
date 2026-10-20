@@ -1,7 +1,7 @@
 /* Personal LLM Gateway console.
  *
- * One page, no framework, no build step. It talks to the same origin, so
- * every request carries the CSRF token the server handed out in a cookie.
+ * One page, no framework, no build step. It talks directly to the same-origin
+ * trusted-LAN console; browser mutations are protected by canonical Origin checks.
  *
  * Rules the UI keeps:
  *   - a provider is always labelled next to a model id;
@@ -40,25 +40,13 @@
     return node;
   }
 
-  function cookie(name) {
-    var parts = document.cookie.split(";");
-    for (var i = 0; i < parts.length; i++) {
-      var pair = parts[i].split("=");
-      if (pair[0].trim() === name) return decodeURIComponent(pair.slice(1).join("="));
-    }
-    return null;
-  }
-
   function api(path, options) {
     options = options || {};
     var headers = options.headers || {};
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
-    var csrf = cookie("gw_csrf");
-    if (csrf) headers["X-Gateway-CSRF"] = csrf;
     return fetch(path, {
       method: options.method || "GET",
       headers: headers,
-      credentials: "same-origin",
       body: options.body === undefined ? undefined : JSON.stringify(options.body)
     }).then(function (response) {
       var type = response.headers.get("content-type") || "";
@@ -185,13 +173,11 @@
     header.appendChild(nav);
     header.appendChild(el("span", { class: "spacer" }));
     if (state) {
-      header.appendChild(el("span", {
-        class: "pill " + (state.access_mode === "authenticated" ? "ok" : "warn"),
-        text: state.access_mode === "authenticated" ? "authenticated mode" : "LAN no-auth mode"
-      }));
+      header.appendChild(el("span", { class: "pill warn", text: "trusted LAN admin mode" }));
       header.appendChild(el("span", { class: "small muted", text: "rev " + state.revision }));
     }
     app.appendChild(header);
+    app.appendChild(el("aside", { class: "card", role: "note", text: "Trusted LAN admin mode — any device that can reach this address can configure and use this gateway." }));
 
     var main = el("main", { id: "main" });
     app.appendChild(main);
@@ -204,15 +190,7 @@
       main.appendChild(el("p", { class: "muted", text: "Loading…" }));
       return;
     }
-    if (!state.authenticated) {
-      if (state.passphrase_set === false && state.surface === "setup") {
-        main.appendChild(renderSetupPassphrase());
-        return;
-      }
-      main.appendChild(renderLogin());
-      main.appendChild(el("section", {}, [renderPublicSummary()]));
-      return;
-    }
+
     var renderer = {
       status: renderStatus,
       providers: renderProviders,
@@ -223,56 +201,6 @@
     main.appendChild(renderer());
   }
 
-  // --- login ------------------------------------------------------------
-
-  function renderLogin() {
-    var input = el("input", { type: "password", id: "passphrase", autocomplete: "current-password" });
-    var card = el("div", { class: "login card" }, [
-      el("h2", { text: "Sign in" }),
-      el("p", { class: "small muted", text: state.access_mode_description || "" }),
-      el("label", {}, [el("span", { text: "Owner passphrase" }), input]),
-      el("button", {
-        class: "primary",
-        type: "button",
-        text: "Sign in",
-        onclick: function () {
-          run(api(BASE + "/api/session", { method: "POST", body: { passphrase: input.value } }))
-            .then(function () { return refresh(); })
-            .catch(function () {});
-        }
-      })
-    ]);
-    setTimeout(function () { input.focus(); }, 0);
-    return card;
-  }
-
-  function renderSetupPassphrase() {
-    var input = el("input", { type: "password", id: "passphrase", autocomplete: "new-password" });
-    var confirm = el("input", { type: "password", autocomplete: "new-password" });
-    return el("div", { class: "login card" }, [
-      el("h2", { text: "Initialize gateway configuration" }),
-      el("p", {
-        class: "small muted",
-        text: "Choose an owner passphrase. It protects this console and the setup UI. It is stored as a salted hash and is never shown again."
-      }),
-      el("label", {}, [el("span", { text: "Passphrase" }), input]),
-      el("label", {}, [el("span", { text: "Confirm passphrase" }), confirm]),
-      el("button", {
-        class: "primary",
-        type: "button",
-        text: "Initialize gateway configuration",
-        onclick: function () {
-          if (!input.value || input.value !== confirm.value) {
-            toast("the two passphrases do not match", "bad");
-            return;
-          }
-          run(api(BASE + "/api/session", { method: "POST", body: { passphrase: input.value } }))
-            .then(function () { return refresh(); })
-            .catch(function () {});
-        }
-      })
-    ]);
-  }
 
   // --- status -----------------------------------------------------------
 
@@ -430,32 +358,6 @@
     return list;
   }
 
-  function renderPublicSummary() {
-    var card = el("div", { class: "card" }, [el("h2", { text: "Set up your gateway" })]);
-    card.appendChild(el("p", {
-      class: "small muted",
-      text: "Sign in with the owner passphrase to configure providers, models, routes and profiles. The summary below is safe to show without a session."
-    }));
-    card.appendChild(renderChecklist());
-    if (state.providers.length) {
-      card.appendChild(el("h3", { text: "Providers" }));
-      state.providers.forEach(function (provider) {
-        card.appendChild(el("div", { class: "route" }, [
-          el("div", { class: "head" }, [
-            el("strong", { text: providerLabel(provider.provider_id) }),
-            statePill(provider.state)
-          ])
-        ]));
-      });
-    }
-    card.appendChild(el("p", {
-      class: "small muted",
-      text: "The published catalogue is " + (state.published_models.length
-        ? state.published_models.join(", ")
-        : "empty. It stays empty until at least one enabled alias is published.")
-    }));
-    return card;
-  }
 
   // --- providers --------------------------------------------------------
 
@@ -464,12 +366,6 @@
   function renderProviders() {
     var frag = document.createDocumentFragment();
 
-    if (!state.can_enroll_credentials) {
-      frag.appendChild(el("div", { class: "notice warn" }, [
-        el("strong", { text: "Credential enrollment is not available on this surface. " }),
-        el("span", { text: "Open the setup UI on the host itself (http://127.0.0.1:<setup port>/setup/) or through an SSH local tunnel." })
-      ]));
-    }
 
     state.providers.forEach(function (provider) {
       frag.appendChild(renderProvider(provider));
@@ -532,7 +428,7 @@
       el("div", { class: "narrow" }, [
         el("button", {
           class: "primary", type: "button", text: "Save and test",
-          disabled: !state.can_enroll_credentials,
+
           onclick: function () {
             var key = input.value.trim();
             if (!key) {
@@ -560,11 +456,7 @@
       el("p", { class: "small muted", text: "The key is stored in an owner-only credential store, separately from any other provider, and is never displayed again." }),
       wrap
     ]);
-    if (!state.can_enroll_credentials) {
-      block.appendChild(el("div", { class: "notice" }, [
-        el("span", { text: "Credential entry is only available on the setup UI, which is reachable from the host itself or through an SSH local tunnel." })
-      ]));
-    }
+
     return block;
   }
 
@@ -891,12 +783,10 @@
       el("span", { text: state.access_mode_description })
     ]));
 
-    if (state.access_mode !== "authenticated") {
-      frag.appendChild(el("div", { class: "notice warn" }, [
-        el("strong", { text: "Caller tokens are only available in authenticated mode. " }),
-        el("span", { text: "Switch the access mode in Settings, or use the Anonymous LAN profile." })
-      ]));
-    }
+    frag.appendChild(el("div", { class: "notice warn" }, [
+      el("strong", { text: "Profiles do not provide access control in trusted LAN admin mode. " }),
+      el("span", { text: "All reachable LAN peers share the same published routes; caller tokens are retained only as configuration/future attribution data." })
+    ]));
 
     var card = el("div", { class: "card" }, [el("h2", { text: "Client profiles" })]);
     state.profiles.forEach(function (profile) {
@@ -928,7 +818,7 @@
           el("div", { class: "narrow" }, [
             el("button", {
               type: "button", text: profile.has_token ? "Rotate token" : "Issue token",
-              disabled: !state.can_mutate || state.access_mode !== "authenticated" || profile.anonymous,
+              disabled: true,
               onclick: function () {
                 run(api(BASE + "/api/profile", { method: "POST", body: { action: "issue_token", profile_id: profile.profile_id } }))
                   .then(function (result) {
@@ -946,7 +836,7 @@
           el("div", { class: "narrow" }, [
             el("button", {
               class: "danger", type: "button", text: "Revoke token",
-              disabled: !state.can_mutate || !profile.has_token,
+              disabled: true,
               onclick: function () {
                 run(api(BASE + "/api/profile", { method: "POST", body: { action: "revoke_token", profile_id: profile.profile_id } }))
                   .then(function () { return refresh(); }).catch(function () {});
@@ -990,28 +880,8 @@
     var release = state.release || {};
     frag.appendChild(el("section", {}, [
       el("div", { class: "card" }, [
-        el("h2", { text: "Access mode" }),
-        el("p", { class: "small", text: state.access_mode_description || "" }),
-        el("div", { class: "row" }, [
-          el("div", { class: "narrow" }, [
-            el("button", {
-              type: "button", text: "LAN no-auth mode", disabled: !state.can_mutate,
-              onclick: function () {
-                run(api(BASE + "/api/settings", { method: "POST", body: { action: "access_mode", access_mode: "lan_noauth" } }))
-                  .then(function () { return refresh(); }).catch(function () {});
-              }
-            })
-          ]),
-          el("div", { class: "narrow" }, [
-            el("button", {
-              type: "button", text: "Authenticated mode", disabled: !state.can_mutate,
-              onclick: function () {
-                run(api(BASE + "/api/settings", { method: "POST", body: { action: "access_mode", access_mode: "authenticated" } }))
-                  .then(function () { return refresh(); }).catch(function () {});
-              }
-            })
-          ])
-        ])
+        el("h2", { text: "Trusted LAN access" }),
+        el("p", { class: "small", text: "Any device that can reach this address can configure and use the gateway. This product mode has no password, login, or per-client authorization." })
       ])
     ]));
 
@@ -1024,7 +894,7 @@
           el("dt", { text: "Source tree" }), el("dd", { text: release.source_tree || "unknown" }),
           el("dt", { text: "Image revision" }), el("dd", { text: release.image_revision || "unknown" }),
           el("dt", { text: "Configuration revision" }), el("dd", { text: String(state.revision) }),
-          el("dt", { text: "Active listener" }), el("dd", { text: state.surface === "setup" ? "Setup UI (loopback only)" : "Owner console (LAN)" })
+          el("dt", { text: "Active listener" }), el("dd", { text: "Trusted LAN owner console and API" })
         ])
       ])
     ]));
@@ -1050,15 +920,7 @@
           el("dt", { text: "Request timeouts" }), el("dd", { text: "read-only safe runtime limits" }),
           el("dt", { text: "Local cooldowns" }), el("dd", { text: JSON.stringify(state.cooldowns || {}) })
         ]),
-        el("button", {
-          type: "button", text: "Sign out",
-          onclick: function () {
-            run(api(BASE + "/api/session", { method: "DELETE" })).then(function () {
-              state = null;
-              draw();
-            }).catch(function () {});
-          }
-        })
+
       ])
     ]));
 
@@ -1073,50 +935,10 @@
   }
 
   function refresh() {
-    return api(BASE + "/api/session").then(function (session) {
-      return api(BASE + "/api/status").then(function (publicState) {
-        if (session.authenticated) {
-          return api(BASE + "/api/state").then(function (full) {
-            state = full;
-            draw();
-            return full;
-          });
-        }
-        // Not signed in: show only the safe status the gateway publishes
-        // without a session. Everything else needs the owner passphrase.
-        state = {
-          initialized: publicState.initialized,
-          revision: 0,
-          access_mode: publicState.access_mode,
-          access_mode_description: publicState.access_mode_description,
-          surface: session.surface,
-          can_mutate: false,
-          can_enroll_credentials: false,
-          authenticated: false,
-          passphrase_set: session.passphrase_set,
-          providers: (publicState.providers || []).map(function (provider) {
-            return {
-              provider_id: provider.provider_id,
-              state: provider.state,
-              models: [],
-              credential_present: false
-            };
-          }),
-          aliases: [],
-          profiles: [],
-          published_models: publicState.published_models || [],
-          limits: [],
-          ledger: [],
-          totals: {},
-          cooldowns: {},
-          release: publicState.release || {},
-          base_url: "",
-          checklist: publicState.checklist || [],
-          device_code: { prerequisite: "", anti_phishing: "" }
-        };
-        draw();
-        return state;
-      });
+    return api(BASE + "/api/state").then(function (full) {
+      state = full;
+      draw();
+      return full;
     }).catch(function (error) {
       app.innerHTML = "";
       app.appendChild(el("main", {}, [

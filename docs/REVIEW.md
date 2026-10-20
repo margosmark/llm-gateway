@@ -41,7 +41,7 @@ container deployment has been exercised.
 
 ## Findings requiring implementation work
 
-### R0 — A LAN client can claim the first owner passphrase
+### R0 — A LAN client can claim the first owner passphrase (superseded)
 **Severity: release blocker for LAN-reachable first boot.**
 
 Setup now binds to the private LAN address by default (`src/gateway/cli.py:159-
@@ -290,7 +290,7 @@ inventing a host-only restriction.
 
 ## Recommended order
 
-1. Fix and test **R0** before allowing LAN-reachable first boot.
+1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or
    cross-dialect OpenAI compatibility as usable.
 3. Fix **R10** before treating device authorization as a setup-only,
@@ -300,8 +300,21 @@ inventing a host-only restriction.
 5. Repair **R3** and **R7** so release evidence is trustworthy.
 6. Tighten **R4** and **R12**, then make observability truthful and complete in
    **R5**.
-7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6**, **R14**,
-   and **R15** with targeted tests and runbook changes.
+7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6** and **R14** with targeted tests and runbook changes. R15 is superseded by removal of the setup surface.
 
-No provider credentials, provider calls, subscriptions, or deployment state
-were accessed during this review.
+## Trusted LAN admin-mode candidate update
+
+The approved single-listener change resolves the former R0 first-passphrase
+claiming condition by deleting passphrase creation and owner sessions rather
+than adding a bootstrap race fix. Regression evidence: `test_login_and_passphrase_route_are_removed`, direct owner-state access and
+`test_owner_console_mutates_same_origin_without_session_or_csrf` in
+`tests/test_end_to_end.py`, plus CLI one-application coverage in
+`tests/test_cli.py`. The formerly listed R15 setup-surface host-only message is
+also removed with the setup UI; the console no longer presents that claim.
+
+This candidate does not resolve unrelated R1/R8/R9/R2/R3/R7/R11 findings.
+R4-R6, R10, R12-R14 remain open unless independently evidenced elsewhere.
+The focused suite currently exercises the direct console, same-origin mutation,
+cross-origin refusal, hostile Host/forwarded-header rejection, anonymous fresh
+API behavior, and write-only credential state. Deployment/image/volume claims
+remain unverified here.

@@ -1,23 +1,5 @@
-# Personal LLM Gateway - deployment.
-#
-# This file is deliberately explicit about exposure. The gateway is private
-# infrastructure for one owner:
-#
-#   * it binds an explicit private LAN address, never a wildcard;
-#   * the setup listener binds the same private address by default, so the
-#     setup UI is reachable from the network. Set GATEWAY_SETUP_BIND to
-#     127.0.0.1 to make it loopback-only. Either way the owner passphrase
-#     protects it, and it is never served on the owner port;
-#   * it creates no firewall rule and no router rule;
-#   * the persistent volume holds the configuration and the owner-only
-#     credential store, and is never part of the image.
-#
-# Host networking is used so the process can bind the real LAN address
-# instead of a wildcard inside a container namespace. The published surface
-# is therefore exactly one private address and one loopback port.
-
+# Personal LLM Gateway deployment. One explicit private LAN listener; no setup port.
 name: personal-llm-gateway
-
 services:
   gateway:
     image: personal-llm-gateway:candidate
@@ -30,17 +12,10 @@ services:
     network_mode: host
     restart: unless-stopped
     environment:
-      # The explicit private LAN address. A wildcard is refused at startup.
       GATEWAY_BIND: "${GATEWAY_BIND:-10.10.11.109}"
       GATEWAY_PORT: "${GATEWAY_PORT:-8765}"
-      GATEWAY_SETUP_PORT: "${GATEWAY_SETUP_PORT:-8766}"
-      # Where the setup listener binds. It defaults to the LAN address so the
-      # setup UI is reachable from the network. Set it to 127.0.0.1 for a
-      # loopback-only setup UI. The owner passphrase protects it either way.
-      GATEWAY_SETUP_BIND: "${GATEWAY_SETUP_BIND:-}"
       GATEWAY_DATA_DIR: "/var/lib/gateway"
     volumes:
-      # The configuration and the owner-only credential store.
       - gateway-state:/var/lib/gateway
     read_only: true
     tmpfs:
@@ -50,15 +25,7 @@ services:
     cap_drop:
       - ALL
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - |
-          import os,sys,urllib.request
-          h=os.environ.get('GATEWAY_BIND','127.0.0.1')
-          p=os.environ.get('GATEWAY_PORT','8765')
-          sys.exit(0 if urllib.request.urlopen(f'http://{h}:{p}/health', timeout=4).status==200 else 1)
+      test: ["CMD", "python", "-c", "import os,sys,urllib.request; h=os.environ.get('GATEWAY_BIND','127.0.0.1'); p=os.environ.get('GATEWAY_PORT','8765'); sys.exit(0 if urllib.request.urlopen(f'http://{h}:{p}/health', timeout=4).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -68,7 +35,6 @@ services:
       options:
         max-size: "1m"
         max-file: "3"
-
 volumes:
   gateway-state:
     name: personal-llm-gateway-state

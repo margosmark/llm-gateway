@@ -33,54 +33,22 @@ never breaks your client's configuration.
 
 | Surface | Address | Who can reach it | What it does |
 |---|---|---|---|
-| Owner console | `http://10.10.11.109:8765/owner/` | LAN | Safe status without a session. Read-only in LAN no-auth mode; configurable with the owner passphrase in authenticated mode |
-| Setup UI | `http://10.10.11.109:8766/setup/` | LAN (or loopback — see below) | Everything: credential enrolment, provider tests, catalogue refresh, and all configuration |
+| Owner console and configuration | `http://10.10.11.109:8765/owner/` | Trusted LAN | Full configuration, credential enrollment, provider actions, and status; no login |
 | API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
 
-The setup UI is a **separate listener on its own port**. Where it binds is
-your choice:
+Trusted LAN admin mode: any device that can reach this address can configure
+and use the gateway, including replacing provider credentials. There is no
+owner password, login/session bootstrap, separate setup listener, or
+per-device administrative boundary. Use this only on a LAN you trust.
 
-```sh
-# reachable from the network (the default)
-GATEWAY_SETUP_BIND=10.10.11.109
-
-# loopback only - the host itself, or an SSH tunnel
-GATEWAY_SETUP_BIND=127.0.0.1
-```
-
-Either way the **owner passphrase is required** before anything can be
-enrolled, and the CSRF, `Host` and `Origin` checks apply to it exactly as
-they do to the console. What changes is only who can *reach* the page — if
-you expose it to the network, the network is your perimeter and the
-passphrase is the only thing standing between a LAN host and your provider
-credentials. Tighten it at the firewall if that matters to you.
-
-> **First boot:** until an owner passphrase exists, a LAN-reachable setup
-> listener lets the first reachable client choose it. Start the first setup
-> listener on loopback (`GATEWAY_SETUP_BIND=127.0.0.1`) and create the
-> passphrase from the host or an SSH tunnel; only then restart with a
-> LAN-reachable setup listener if that is the chosen operating model. This is
-> an active code-review blocker, tracked as R0 in `docs/REVIEW.md`.
-
-The gateway binds an **explicit private address**. A wildcard bind is refused
-at startup, and there is no flag that enables one. It never creates a
-firewall or router rule, and it is never publicly exposed.
-
-### Where the configuration happens
-
-The setup UI and the owner console are the **same application** on two
-listeners. The setup UI has its own port, so it can be bound separately
-from the console.
-
-* In **LAN no-auth mode** the owner console is read-only, even with the
-  passphrase — otherwise any host on the network could reconfigure the
-  gateway. All configuration happens in the setup UI.
-* In **authenticated mode** the owner console is configurable once you sign
-  in, but credential enrolment is still setup-only.
-
-Either way, **a credential can only ever be entered on the setup UI.** The
-owner console shows that a credential is stored, never its value.
+The gateway binds an explicit private address. A wildcard bind is refused at
+startup. It never creates a firewall or router rule, and it is never publicly
+exposed. All owner configuration and client APIs share the one listener.
+Canonical same-origin browser mutations work without cookies, passwords,
+sessions, or CSRF bootstrap values; cross-origin browser mutations, hostile
+Host values, and forwarded headers remain rejected. Credentials are entered
+only into write-only form fields and are never read back.
 
 ---
 
@@ -91,19 +59,15 @@ git clone https://github.com/margosmark/llm-gateway.git
 cd llm-gateway
 
 export GATEWAY_BIND=10.10.11.109          # your explicit private LAN address
-# Protect the initial owner-passphrase bootstrap; optional after first setup.
-export GATEWAY_SETUP_BIND=127.0.0.1
 export SOURCE_REVISION="$(git rev-parse HEAD)"
 export SOURCE_TREE="$(git rev-parse HEAD^{tree})"
 
 docker compose up -d --build
 ```
 
-Then, on the host:
+Then, from a trusted LAN device:
 
-1. Open <http://10.10.11.109:8766/setup/> and create the owner passphrase.
-   (Use `http://127.0.0.1:8766/setup/` if you bound the setup listener to
-   loopback.)
+1. Open <http://10.10.11.109:8765/owner/>. No login or bootstrap step exists.
 2. Connect a provider.
 3. Test the connection.
 4. Refresh the model catalogue.
@@ -124,12 +88,12 @@ profiles, zero aliases and zero published models.
 
 `Providers → ChatGPT → Connect ChatGPT`.
 
-The setup UI shows the official verification URL
+The console shows the official verification URL
 (`https://auth.openai.com/codex/device`), the one-time code, a countdown, and
 an anti-phishing warning. You enter the code in your own browser; the
 gateway never sees your account password.
 
-Two things the setup UI tells you before it starts:
+Two things the console tells you before it starts:
 
 * **Device-code sign-in must be enabled** for your account — ChatGPT security
   settings for a personal account, workspace permissions for a workspace
@@ -144,10 +108,10 @@ the console says so rather than implying otherwise.
 
 `Providers → OpenCode Go → Connect OpenCode Go`.
 
-Paste the API key into the protected form and choose **Save and test**. The
+Paste the API key into the write-only form and choose **Save and test**. The
 explicit action stores the key and then validates it against
 `https://opencode.ai/inference/go/v1/models`; ordinary page loads still never
-call a provider. The key is stored in an owner-only credential store,
+call a provider. The key is stored in a private credential store,
 separately from any other provider, and is **never displayed again**.
 
 ---
@@ -203,17 +167,12 @@ routes it excluded and why. It never silently serves a different model.
 
 ## Profiles and clients
 
-**LAN no-auth mode** (the default) uses one explicit **Anonymous LAN
-profile** for every request. It provides no per-device and no per-person
-isolation, and the console says so.
-
-**Authenticated mode** adds named client profiles with per-profile allowed
-aliases and optional caller tokens. A token is shown **once**, as the direct
-result of issuing or rotating it. It is never returned by a later read, and
-never appears in a URL, an analytics record, an export or a routine log.
-
-Profiles scope *aliases*, never upstream identity. Every caller shares the
-owner's single upstream account.
+LAN API invocation is anonymous by design. On a fresh zero-profile installation,
+`GET /v1/models` returns OpenAI-compatible `{ "object": "list", "data": [] }`.
+A chat request for an unpublished or unknown route returns a JSON 4xx error and
+never calls a provider. Profiles and optional caller tokens are configuration/future-attribution
+features, not access control: any reachable LAN peer can configure the gateway
+and invoke every published route.
 
 ---
 
@@ -221,7 +180,7 @@ owner's single upstream account.
 
 * It does **not** store prompts, responses, or response content.
 * Provider credentials, bearer tokens, device codes, and caller tokens are
-  stored only when required for operation, in an owner-only credential store.
+  stored only when required for operation, in a private credential store.
   They are never returned by a normal state or status response, ledger,
   export, URL, or routine log. A caller token is shown only in the direct
   response that issues it.
@@ -284,7 +243,7 @@ src/gateway/
   buildinfo.py      the fixed release identity
   config.py         configuration, aliases, profiles
   credentials.py    the owner-only credential store
-  auth.py           owner sessions, client profiles, caller tokens
+  auth.py           client profiles and caller-token authorization
   observability.py  the metadata-only ledger and limit snapshots
   stores.py         atomic, permission-restricted persistence
   http/             the HTTP layer, request hardening, the application
@@ -310,8 +269,8 @@ python3 scripts/release_gate.py personal-llm-gateway:candidate
 
 The gate runs against **one exact candidate image** and never rebuilds or
 substitutes the artifact it checks. It verifies candidate-level release
-identity, wildcard refusal, forwarded-header / `Host` / `Origin` / CSRF probes,
-the unauthenticated surface, and that no credential material is in the image.
+identity, wildcard refusal, forwarded-header / `Host` / same-origin `Origin`
+probes, direct owner-console use, and that no credential material is in the image.
 It is not a substitute for a Compose-equivalent deployment check: state-volume
 ownership and production `/version` identity still require explicit proof.
 
@@ -342,14 +301,14 @@ them.
 * **The device-code flow is a beta path** implemented from provider
   integration behaviour, not from a published third-party contract. OpenAI
   does not endorse this gateway.
-* **No TLS.** The gateway is HTTP-only and its owner cookies, bearer tokens,
-  and request content require a trusted LAN. Do not place it behind a TLS
-  terminator or proxy until an explicit proxy-trust/forwarded-header design is
-  implemented; the current server rejects forwarded headers.
-* **The setup UI is reachable from the network by default.** It requires the
-  owner passphrase, but a network perimeter is not something the gateway
-  provides. Bind it to loopback with `GATEWAY_SETUP_BIND=127.0.0.1` if you
-  would rather it were not reachable at all.
+* **No TLS.** The gateway is HTTP-only and bearer tokens and request content
+  require a trusted LAN. Do not place it behind a TLS terminator or proxy
+  until an explicit proxy-trust/forwarded-header design is implemented; the
+  current server rejects forwarded headers.
+* **Trusted LAN administration has no authentication boundary.** Any reachable
+  peer can configure the gateway, replace credentials, and invoke published
+  models. The network must be trusted; the gateway does not protect against an
+  on-path LAN attacker.
 * **The bridge is verified against a recorded corpus**, not yet against live
   provider captures. The corpus and its round-trip runner are in
   `tests/fixtures/bridge_corpus.json`.

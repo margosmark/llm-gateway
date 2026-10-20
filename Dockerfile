@@ -48,7 +48,7 @@ COPY --chown=root:root scripts/ /app/scripts/
 # Non-root, no shell, no new privileges.
 USER 10001:10001
 
-EXPOSE 8765 8766
+EXPOSE 8765
 
 # The healthcheck reads the metadata endpoint, which is anonymous. It uses
 # the configured bind address so it works whether the gateway binds a LAN

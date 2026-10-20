@@ -51,7 +51,7 @@ const fs = require("fs");
 const source = fs.readFileSync(consoleJs, "utf8");
 const elSource = source.slice(
   source.indexOf("function el(tag, attrs, children)"),
-  source.indexOf("function cookie(name)")
+  source.indexOf("function api(path, options)")
 );
 const elWithStub = new Function("document", elSource + "; return el;")(domStub);
 
@@ -106,6 +106,12 @@ check("an on* attribute becomes a listener, not an attribute", function () {
 
 check("the helper is exported for testing", function () {
   assert.strictEqual(typeof helpers.el, "function");
+});
+
+check("the direct console does not bootstrap a session or CSRF cookie", function () {
+  assert(source.includes("Trusted LAN admin mode — any device that can reach this address can configure and use this gateway."));
+  assert(!source.includes("gw_csrf"));
+  assert(!source.includes("/api/session"));
 });
 
 if (failures.length) {

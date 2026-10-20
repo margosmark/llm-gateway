@@ -35,13 +35,6 @@ CREDENTIAL_DIR_NAME = "credentials"
 #: crafted provider id cannot escape the credential directory.
 KNOWN_PROVIDERS = ("chatgpt_codex", "opencode_go")
 
-#: Reserved stores that are not provider credentials.
-OWNER_STORE = "owner"
-SESSION_STORE = "session"
-
-_PBKDF2_ITERATIONS = 240_000
-_PBKDF2_ITERATIONS_TEST = 1_000
-
 
 class CredentialError(Exception):
     """Raised for invalid credential operations."""
@@ -160,29 +153,6 @@ class CredentialStore:
         return mode == 0o600
 
 
-def hash_passphrase(passphrase: str, salt: bytes | None = None, iterations: int = _PBKDF2_ITERATIONS) -> tuple[str, str]:
-    """Hash an owner passphrase.
-
-    Returns ``(hex_digest, hex_salt)``. The passphrase itself is never
-    stored or logged.
-    """
-    if not isinstance(passphrase, str) or not passphrase:
-        raise CredentialError("passphrase must be a non-empty string")
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
-    return digest.hex(), salt.hex()
-
-
-def verify_passphrase(passphrase: str, digest_hex: str, salt_hex: str, iterations: int = _PBKDF2_ITERATIONS) -> bool:
-    """Constant-time passphrase check."""
-    try:
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(digest_hex)
-    except (ValueError, TypeError):
-        return False
-    candidate = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
-    return hmac.compare_digest(candidate, expected)
-
 
 def hash_caller_token(token: str) -> str:
     """Hash a high-entropy caller token for storage.
@@ -203,9 +173,6 @@ def new_caller_token() -> str:
     """Mint a new caller token. Shown once, to the caller, only."""
     return "gw_" + secrets.token_urlsafe(32)
 
-
-def new_session_key() -> str:
-    return secrets.token_urlsafe(48)
 
 
 def provider_ids() -> Iterable[str]:
@@ -231,14 +198,11 @@ __all__ = [
     "CredentialStore",
     "ProviderCredentialHandle",
     "KNOWN_PROVIDERS",
-    "OWNER_STORE",
-    "SESSION_STORE",
-    "hash_passphrase",
-    "verify_passphrase",
+
     "hash_caller_token",
     "verify_caller_token",
     "new_caller_token",
-    "new_session_key",
+
     "file_mode",
     "ensure_directory_mode",
     "os",

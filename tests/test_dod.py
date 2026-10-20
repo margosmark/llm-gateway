@@ -23,35 +23,19 @@ class DefinitionOfDoneTests(unittest.TestCase):
         self.harness = GatewayHarness()
         self.addCleanup(self.harness.close)
         self.cookies: dict[str, str] = {}
-        self.csrf = ""
 
     # --- helpers ---------------------------------------------------------
 
     def _login(self) -> None:
-        status, _, headers = self.harness.request(
-            "POST",
-            "/setup/api/session",
-            body={"passphrase": "dod-passphrase"},
-            port=self.harness.setup_port,
-        )
-        self.assertEqual(status, 200)
-        cookies = [value.split(";")[0] for value in headers.get("set-cookie", [])]
-        self.cookies = {"Cookie": "; ".join(cookies)}
-        self.csrf = self.cookies["Cookie"].split("gw_csrf=")[1].split(";")[0]
+        self.cookies = {}
 
     def _owner(self, path: str, body: dict) -> tuple[int, object]:
-        """Configuration changes happen on the setup surface.
-
-        The owner console is read-only in LAN no-auth mode; the setup UI is
-        where the work is done. It is the same console application, mounted
-        on the loopback listener.
-        """
+        """Configuration changes happen directly on the trusted LAN console."""
         return self.harness.request(
             "POST",
-            "/setup" + path,
+            "/owner" + path,
             body=body,
-            headers={**self.cookies, "X-Gateway-CSRF": self.csrf},
-            port=self.harness.setup_port,
+            headers=self.cookies,
         )
 
     # --- the walkthrough --------------------------------------------------
@@ -83,16 +67,6 @@ class DefinitionOfDoneTests(unittest.TestCase):
         # The device-code flow must state its prerequisite and its warning.
         self.assertIn("security settings", payload["device_code"]["prerequisite"])
         self.assertIn("only at the official OpenAI URL", payload["device_code"]["anti_phishing"])
-
-        # Credential enrolment is refused on the LAN console and accepted on
-        # the setup surface.
-        status, payload, _ = self.harness.request(
-            "POST",
-            "/owner/api/provider",
-            body={"action": "enroll_key", "provider_id": "opencode_go", "api_key": "test-key"},
-            headers={**self.cookies, "X-Gateway-CSRF": self.csrf},
-        )
-        self.assertEqual(status, 403)
 
         status, payload, _ = self._owner(
             "/api/provider",

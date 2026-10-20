@@ -10,18 +10,7 @@ from __future__ import annotations
 import unittest
 
 from gateway.http.core import Headers, Request
-from gateway.http.security import (
-    SecurityError,
-    SecurityPolicy,
-    build_allowed_hosts,
-    build_canonical_origins,
-    check_csrf,
-    check_forwarded_headers,
-    check_host,
-    check_origin,
-    is_loopback_client,
-    require_loopback,
-)
+from gateway.http.security import SecurityError, SecurityPolicy, build_allowed_hosts, build_canonical_origins, check_forwarded_headers, check_host, check_origin
 
 
 def make_request(
@@ -125,48 +114,6 @@ class OriginTests(PolicyTests):
         # sends ambiently, so Origin/CSRF are not the right controls there.
         request = make_request(method="POST", path="/v1/chat/completions")
         check_origin(request, self.policy)
-
-
-class CsrfTests(PolicyTests):
-    def test_matching_token_is_accepted(self) -> None:
-        request = make_request(method="POST", headers=[("X-Gateway-CSRF", "tok")])
-        check_csrf(request, "tok")
-
-    def test_missing_token_is_rejected(self) -> None:
-        request = make_request(method="POST")
-        with self.assertRaises(SecurityError) as ctx:
-            check_csrf(request, "tok")
-        self.assertEqual(ctx.exception.status, 403)
-
-    def test_mismatched_token_is_rejected(self) -> None:
-        request = make_request(method="POST", headers=[("X-Gateway-CSRF", "other")])
-        with self.assertRaises(SecurityError):
-            check_csrf(request, "tok")
-
-    def test_get_does_not_require_a_token(self) -> None:
-        check_csrf(make_request(method="GET"), "tok")
-
-
-class LoopbackTests(PolicyTests):
-    def test_setup_surface_is_refused_from_a_lan_client(self) -> None:
-        request = make_request(path="/setup/providers", client="10.10.11.50")
-        with self.assertRaises(SecurityError) as ctx:
-            require_loopback(request, self.policy)
-        self.assertEqual(ctx.exception.status, 403)
-
-    def test_setup_surface_is_allowed_from_loopback(self) -> None:
-        request = make_request(path="/setup/providers", client="127.0.0.1")
-        require_loopback(request, self.policy)
-
-    def test_owner_surface_is_not_loopback_only(self) -> None:
-        request = make_request(path="/owner/", client="10.10.11.50")
-        require_loopback(request, self.policy)
-
-    def test_loopback_detection(self) -> None:
-        self.assertTrue(is_loopback_client("127.0.0.1"))
-        self.assertTrue(is_loopback_client("::1"))
-        self.assertFalse(is_loopback_client("10.10.11.50"))
-        self.assertFalse(is_loopback_client("not-an-ip"))
 
 
 if __name__ == "__main__":

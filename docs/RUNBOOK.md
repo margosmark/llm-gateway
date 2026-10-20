@@ -52,54 +52,15 @@ docker compose up -d
 docker compose logs -f gateway
 ```
 
-The gateway binds `GATEWAY_BIND` (an explicit private LAN address) and starts
-setup on `GATEWAY_SETUP_BIND` (the same private LAN address by default) at
-port `8766`. Set `GATEWAY_SETUP_BIND=127.0.0.1` for host-only setup. It
-refuses wildcard binds for either listener.
+The gateway binds one listener at `GATEWAY_BIND:GATEWAY_PORT` (default port
+`8765`), serving `/owner/`, `/v1/`, `/health`, and `/version`. It refuses
+wildcard binds. There is no setup listener, second port, owner passphrase, or
+login/bootstrap step.
 
-**Bootstrap safety:** before an owner passphrase exists, do not use a
-LAN-reachable setup listener. Start the first boot with
-`GATEWAY_SETUP_BIND=127.0.0.1`, create the passphrase locally or through an
-SSH tunnel, then restart with the desired private setup bind. The current code
-does not otherwise distinguish the first LAN client from the intended owner;
-see R0 in `REVIEW.md`.
-
-### 1.4 Create the owner passphrase
-
-On the host, with setup bound to loopback for first boot:
-
-```
-http://127.0.0.1:8766/setup/
-```
-
-Open it on the host itself, or tunnel it:
-
-```sh
-ssh -L 8766:127.0.0.1:8766 <host>
-```
-
-The passphrase is created **only** in the setup UI. It is stored as a salted
-PBKDF2 hash in the owner-only credential store and is never displayed again.
-There is no default passphrase and no recovery path other than removing the
-credential store and starting over.
-
-### 1.5 Optional LAN-reachable setup after bootstrap
-
-After the owner passphrase is set, the setup UI may bind the private LAN
-address. Open it directly:
-
-```
-http://10.10.11.109:8766/setup/
-```
-
-If you have restricted it to loopback, tunnel it:
-
-```sh
-ssh -L 8766:127.0.0.1:8766 <host>
-# then open http://127.0.0.1:8766/setup/
-```
-
-The owner passphrase is required either way.
+Open `http://10.10.11.109:8765/owner/` from a trusted LAN device. Any device
+that can reach this address can administer the gateway and invoke its models;
+this is an intentional product boundary, not authentication. Do not expose the
+address beyond a LAN you trust.
 
 ---
 
@@ -109,19 +70,17 @@ Everything else happens in the browser.
 
 | Task | Where |
 |---|---|
-| Connect a provider | Setup UI → Providers |
-| Test a provider | Setup UI → Providers → *Test connection* |
-| Refresh a catalogue | Setup UI → Providers → *Refresh model catalog* |
-| Enable a model | Setup UI in LAN no-auth mode; owner console only in authenticated mode |
-| Create or publish an alias | Setup UI in LAN no-auth mode; owner console only in authenticated mode |
-| Issue a caller token | Setup UI in LAN no-auth mode; owner console only in authenticated mode |
-| Read status and limits | Owner console or Setup UI → Status |
+| Connect a provider | Owner console → Providers |
+| Test a provider | Owner console → Providers → *Test connection* |
+| Refresh a catalogue | Owner console → Providers → *Refresh model catalog* |
+| Enable a model | Owner console → Models & Routes |
+| Create or publish an alias | Owner console → Models & Routes |
+| Manage profile metadata | Owner console → Profiles (does not restrict LAN invocation) |
+| Read status and limits | Owner console → Status |
 
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
-page load never calls a provider.
-
-The OpenCode Go **Save and test** action stores the key and explicitly runs a
-connection test. Ordinary page loads never call a provider.
+page load or configuration save never calls a provider. Credentials are stored
+separately and never returned by state or status APIs.
 
 ---
 
@@ -136,16 +95,11 @@ curl -s http://10.10.11.109:8765/v1/models
 `/version` must report exactly the four keys, and `image_revision` must be
 the digest of the image that is running.
 
-The setup listener must **not** be served on the owner port, and it must
-require a session:
-
-```sh
-curl -s -o /dev/null -w '%{http_code}\n' http://10.10.11.109:8765/setup/api/state
-# expected: 404 - the setup surface has its own port
-
-curl -s -o /dev/null -w '%{http_code}\n' http://10.10.11.109:8766/setup/api/state
-# expected: 401 - the setup surface requires an owner session
-```
+The console and setup path are not separate surfaces: `/owner/` is served on
+this listener, while `/setup/` is absent. Owner state is readable without a
+login. Browser mutations require the exact canonical `Origin`, but no session
+or CSRF bootstrap. Confirm there is no second listener on port `8766` through
+your normal host-level listener inspection.
 
 ---
 
@@ -154,24 +108,13 @@ curl -s -o /dev/null -w '%{http_code}\n' http://10.10.11.109:8766/setup/api/stat
 The live deployment at `10.10.11.109:8765` is **left running** until the
 candidate has passed its gates. Cut over side-by-side-safe:
 
-1. Verify the candidate on an alternate port:
-
-   ```sh
-   GATEWAY_BIND=10.10.11.109 GATEWAY_PORT=8767 GATEWAY_SETUP_PORT=8768 \
-     docker compose up -d
-   ```
-
-2. Exercise it: connect a provider, publish an alias, send a completion.
-3. Stop it and restart on the production port:
-
-   ```sh
-   docker compose down
-   GATEWAY_BIND=10.10.11.109 docker compose up -d
-   ```
-
-4. Confirm the release identity and the health endpoint.
-5. Only then decide what to do with the previous service. **Do not stop it
-   before the candidate has passed.**
+1. Verify the candidate in an isolated host/network namespace or disposable
+   environment using an alternate single listener port.
+2. Exercise the owner console, synthetic configuration path, no-route API
+   refusal, and release identity. Provider requests are out of scope for this
+   deployment check; tests use mocked transport only.
+3. Stop the disposable candidate. For a production cutover, use the approved
+   immutable candidate and exact state-volume release procedure.
 
 ---
 
@@ -207,8 +150,7 @@ The credential store is separate and is never touched by a rollback.
 | Symptom | Cause | Action |
 |---|---|---|
 | `refusing to start: a wildcard bind...` | `GATEWAY_BIND` is `0.0.0.0` | Set it to the explicit private LAN address |
-| The setup UI will not load | `GATEWAY_SETUP_BIND` does not match the address you opened, or is not assigned to the host | Use the configured setup address; use `127.0.0.1` plus an SSH tunnel only for loopback-only setup |
-| The console asks for a passphrase and there is none | The passphrase has not been created yet | Create it in the setup UI |
+| The owner console will not load | The configured private address is not assigned to the host, or the listener is unavailable | Use the configured private address and port; login/bootstrap is not part of this product mode |
 | A provider shows *Failed* | The credential was rejected or the provider is unreachable | **Test connection** and read the message; the stored credential is never displayed |
 | A model shows an empty dialect | The provider serves it but does not document the endpoint | Enter it manually and set the dialect, or use an OpenAI-dialect model |
 | A route says the dialect cannot be translated | The model is served over Anthropic Messages or Google v1beta | The gateway refuses rather than guessing; publish an OpenAI-dialect route |
