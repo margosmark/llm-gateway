@@ -297,9 +297,32 @@ class SecurityProbeTests(unittest.TestCase):
         self.assertEqual(status, 404)
 
     def test_setup_listener_serves_the_setup_surface(self) -> None:
-        status, payload, _ = self.harness.request("GET", "/setup/api/state", port=self.harness.setup_port)
+        status, payload, _ = self.harness.request("GET", "/setup/api/status", port=self.harness.setup_port)
         self.assertEqual(status, 200)
-        self.assertEqual(payload["surface"], "setup")
+        self.assertEqual(payload["service"], "personal-llm-gateway")
+
+    def test_full_state_requires_a_session(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"]["type"], "owner_session_required")
+
+    def test_safe_status_is_available_without_a_session(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/owner/api/status")
+        self.assertEqual(status, 200)
+        # The safe status must not carry the disclosure class: no profile
+        # records, no configuration revision, no request ledger.
+        self.assertNotIn("profiles", payload)
+        self.assertNotIn("revision", payload)
+        self.assertNotIn("ledger", payload)
+        self.assertNotIn("limits", payload)
+        self.assertNotIn("aliases", payload)
+
+    def test_passphrase_can_only_be_created_on_the_setup_surface(self) -> None:
+        status, payload, _ = self.harness.request(
+            "POST", "/owner/api/session", body={"passphrase": "claimed-from-the-lan"}
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error"]["type"], "passphrase_creation_forbidden")
 
     def test_console_is_served(self) -> None:
         status, payload, headers = self.harness.request("GET", "/owner/", raw=True)
@@ -585,7 +608,10 @@ class ConsoleApiTests(unittest.TestCase):
 
     def _login(self) -> dict[str, str]:
         status, payload, headers = self.harness.request(
-            "POST", "/owner/api/session", body={"passphrase": "test-passphrase"}
+            "POST",
+            "/setup/api/session",
+            body={"passphrase": "test-passphrase"},
+            port=self.harness.setup_port,
         )
         self.assertEqual(status, 200)
         cookies = [value.split(";")[0] for value in headers.get("set-cookie", [])]

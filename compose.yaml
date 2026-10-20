@@ -1,0 +1,68 @@
+# Personal LLM Gateway - deployment.
+#
+# This file is deliberately explicit about exposure. The gateway is private
+# infrastructure for one owner:
+#
+#   * it binds an explicit private LAN address, never a wildcard;
+#   * the setup listener binds loopback only, so it is reachable from the
+#     host itself or through an SSH local tunnel, and from nowhere else;
+#   * it creates no firewall rule and no router rule;
+#   * the persistent volume holds the configuration and the owner-only
+#     credential store, and is never part of the image.
+#
+# Host networking is used so the process can bind the real LAN address
+# instead of a wildcard inside a container namespace. The published surface
+# is therefore exactly one private address and one loopback port.
+
+name: personal-llm-gateway
+
+services:
+  gateway:
+    image: personal-llm-gateway:candidate
+    container_name: personal-llm-gateway
+    build:
+      context: .
+      args:
+        SOURCE_REVISION: "${SOURCE_REVISION:-unknown}"
+        SOURCE_TREE: "${SOURCE_TREE:-unknown}"
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      # The explicit private LAN address. A wildcard is refused at startup.
+      GATEWAY_BIND: "${GATEWAY_BIND:-10.10.11.109}"
+      GATEWAY_PORT: "${GATEWAY_PORT:-8765}"
+      GATEWAY_SETUP_PORT: "${GATEWAY_SETUP_PORT:-8766}"
+      GATEWAY_DATA_DIR: "/var/lib/gateway"
+    volumes:
+      # The configuration and the owner-only credential store.
+      - gateway-state:/var/lib/gateway
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import os,sys,urllib.request
+          h=os.environ.get('GATEWAY_BIND','127.0.0.1')
+          p=os.environ.get('GATEWAY_PORT','8765')
+          sys.exit(0 if urllib.request.urlopen(f'http://{h}:{p}/health', timeout=4).status==200 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+volumes:
+  gateway-state:
+    name: personal-llm-gateway-state

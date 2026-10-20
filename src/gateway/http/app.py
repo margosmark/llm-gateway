@@ -128,6 +128,7 @@ class GatewayApp:
             r.add(["GET"], prefix + "/index.html", self.handle_console)
             r.add(["GET"], prefix + "/app.js", self.handle_static_js)
             r.add(["GET"], prefix + "/style.css", self.handle_static_css)
+            r.add(["GET"], prefix + "/api/status", self.handle_public_status)
             r.add(["GET"], prefix + "/api/state", self.handle_state)
             r.add(["GET"], prefix + "/api/session", self.handle_session_info)
             r.add(["POST"], prefix + "/api/session", self.handle_login)
@@ -453,7 +454,22 @@ class GatewayApp:
                 {"error": {"message": "a passphrase is required", "type": "malformed_request"}}, 400
             )
         if not self.owner_auth.passphrase_is_set():
-            # First run: the owner chooses the passphrase.
+            # First run: the owner chooses the passphrase. This is only
+            # possible from the setup UI. Otherwise the first host to reach
+            # the LAN console could claim the gateway.
+            if self._surface(request) != SURFACE_SETUP:
+                return json_response(
+                    {
+                        "error": {
+                            "message": (
+                                "the owner passphrase is created in the setup UI, which is reachable "
+                                "from the host itself or through an SSH local tunnel"
+                            ),
+                            "type": "passphrase_creation_forbidden",
+                        }
+                    },
+                    403,
+                )
             self.owner_auth.set_passphrase(passphrase)
             session = self.owner_auth.create_session()
             return Response(
@@ -488,7 +504,46 @@ class GatewayApp:
 
     # --- state -----------------------------------------------------------
 
+    def handle_public_status(self, request: Request) -> Response:
+        """Safe, unauthenticated status.
+
+        This is the only console data reachable without a session. It
+        deliberately excludes profile records, the configuration revision,
+        routing detail, the request ledger and the credential store state,
+        because the live deployment's disclosure class was exactly that.
+        """
+        config = self.config.snapshot()
+        providers = [
+            {
+                "provider_id": provider.provider_id,
+                "state": provider.state,
+                "enabled_models": sorted(
+                    entry.model_id for entry in provider.enabled_models()
+                ),
+            }
+            for provider in sorted(config.providers.values(), key=lambda p: p.provider_id)
+        ]
+        published = sorted(config.published_aliases(), key=lambda a: a.name)
+        return json_response(
+            {
+                "service": "personal-llm-gateway",
+                "initialized": config.initialized,
+                "access_mode": config.access_mode,
+                "access_mode_description": access_mode_description(config.access_mode),
+                "providers": providers,
+                "published_models": [alias.name for alias in published],
+                "release": self._release_identity() if self._release_identity else {},
+                "checklist": self._checklist(config),
+            }
+        )
+
     def handle_state(self, request: Request) -> Response:
+        session = self._session(request)
+        if session is None:
+            return json_response(
+                {"error": {"message": "an owner session is required", "type": "owner_session_required"}},
+                401,
+            )
         config = self.config.snapshot()
         session = self._session(request)
         may_mutate = self._can_mutate(request)
