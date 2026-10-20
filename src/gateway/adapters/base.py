@@ -261,8 +261,12 @@ def error_from_response(
     code = _extract_upstream_code(payload)
     error_class = classify_status(status, payload, code)
     message = CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
+    # The upstream status is metadata, and it is what tells an operator
+    # whether the provider is refusing our request or is failing itself.
+    details = [f"upstream status {status}"]
     if code:
-        message = f"{message} (upstream code: {code})"
+        details.append(f"upstream code: {code}")
+    message = f"{message} ({'; '.join(details)})"
     return AdapterError(
         error_class=error_class,
         message=message,

@@ -74,6 +74,19 @@ class RequestLoggerTests(unittest.TestCase):
         quiet.log(method="GET", path="/health", status=200, duration_ms=1)
         self.assertEqual(self.stream.getvalue(), "")
 
+    def test_the_action_is_logged(self) -> None:
+        self.logger.log(
+            method="POST",
+            path="/owner/api/provider",
+            status=502,
+            duration_ms=130,
+            action="device_start",
+            error_class="transient",
+        )
+        record = self._line()
+        self.assertEqual(record["action"], "device_start")
+        self.assertEqual(record["error_class"], "transient")
+
     def test_each_request_is_one_line(self) -> None:
         for index in range(3):
             self.logger.log(method="GET", path="/health", status=200, duration_ms=index)

@@ -47,6 +47,7 @@ class RequestLogger:
         model: str | None = None,
         error_class: str | None = None,
         streamed: bool = False,
+        action: str | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -57,6 +58,8 @@ class RequestLogger:
             "status": status,
             "duration_ms": duration_ms,
         }
+        if action:
+            record["action"] = action
         if alias:
             record["alias"] = alias
         if provider:

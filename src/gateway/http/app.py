@@ -196,6 +196,7 @@ class GatewayApp:
         status = getattr(result, "status", 0)
         error_class = None
         alias = provider = model = None
+        action = request.context.get("action")
         body = getattr(result, "body", None)
         if isinstance(body, (bytes, bytearray)):
             try:
@@ -221,6 +222,7 @@ class GatewayApp:
             model=model,
             error_class=error_class,
             streamed=bool(request.context.get("streamed")),
+            action=action,
         )
 
     # --- surface helpers -------------------------------------------------
@@ -590,6 +592,11 @@ class GatewayApp:
             payload = {}
         action = str(payload.get("action") or "")
         provider_id = str(payload.get("provider_id") or "")
+        # The access log must say *which* owner action was performed: four
+        # different provider actions share one path, and without this a
+        # failure cannot be told apart from the others.
+        request.context["action"] = action
+        request.context["provider_id"] = provider_id
         adapter = self.registry.get(provider_id)
         if adapter is None:
             return json_response(
