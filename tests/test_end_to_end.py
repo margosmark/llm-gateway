@@ -59,6 +59,9 @@ class FakeAdapter:
         self.stream_frames = stream_frames or []
         self.calls: list[ProviderRequest] = []
         self.model_list_calls = 0
+        #: When set, the provider answers with a stream even for a client
+        #: that asked for a single object - a streaming-only upstream.
+        self.always_stream = False
 
     def list_models(self) -> list:
         self.model_list_calls += 1
@@ -82,7 +85,7 @@ class FakeAdapter:
         self.calls.append(request)
         if self.fail_with is not None:
             raise self.fail_with
-        if request.stream:
+        if request.stream or self.always_stream:
             return ProviderResponse(
                 status=200,
                 headers={},

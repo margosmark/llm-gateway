@@ -562,17 +562,34 @@ class ChatGPTCodexAdapter:
         )
 
     def invoke(self, request: ProviderRequest) -> ProviderResponse:
-        """Send a request upstream over the Responses protocol."""
-        body = json.dumps(request.payload, ensure_ascii=False).encode("utf-8")
+        """Send a request upstream over the Responses protocol.
+
+        The ChatGPT backend is **streaming only**: it rejects a Responses
+        request that does not set ``stream: true``, and it expects the same
+        request fields OpenAI's own Codex client sends. A client that asked
+        for a single, non-streamed completion is served by consuming this
+        stream and presenting the result as one object.
+        """
+        payload = dict(request.payload)
+        payload["stream"] = True
+        # The fields the Codex client always sends. A caller may set them
+        # itself; the rest are defaults.
+        payload.setdefault("tool_choice", "auto")
+        payload.setdefault("parallel_tool_calls", True)
+        # Never ask the provider to store the response.
+        payload["store"] = False
+        payload.setdefault("include", ["reasoning.encrypted_content"])
+
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = self._auth_headers()
-        headers["Accept"] = "text/event-stream" if request.stream else "application/json"
+        headers["Accept"] = "text/event-stream"
 
         response = self._client.request(
             "POST",
             f"{self._chatgpt_base}{RESPONSES_PATH}",
             headers=headers,
             body=body,
-            stream=request.stream,
+            stream=True,
             provider_id=PROVIDER_ID,
         )
 
@@ -580,13 +597,13 @@ class ChatGPTCodexAdapter:
             # The token may simply have expired. Refresh once, then give up.
             if self.refresh():
                 headers = self._auth_headers()
-                headers["Accept"] = "text/event-stream" if request.stream else "application/json"
+                headers["Accept"] = "text/event-stream"
                 response = self._client.request(
                     "POST",
                     f"{self._chatgpt_base}{RESPONSES_PATH}",
                     headers=headers,
                     body=body,
-                    stream=request.stream,
+                    stream=True,
                     provider_id=PROVIDER_ID,
                 )
 
