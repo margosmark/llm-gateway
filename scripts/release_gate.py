@@ -47,6 +47,8 @@ SECRET_PATTERNS = {
 
 # The fixed /version schema.
 EXPECTED_VERSION_KEYS = {"service", "source_revision", "source_tree", "image_revision"}
+EXPECTED_BIND_ADDRESS = "127.0.0.1"
+EXPECTED_BIND_PORT = 18775
 
 
 @dataclass
@@ -183,7 +185,29 @@ def listening_sockets(
     return results
 
 
-def gateway_listening_sockets() -> list[dict[str, Any]]:
+def _gateway_pid(proc_root: str = "/proc") -> int | None:
+    """Return the unique process running ``python -m gateway``, if any."""
+    import os
+
+    matches: list[int] = []
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "cmdline"), "rb") as handle:
+                argv = handle.read().decode("utf-8", "replace").split("\0")
+        except OSError:
+            continue
+        if any(argv[index:index + 2] == ["-m", "gateway"] for index in range(len(argv) - 1)):
+            matches.append(int(entry))
+    return matches[0] if len(matches) == 1 else None
+
+
+def gateway_listening_sockets(proc_root: str = "/proc") -> list[dict[str, Any]]:
     """The sockets the gateway process itself is listening on.
 
     Finds the gateway process and returns only its own listening sockets.
@@ -192,19 +216,19 @@ def gateway_listening_sockets() -> list[dict[str, Any]]:
     """
     import os
 
-    pid: int | None = None
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            with open(os.path.join("/proc", entry, "cmdline"), "rb") as handle:
-                cmdline = handle.read().decode("utf-8", "replace")
-        except OSError:
-            continue
-        if "-m" in cmdline and "gateway" in cmdline:
-            pid = int(entry)
-            break
-    return listening_sockets(pid=pid)
+    pid = _gateway_pid(proc_root)
+    if pid is None:
+        return []
+    return listening_sockets(
+        proc_root=os.path.join(proc_root, "net"),
+        pid=pid,
+        process_root=proc_root,
+    )
+
+
+def _has_expected_listener(bound: list[tuple[str, int]]) -> bool:
+    """Require exactly the candidate's configured loopback socket."""
+    return bound == [(EXPECTED_BIND_ADDRESS, EXPECTED_BIND_PORT)]
 
 
 def _parse_bound_listeners(raw: str) -> list[tuple[str, int]]:
@@ -354,7 +378,7 @@ def main(argv: list[str]) -> int:
             "-e",
             "GATEWAY_BIND=127.0.0.1",
             "-e",
-            "GATEWAY_PORT=18775",
+            f"GATEWAY_PORT={EXPECTED_BIND_PORT}",
             reference,
         ],
         timeout=60,
@@ -365,7 +389,7 @@ def main(argv: list[str]) -> int:
         return 1
     gate.record("the candidate container starts", True)
 
-    base = "http://127.0.0.1:18775"
+    base = f"http://{EXPECTED_BIND_ADDRESS}:{EXPECTED_BIND_PORT}"
     try:
         reachable = wait_for(base + "/health")
         # The probe must have reached *this* container. A stray listener on
@@ -486,8 +510,14 @@ def main(argv: list[str]) -> int:
             f"listening={bound} raw={listening[:120]}",
         )
         gate.record(
+            "the candidate owns the expected loopback listener",
+            listeners.returncode == 0
+            and _has_expected_listener(bound),
+            f"expected={EXPECTED_BIND_ADDRESS}:{EXPECTED_BIND_PORT} listening={bound}",
+        )
+        gate.record(
             "the container listens only on the configured address",
-            all(entry[0] in ("127.0.0.1", "::1") for entry in bound) if bound else False,
+            all(entry[0] == EXPECTED_BIND_ADDRESS for entry in bound) if bound else False,
             f"listening={bound}",
         )
     finally:
