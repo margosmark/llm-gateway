@@ -4,8 +4,10 @@
 # infrastructure for one owner:
 #
 #   * it binds an explicit private LAN address, never a wildcard;
-#   * the setup listener binds loopback only, so it is reachable from the
-#     host itself or through an SSH local tunnel, and from nowhere else;
+#   * the setup listener binds the same private address by default, so the
+#     setup UI is reachable from the network. Set GATEWAY_SETUP_BIND to
+#     127.0.0.1 to make it loopback-only. Either way the owner passphrase
+#     protects it, and it is never served on the owner port;
 #   * it creates no firewall rule and no router rule;
 #   * the persistent volume holds the configuration and the owner-only
 #     credential store, and is never part of the image.
@@ -32,6 +34,10 @@ services:
       GATEWAY_BIND: "${GATEWAY_BIND:-10.10.11.109}"
       GATEWAY_PORT: "${GATEWAY_PORT:-8765}"
       GATEWAY_SETUP_PORT: "${GATEWAY_SETUP_PORT:-8766}"
+      # Where the setup listener binds. It defaults to the LAN address so the
+      # setup UI is reachable from the network. Set it to 127.0.0.1 for a
+      # loopback-only setup UI. The owner passphrase protects it either way.
+      GATEWAY_SETUP_BIND: "${GATEWAY_SETUP_BIND:-}"
       GATEWAY_DATA_DIR: "/var/lib/gateway"
     volumes:
       # The configuration and the owner-only credential store.

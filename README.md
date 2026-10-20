@@ -34,9 +34,27 @@ never breaks your client's configuration.
 | Surface | Address | Who can reach it | What it does |
 |---|---|---|---|
 | Owner console | `http://10.10.11.109:8765/owner/` | LAN | Safe status without a session. Read-only in LAN no-auth mode; configurable with the owner passphrase in authenticated mode |
-| Setup UI | `http://127.0.0.1:8766/setup/` | **The host only** (or an SSH tunnel) | Everything: credential enrolment, provider tests, catalogue refresh, and all configuration |
+| Setup UI | `http://10.10.11.109:8766/setup/` | LAN (or loopback — see below) | Everything: credential enrolment, provider tests, catalogue refresh, and all configuration |
 | API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
+
+The setup UI is a **separate listener on its own port**. Where it binds is
+your choice:
+
+```sh
+# reachable from the network (the default)
+GATEWAY_SETUP_BIND=10.10.11.109
+
+# loopback only - the host itself, or an SSH tunnel
+GATEWAY_SETUP_BIND=127.0.0.1
+```
+
+Either way the **owner passphrase is required** before anything can be
+enrolled, and the CSRF, `Host` and `Origin` checks apply to it exactly as
+they do to the console. What changes is only who can *reach* the page — if
+you expose it to the network, the network is your perimeter and the
+passphrase is the only thing standing between a LAN host and your provider
+credentials. Tighten it at the firewall if that matters to you.
 
 The gateway binds an **explicit private address**. A wildcard bind is refused
 at startup, and there is no flag that enables one. It never creates a
@@ -45,8 +63,8 @@ firewall or router rule, and it is never publicly exposed.
 ### Where the configuration happens
 
 The setup UI and the owner console are the **same application** on two
-listeners. The setup UI is mounted on loopback, so it is reachable from the
-host itself or through an SSH tunnel, and nowhere else.
+listeners. The setup UI has its own port, so it can be bound separately
+from the console.
 
 * In **LAN no-auth mode** the owner console is read-only, even with the
   passphrase — otherwise any host on the network could reconfigure the
@@ -74,7 +92,9 @@ docker compose up -d --build
 
 Then, on the host:
 
-1. Open <http://127.0.0.1:8766/setup/> and create the owner passphrase.
+1. Open <http://10.10.11.109:8766/setup/> and create the owner passphrase.
+   (Use `http://127.0.0.1:8766/setup/` if you bound the setup listener to
+   loopback.)
 2. Connect a provider.
 3. Test the connection.
 4. Refresh the model catalogue.
@@ -294,6 +314,10 @@ them.
   does not endorse this gateway.
 * **No TLS.** The gateway is LAN-only. Put it behind a TLS terminator if you
   need one, and keep it on a private network.
+* **The setup UI is reachable from the network by default.** It requires the
+  owner passphrase, but a network perimeter is not something the gateway
+  provides. Bind it to loopback with `GATEWAY_SETUP_BIND=127.0.0.1` if you
+  would rather it were not reachable at all.
 * **The bridge is verified against a recorded corpus**, not yet against live
   provider captures. The corpus and its round-trip runner are in
   `tests/fixtures/bridge_corpus.json`.

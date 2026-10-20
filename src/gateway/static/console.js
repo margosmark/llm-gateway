@@ -9,11 +9,11 @@
  *   - a caller token is shown once, as the direct result of issuing it;
  *   - a saved credential is never asked for again and never displayed.
  */
-(function () {
+(function (global) {
   "use strict";
 
-  var BASE = window.GATEWAY_BASE || "";
-  var app = document.getElementById("app");
+  var BASE = (global.GATEWAY_BASE || "");
+  var app = null;
   var state = null;
   var tab = "status";
   var busy = false;
@@ -28,6 +28,8 @@
         else if (key === "text") node.textContent = attrs[key];
         else if (key === "html") node.innerHTML = attrs[key];
         else if (key.slice(0, 2) === "on") node.addEventListener(key.slice(2), attrs[key]);
+        else if (attrs[key] === true) node.setAttribute(key, "");
+        else if (attrs[key] === false) node.removeAttribute(key);
         else if (attrs[key] !== null && attrs[key] !== undefined) node.setAttribute(key, attrs[key]);
       });
     }
@@ -532,10 +534,20 @@
           class: "primary", type: "button", text: "Save and test",
           disabled: !state.can_enroll_credentials,
           onclick: function () {
-            run(api(BASE + "/api/provider", { method: "POST", body: { action: "enroll_key", provider_id: provider.provider_id, api_key: input.value } }))
+            var key = input.value.trim();
+            if (!key) {
+              toast("enter the API key first", "bad");
+              return;
+            }
+            run(api(BASE + "/api/provider", { method: "POST", body: { action: "enroll_key", provider_id: provider.provider_id, api_key: key } }))
               .then(function () {
                 input.value = "";
-                toast("Key stored. It will not be shown again.", "ok");
+                toast("Key stored. It will not be shown again. Testing the connection...", "ok");
+                // The button says "Save and test", so it tests.
+                return api(BASE + "/api/provider", { method: "POST", body: { action: "test", provider_id: provider.provider_id } });
+              })
+              .then(function (result) {
+                toast(result.message, result.ok ? "ok" : "bad");
                 return refresh();
               })
               .catch(function () {});
@@ -1055,6 +1067,11 @@
 
   // --- bootstrap --------------------------------------------------------
 
+  function bootstrap() {
+    app = document.getElementById("app");
+    refresh();
+  }
+
   function refresh() {
     return api(BASE + "/api/session").then(function (session) {
       return api(BASE + "/api/status").then(function (publicState) {
@@ -1111,5 +1128,14 @@
     });
   }
 
-  refresh();
-})();
+  // The DOM helper is exported so its behaviour can be tested without a
+  // browser. In a browser the console boots normally.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { el: el };
+    return;
+  }
+
+  if (global.document && global.fetch) {
+    bootstrap();
+  }
+})(typeof window !== "undefined" ? window : globalThis);

@@ -53,6 +53,26 @@ def _is_wildcard(host: str) -> bool:
         return False
 
 
+def _address_is_local(host: str) -> bool:
+    """Whether *host* names an address this machine actually has.
+
+    A bind to an address the host does not own fails at bind time with a
+    socket error and a traceback. Checking first turns that into a sentence
+    an operator can act on.
+    """
+    import socket
+
+    if host.strip() in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((host, 0))
+        return True
+    except OSError:
+        return False
+
+
 def _is_private_or_loopback(host: str) -> bool:
     try:
         address = ipaddress.ip_address(host.strip())
@@ -81,7 +101,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--setup-port",
         type=int,
         default=int(os.environ.get("GATEWAY_SETUP_PORT", DEFAULT_SETUP_PORT)),
-        help="Port for the loopback-only setup listener.",
+        help="Port for the setup listener.",
+    )
+    parser.add_argument(
+        "--setup-bind",
+        default=os.environ.get("GATEWAY_SETUP_BIND", ""),
+        help=(
+            "Address the setup listener binds. Defaults to the LAN bind address, "
+            "which makes the setup UI reachable from the network. Pass "
+            "127.0.0.1 to make it loopback-only instead. The owner passphrase "
+            "still protects it either way."
+        ),
     )
     parser.add_argument(
         "--data-dir",
@@ -96,7 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_application(data_dir: Path, host: str, port: int, setup_port: int):
+def build_application(
+    data_dir: Path, host: str, port: int, setup_port: int, setup_bind: str = ""
+):
     """Build the stores, adapters, router and the two applications."""
     data_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(data_dir, 0o700)
@@ -124,17 +156,43 @@ def build_application(data_dir: Path, host: str, port: int, setup_port: int):
     owner_auth = OwnerAuth(credentials)
     profile_auth = ProfileAuth(config, credentials)
 
-    allowed_hosts = build_allowed_hosts(host, port) | build_allowed_hosts("127.0.0.1", setup_port)
+    # The setup listener binds where the operator asked. It defaults to the
+    # LAN address so the setup UI is reachable from the network; pass
+    # 127.0.0.1 for a loopback-only setup UI.
+    setup_host = setup_bind.strip() or host
+    if _is_wildcard(setup_host):
+        raise SystemExit(
+            "refusing to start: the setup listener may not bind a wildcard address."
+        )
+    if not _is_private_or_loopback(setup_host):
+        raise SystemExit(
+            f"refusing to start: the setup bind address '{setup_host}' is not private or loopback."
+        )
+    if not _address_is_local(setup_host):
+        raise SystemExit(
+            f"refusing to start: the setup bind address '{setup_host}' is not an address on this host."
+        )
+
+    allowed_hosts = build_allowed_hosts(host, port) | build_allowed_hosts(setup_host, setup_port)
     canonical_origins = build_canonical_origins(host, port) | build_canonical_origins(
-        "127.0.0.1", setup_port
+        setup_host, setup_port
     )
+    loopback_hosts = build_allowed_hosts("127.0.0.1", setup_port)
+    loopback_origins = build_canonical_origins("127.0.0.1", setup_port)
 
     base_url = f"http://{host}:{port}"
 
-    def make_app(mounts: tuple[str, ...], policy_hosts: set[str], policy_origins: set[str], url: str) -> GatewayApp:
+    def make_app(
+        mounts: tuple[str, ...],
+        policy_hosts: set[str],
+        policy_origins: set[str],
+        url: str,
+        loopback_surfaces: frozenset[str] = frozenset(),
+    ) -> GatewayApp:
         policy = SecurityPolicy(
             allowed_hosts=policy_hosts,
             canonical_origins=policy_origins,
+            loopback_surfaces=loopback_surfaces,
         )
         return GatewayApp(
             config=config,
@@ -151,14 +209,19 @@ def build_application(data_dir: Path, host: str, port: int, setup_port: int):
             mounts=mounts,
         )
 
+    # The loopback-only rule applies only when the setup listener is
+    # actually bound to loopback.
+    setup_loopback = frozenset({"/setup/"}) if setup_host == "127.0.0.1" else frozenset()
+
     lan_app = make_app(("/owner",), allowed_hosts, canonical_origins, base_url)
     setup_app = make_app(
         ("/setup",),
-        build_allowed_hosts("127.0.0.1", setup_port),
-        build_canonical_origins("127.0.0.1", setup_port),
-        f"http://127.0.0.1:{setup_port}",
+        allowed_hosts,
+        canonical_origins,
+        f"http://{setup_host}:{setup_port}",
+        loopback_surfaces=setup_loopback,
     )
-    return lan_app, setup_app, config, credentials, router, owner_auth
+    return lan_app, setup_app, config, credentials, router, owner_auth, setup_host
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,21 +240,29 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if not _address_is_local(args.host):
+        print(
+            f"refusing to start: '{args.host}' is not an address on this host. "
+            "Set GATEWAY_BIND to an address this machine owns.",
+            file=sys.stderr,
+        )
+        return 2
 
     data_dir = Path(args.data_dir)
-    lan_app, setup_app, config, credentials, router, owner_auth = build_application(
-        data_dir, args.host, args.port, args.setup_port
+    lan_app, setup_app, config, credentials, router, owner_auth, setup_host = build_application(
+        data_dir, args.host, args.port, args.setup_port, args.setup_bind
     )
 
     if args.print_url:
+        setup_host = args.setup_bind.strip() or args.host
         print(f"owner console: http://{args.host}:{args.port}/owner/")
-        print(f"setup UI:      http://127.0.0.1:{args.setup_port}/setup/")
+        print(f"setup UI:      http://{setup_host}:{args.setup_port}/setup/")
         print(f"API:           http://{args.host}:{args.port}/v1/")
         print(f"release:       http://{args.host}:{args.port}/version")
         return 0
 
     lan_server = Server(args.host, args.port, lan_app.handle)
-    setup_server = Server("127.0.0.1", args.setup_port, setup_app.handle)
+    setup_server = Server(setup_host, args.setup_port, setup_app.handle)
 
     lan_server.start_background()
     setup_server.start_background()
@@ -200,9 +271,15 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "personal-llm-gateway listening on "
         f"http://{args.host}:{args.port}/owner/ (LAN) and "
-        f"http://127.0.0.1:{args.setup_port}/setup/ (loopback only)",
+        f"http://{setup_host}:{args.setup_port}/setup/ (setup)",
         flush=True,
     )
+    if setup_host != "127.0.0.1":
+        print(
+            "note: the setup UI is reachable from the network. The owner passphrase "
+            "still protects it. Use --setup-bind 127.0.0.1 for a loopback-only setup UI.",
+            flush=True,
+        )
     print(
         f"release: source={identity['source_revision']} tree={identity['source_tree']} "
         f"image={identity['image_revision']}",
