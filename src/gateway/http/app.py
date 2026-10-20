@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -83,6 +87,10 @@ class GatewayApp:
         #: separate listeners because a wildcard bind is forbidden, so
         #: 127.0.0.1 is only reachable if something binds it explicitly.
         self.mounts = mounts
+        #: A per-process secret used to derive upstream conversation
+        #: identifiers. It is regenerated on every start, which is what
+        #: bounds the lifetime of a derived session.
+        self._session_secret = secrets.token_bytes(32)
         #: Device authorisations in flight, keyed by their device auth id.
         #: Held in memory only; nothing about them is persisted.
         self._pending_device: dict[str, Any] = {}
@@ -234,6 +242,45 @@ class GatewayApp:
     def handle_responses(self, request: Request) -> Any:
         return self._handle_inference(request, DIALECT_OPENAI_RESPONSES)
 
+    def _conversation_session(self, request: Request, profile, alias_name: str) -> str:
+        """Build the upstream conversation identifier.
+
+        OpenCode Go **requires** an ``x-opencode-session`` header and refuses
+        a request without one, so the gateway cannot simply pass through
+        whatever the client sent - most OpenAI-compatible clients send
+        nothing at all.
+
+        The value is derived server-side and namespaced, so that:
+
+        * the same client talking to the same alias gets the same value, and
+          the provider can route and cache the conversation;
+        * two different clients cannot collide on one value;
+        * a caller-supplied value is validated and cannot be used to forge
+          another client's session, or to smuggle arbitrary bytes upstream;
+        * the value is scoped to this process, so a restart ends the
+          session rather than extending it indefinitely.
+
+        The provider scope is added by the router, because the provider that
+        serves a request is not known until a route is chosen.
+        """
+        hint = ""
+        for header in ("x-opencode-session", "x-session-id"):
+            candidate = request.headers.get(header)
+            if candidate:
+                hint = candidate.strip()
+                break
+        # A caller-supplied hint is bounded and reduced to a safe alphabet:
+        # no control characters, no separators, nothing that could be read
+        # as a header or a field delimiter.
+        hint = re.sub(r"[^A-Za-z0-9._-]", "", hint)[:32]
+
+        discriminator = profile.profile_id if profile is not None else "anonymous"
+        seed = f"{discriminator}|{alias_name}|{request.client_address[0]}"
+        digest = hmac.new(
+            self._session_secret, seed.encode("utf-8"), hashlib.sha256
+        ).hexdigest()[:24]
+        return f"{digest}.{hint}" if hint else digest
+
     def _handle_inference(self, request: Request, dialect: str) -> Any:
         profile = self._resolve_profile(request)
         try:
@@ -264,7 +311,7 @@ class GatewayApp:
 
         stream = bool(payload.get("stream"))
         request_id = f"req_{int(time.time() * 1000):x}"
-        session_id = request.headers.get("x-session-id") or request.headers.get("x-opencode-session")
+        session_id = self._conversation_session(request, profile, alias.name)
 
         routed = self.router.invoke(
             alias.name,
