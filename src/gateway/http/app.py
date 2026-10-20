@@ -39,7 +39,9 @@ from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
+from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
 from gateway.logging import RequestLogger
+from gateway.routes import validate_alias_routes
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -534,6 +536,7 @@ class GatewayApp:
                     "name": profile.name,
                     "enabled": profile.enabled,
                     "allowed_aliases": list(profile.allowed_aliases),
+                    "all_aliases": profile.all_aliases,
                     "has_token": profile.has_token,
                     "token_created_at": profile.token_created_at,
                     "token_rotated_at": profile.token_rotated_at,
@@ -842,12 +845,18 @@ class GatewayApp:
         name = str(payload.get("name") or "")
 
         if action == "save":
-            primary = RouteRef.from_dict(payload.get("primary"))
-            fallbacks = []
-            for item in payload.get("fallbacks") or []:
-                ref = RouteRef.from_dict(item)
-                if ref is not None:
-                    fallbacks.append(ref)
+            # Everything is validated before a configuration transaction
+            # opens, so a bad alias is refused rather than published.
+            try:
+                alias_name = validate_alias_name(payload.get("name"))
+                primary, fallbacks = validate_alias_routes(
+                    self.config, self.registry, payload.get("primary"), payload.get("fallbacks") or []
+                )
+            except ValidationError as exc:
+                return json_response(
+                    {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}},
+                    400,
+                )
             triggers = [t for t in payload.get("fallback_triggers") or [] if t in FALLBACK_TRIGGERS]
             confirmed = [p for p in payload.get("fallback_confirmed_providers") or [] if isinstance(p, str)]
             safe_classes = [
@@ -856,9 +865,9 @@ class GatewayApp:
             ]
             cooldown = payload.get("cooldown_seconds")
             with self.config.mutate() as config:
-                existing = config.aliases.get(name)
-                config.aliases[name] = _alias_from_payload(
-                    name,
+                existing = config.aliases.get(alias_name)
+                config.aliases[alias_name] = _alias_from_payload(
+                    alias_name,
                     primary,
                     fallbacks,
                     triggers,
@@ -871,6 +880,8 @@ class GatewayApp:
             return json_response({"ok": True})
 
         if action == "publish":
+            # Publishing is the last chance to refuse an alias that cannot
+            # be served, so the route is checked again here.
             with self.config.mutate() as config:
                 alias = config.aliases.get(name)
                 if alias is None:
@@ -878,6 +889,14 @@ class GatewayApp:
                 if alias.primary is None:
                     return json_response(
                         {"error": {"message": "the alias has no primary route", "type": "alias_incomplete"}}, 409
+                    )
+                try:
+                    validate_alias_routes(
+                        self.config, self.registry, alias.primary.to_dict(), [r.to_dict() for r in alias.fallbacks]
+                    )
+                except ValidationError as exc:
+                    return json_response(
+                        {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}}, 400
                     )
                 alias.enabled = bool(payload.get("enabled", True))
             return json_response({"ok": True, "enabled": alias.enabled})
@@ -947,10 +966,21 @@ class GatewayApp:
         profile_id = str(payload.get("profile_id") or "")
 
         if action == "save":
-            name = str(payload.get("name") or "").strip()
-            if not name:
-                return json_response({"error": {"message": "a profile name is required", "type": "malformed_request"}}, 400)
-            allowed = [a for a in payload.get("allowed_aliases") or [] if isinstance(a, str)]
+            try:
+                profile_id = validate_profile_id(payload.get("profile_id"))
+                name = str(payload.get("name") or "").strip()
+                if not name:
+                    raise ValidationError("a profile name is required", "name")
+                allowed = []
+                for alias in payload.get("allowed_aliases") or []:
+                    allowed.append(validate_alias_name(alias))
+            except ValidationError as exc:
+                return json_response(
+                    {"error": {"message": exc.message, "type": "invalid_profile", "field": exc.field}}, 400
+                )
+            # A new profile denies by default. Access to every published
+            # alias has to be granted explicitly.
+            all_aliases = bool(payload.get("all_aliases", False))
             with self.config.mutate() as config:
                 existing = config.profiles.get(profile_id)
                 if existing is None:
@@ -961,6 +991,7 @@ class GatewayApp:
                 existing.name = name
                 existing.enabled = bool(payload.get("enabled", True))
                 existing.allowed_aliases = allowed
+                existing.all_aliases = all_aliases
             return json_response({"ok": True, "profile_id": profile_id})
 
         if action == "delete":

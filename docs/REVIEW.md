@@ -160,8 +160,8 @@ non-listening sockets ignored, and process-scoped filtering that excludes a
 wildcard socket belonging to another process. The gate itself now reports
 `listening=[('127.0.0.1', 18775)]` for the candidate.
 
-### R4 — Published aliases and profile identifiers are insufficiently validated
-**Severity: high correctness/recoverability risk.**
+### R4 — Published aliases and profile identifiers are insufficiently validated — **closed**
+**Severity: high correctness/recoverability risk.** *(closed)*
 
 Mutation handlers accept unvalidated alias names, profile IDs, model IDs, and
 route references (`src/gateway/http/app.py:861-902`, `917-956`, and
@@ -177,6 +177,28 @@ before opening a config transaction, require primary/fallback routes to refer
 to enabled registered models, reject duplicate/primary-equal fallbacks, and
 return actionable `4xx` errors. Add tests for invalid IDs, invalid routes, and
 a route that is rejected before publication.
+
+**Resolution.** `gateway/identifiers.py` defines one grammar and one length
+limit for aliases and profile ids: a letter or digit first, then letters,
+digits, dots, underscores and hyphens, at most 64 characters. A model id has
+its own slightly wider grammar, because provider-qualified ids carry colons
+and slashes. Nothing may contain a path separator or a control character.
+
+`gateway/routes.py` validates a route against the live configuration: the
+provider must be registered, and the model must be known **and enabled**. A
+fallback may not repeat the primary or another fallback.
+
+Everything is checked **before** a configuration transaction opens, so a
+refused alias is never written and never appears in `/v1/models`. Publishing
+re-checks the route, because that is the last moment a route that cannot be
+served can be refused. Every refusal is an actionable 4xx naming the field
+and the rule.
+
+**Evidence:** `tests/test_validation.py` - the grammar and its length limit;
+empty, illegal, over-long and path-like identifiers refused; routes to an
+unknown provider, an unknown model and a disabled model refused; a fallback
+repeating the primary or another fallback refused; a refused alias neither
+persisted nor published; a valid alias saved and publishable.
 
 ### R5 — Observability documentation overstates the current implementation — **closed**
 **Severity: medium; honesty and operations risk.** *(closed)*
@@ -210,8 +232,8 @@ non-empty timestamp and a measured latency; a provider failure records its
 error class and updates the error, rate-limit and exhaustion counters; the
 record contains no prompt, message, content or completion field.
 
-### R6 — Owner-session test TTL is ignored
-**Severity: medium testability/correctness defect.**
+### R6 — Owner-session test TTL is ignored — **superseded**
+**Severity: medium testability/correctness defect.** *(superseded)*
 
 `OwnerAuth` accepts `session_ttl` in its constructor
 (`src/gateway/auth.py:74-84`), but `OwnerSession.expired()` always uses the
@@ -220,6 +242,11 @@ which makes short-TTL tests misleading.
 
 **Required fix:** carry the configured expiry/TTL into the session or evaluate
 expiry in `OwnerAuth`; add boundary tests for expiry and pruning.
+
+**Superseded.** The owner session, the passphrase and the owner login flow
+were removed with the trusted-LAN administration mode
+(`docs/TRUSTED_LAN_ADMIN_MODE.md`). `OwnerAuth` and `OwnerSession` no longer
+exist, so there is no TTL to ignore.
 
 ### R7 — CI artifact recording can fail for locally built images — **closed**
 **Severity: medium CI robustness risk.** *(closed)*
@@ -294,9 +321,9 @@ directions; a reasoning item is dropped rather than invented; and, end to end
 over HTTP, a Chat Completions client receives a `chat.completion` object from
 a Responses upstream and a Responses client receives a `response` object.
 
-### R10 — Device authorization is neither setup-only nor shown-once — **partly closed**
-**Severity: high credential-boundary and flow-correctness risk.** *(shown-once
-and interval closed; the surface rule is superseded)*
+### R10 — Device authorization is neither setup-only nor shown-once — **closed**
+**Severity: high credential-boundary and flow-correctness risk.** *(closed:
+shown-once and interval fixed; the surface rule superseded)*
 
 The device start/poll actions do not require `_can_enroll_credentials()`
 (`src/gateway/http/app.py:751-788`), while API-key enrollment does
@@ -436,8 +463,8 @@ deployment that cannot say what it is.
 the real deployment and asserts that `/version` reports the exact image that
 is running.
 
-### R12 — Profile and provider session isolation need explicit policy
-**Severity: medium authorization/privacy risk.**
+### R12 — Profile and provider session isolation need explicit policy — **closed**
+**Severity: medium authorization/privacy risk.** *(closed)*
 
 An empty profile allow-list permits every published alias
 (`src/gateway/auth.py:262-269`), so a newly issued profile token is broad by
@@ -451,9 +478,30 @@ use a separately confirmed all-alias flag), and generate/bind upstream session
 identifiers server-side with profile/provider scope, expiry, size limits, and
 cross-profile collision tests.
 
-### R13 — Plain HTTP is an explicit but high-risk LAN trust assumption
+**Resolution.** *Profiles deny by default.* A profile with no grant may use no
+alias. Access is granted alias by alias, or with a separate, explicit
+`all_aliases` flag that the owner has to set. An empty allow-list is not a
+grant. The Anonymous LAN profile is granted everything explicitly, because
+LAN API invocation is anonymous by design.
+
+*Upstream session identifiers* are generated server-side in
+`gateway/session.py` and are never taken verbatim from the client. The
+derivation is stable per client and alias, differs between clients, is
+namespaced by provider in the router, is reduced to a safe bounded alphabet
+when a client supplies a hint, and is scoped to the process, so a restart
+ends the session. The derivation lives in the router, so every path that
+reaches a provider carries one.
+
+**Evidence:** `tests/test_validation.py` - a new profile denies; an explicit
+grant is honoured; the all-alias grant is separate; the anonymous profile may
+use every published alias. `tests/test_session_header.py` - the identifier is
+always present, provider-namespaced, stable per client and alias, different
+between clients, and a supplied hint is bounded, sanitised and cannot be used
+to collide.
+
+### R13 — Plain HTTP is an explicit but high-risk LAN trust assumption — **closed**
 **Severity: decision required before using owner/caller credentials on an
-untrusted LAN.**
+untrusted LAN.** *(closed: the decision was made and recorded)*
 
 The implementation intentionally serves HTTP and has no TLS (`README.md`,
 "Known limitations"), yet LAN traffic includes owner cookies, bearer tokens,
@@ -466,8 +514,20 @@ explicit proxy-trust design before adoption.
 precondition, or design a tested TLS/loopback/proxy model. Do not advertise a
 proxy topology the request-hardening layer rejects.
 
-### R14 — Configuration rollback instructions currently only make a copy
-**Severity: medium operator-recovery defect.**
+**Resolution.** The decision is the first option, and it is recorded rather
+than implied. `docs/TRUSTED_LAN_ADMIN_MODE.md` states the trust boundary
+outright: any device that can reach the configured address can administer the
+gateway and invoke its models, and there is no password or profile that
+restricts administrative access. The console shows the same notice,
+permanently and non-dismissably, at every viewport. The README lists "no TLS"
+and "trusted LAN administration has no authentication boundary" as known
+limitations.
+
+The proxy topology is **not** advertised: forwarded and proxy headers are
+rejected outright, and the documentation says so.
+
+### R14 — Configuration rollback instructions currently only make a copy — **closed**
+**Severity: medium operator-recovery defect.** *(closed)*
 
 The runbook's “Rollback the configuration” command copies current
 `config.json` to a `.before-upgrade` file and restarts; it never restores a
@@ -477,14 +537,26 @@ prior snapshot (`docs/RUNBOOK.md:183-193`).
 validate restored JSON/permissions before startup, and state the limits around
 provider-side tokens and restart-lost state.
 
-### R15 — Setup-surface helper text still claims host-only access
-**Severity: low documentation/UI honesty defect.**
+**Resolution.** `docs/RUNBOOK.md` now gives separate pre-upgrade **backup**
+and **restore** commands, a validation step that parses the restored file
+before the gateway is started, and an explicit statement that the credential
+store is a separate file that a configuration rollback never touches, that
+tokens the provider has already issued are not revoked by a rollback, and
+that the request ledger is lost on restart.
+
+### R15 — Setup-surface helper text still claims host-only access — **superseded**
+**Severity: low documentation/UI honesty defect.** *(superseded)*
 
 When credential enrollment is unavailable, the browser says setup is reachable
 only from the host or an SSH tunnel (`src/gateway/static/console.js:563-566`).
 That conflicts with the configurable LAN setup listener. It should render the
 actual setup base URL or say "the configured setup listener" without
 inventing a host-only restriction.
+
+**Superseded.** The separate setup surface was removed with the trusted-LAN
+administration mode, so the text no longer exists. The console now states the
+trusted-LAN boundary plainly instead, which is the honest form of the same
+warning.
 
 ## Documentation corrections made in this review
 

@@ -831,11 +831,13 @@
     state.profiles.forEach(function (profile) {
       var aliasesBox = el("input", { value: (profile.allowed_aliases || []).join(", ") });
       var nameInput = el("input", { value: profile.name });
+      var allAliasesBox = el("input", { type: "checkbox" });
+      allAliasesBox.checked = !!profile.all_aliases;
       var tokenBox = el("div");
       card.appendChild(el("div", { class: "route" }, [
         el("div", { class: "row" }, [
           el("label", {}, [el("span", { text: "Name" }), nameInput]),
-          el("label", {}, [el("span", { text: "Allowed aliases (comma separated, empty means all)" }), aliasesBox]),
+          el("label", {}, [el("span", { text: "Allowed aliases (comma separated)" }), aliasesBox]),
           el("div", { class: "narrow" }, [
             el("button", {
               type: "button", text: "Save",
@@ -848,7 +850,8 @@
                     profile_id: profile.profile_id,
                     name: nameInput.value,
                     enabled: profile.enabled,
-                    allowed_aliases: aliasesBox.value.split(",").map(function (s) { return s.trim(); }).filter(Boolean)
+                    allowed_aliases: aliasesBox.value.split(",").map(function (s) { return s.trim(); }).filter(Boolean),
+                    all_aliases: allAliasesBox.checked
                   }
                 })).then(function () { return refresh(); }).catch(function () {});
               }
@@ -884,6 +887,10 @@
           ])
         ]),
         el("div", { class: "small muted", text: profile.profile_id + " · " + (profile.anonymous ? "anonymous LAN profile" : profile.has_token ? "caller token issued " + when(profile.token_created_at) : "no caller token") }),
+        el("label", { style: "flex:1 1 auto" }, [
+          el("span", { text: "Allow every published alias" }), allAliasesBox
+        ]),
+        el("div", { class: "small muted", text: profile.all_aliases ? "May use every published alias." : (profile.allowed_aliases || []).length ? "May use: " + (profile.allowed_aliases || []).join(", ") : "May use no alias yet. A profile denies until access is granted." }),
         tokenBox
       ]));
     });
