@@ -173,6 +173,10 @@ class Attribution:
     fallback_used: bool = False
     fallback_reason: str | None = None
     attempts: list[dict[str, Any]] = field(default_factory=list)
+    #: Routes that were not eligible, with the reason. A request served by a
+    #: route other than the primary must say why the primary was skipped,
+    #: otherwise it looks like an unexplained fallback.
+    skipped: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -182,6 +186,7 @@ class Attribution:
             "fallback_used": self.fallback_used,
             "fallback_reason": self.fallback_reason,
             "attempts": self.attempts,
+            "skipped": self.skipped,
         }
 
 
@@ -405,6 +410,32 @@ class Router:
             )
 
         attribution = Attribution(requested_alias=alias_name)
+        # A route that was not eligible is recorded, so the record explains
+        # why the request was not served by the primary.
+        for candidate in candidates:
+            if not candidate.eligible:
+                attribution.skipped.append(
+                    {
+                        "provider": candidate.route.provider,
+                        "model": candidate.route.model,
+                        "reason": candidate.excluded_reason,
+                    }
+                )
+        if eligible and eligible[0].route != (alias.primary or eligible[0].route):
+            # The primary was skipped, so a later route served the request.
+            skipped_primary = next(
+                (entry for entry in attribution.skipped if alias.primary is not None
+                 and entry["provider"] == alias.primary.provider
+                 and entry["model"] == alias.primary.model),
+                None,
+            )
+            reason = (
+                f"the primary route was skipped: {skipped_primary['reason']}"
+                if skipped_primary
+                else "the primary route was not eligible"
+            )
+            attribution.fallback_used = True
+            attribution.fallback_reason = reason
         last_error: AdapterError | None = None
         started = time.monotonic()
         # The upstream conversation identifier is derived here, so that every
@@ -573,6 +604,8 @@ class Router:
                 fallback_used=attribution.fallback_used,
                 streamed=stream,
                 profile_id=profile_id,
+                skipped=attribution.skipped,
+                attempts=attribution.attempts,
             )
         )
 
