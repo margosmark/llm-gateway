@@ -18,6 +18,7 @@ from gateway.adapters.chatgpt_codex import (
     ChatGPTCodexAdapter,
 )
 from gateway.auth import ProfileAuth, access_mode_description, profile_allows
+from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_chat
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import convert_stream, sse_done
 from gateway.config import (
@@ -369,6 +370,13 @@ class GatewayApp:
 
         if not stream:
             body = routed.response.body or b""
+            # A converted request must receive a converted response. The
+            # upstream dialect and the caller's dialect are the same for a
+            # passthrough, and different when the bridge converted the
+            # request.
+            upstream_dialect = routed.request.dialect or dialect
+            if upstream_dialect != dialect and body:
+                body = _convert_buffered(body, upstream_dialect, dialect)
             return Response(
                 routed.response.status,
                 [("Content-Type", routed.response.content_type or "application/json")],
@@ -1007,6 +1015,31 @@ class GatewayApp:
                 config.initialized = True
             return json_response({"ok": True})
         return json_response({"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400)
+
+
+def _convert_buffered(body: bytes, source: str, target: str) -> bytes:
+    """Convert a buffered response body between the two dialects.
+
+    If the body cannot be converted it is returned unchanged rather than
+    mangled: a caller can then see the upstream's own object, which is
+    better than a silently wrong one.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return body
+    if not isinstance(payload, dict):
+        return body
+    try:
+        if source == DIALECT_OPENAI_RESPONSES and target == DIALECT_OPENAI_CHAT:
+            converted = responses_body_to_chat(payload)
+        elif source == DIALECT_OPENAI_CHAT and target == DIALECT_OPENAI_RESPONSES:
+            converted = chat_body_to_responses(payload)
+        else:
+            return body
+    except Exception:  # pragma: no cover - defensive
+        return body
+    return json.dumps(converted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def _alias_from_payload(

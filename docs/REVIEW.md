@@ -237,8 +237,8 @@ the workflow use a safe shell fallback. Test the empty-`RepoDigests` case.
 `RepoDigests` is empty, so it records the same value the release gate
 resolves and writes into the release identity.
 
-### R8 — ChatGPT/Codex model refresh violates the shared adapter contract
-**Severity: release blocker for the ChatGPT/Codex onboarding flow.**
+### R8 — ChatGPT/Codex model refresh violates the shared adapter contract — **closed**
+**Severity: release blocker for the ChatGPT/Codex onboarding flow.** *(closed)*
 
 `ChatGPTCodexAdapter.list_models()` returns strings
 (`src/gateway/adapters/chatgpt_codex.py:390-409`), whereas the generic refresh
@@ -250,8 +250,20 @@ the generic 500 path instead of populating selectable models.
 Responses dialect for ChatGPT/Codex, and add HTTP-level refresh tests for both
 real adapters.
 
-### R9 — Non-streaming responses are returned in the upstream dialect
-**Severity: release blocker for OpenAI-compatible Chat Completions clients.**
+**Resolution.** The ChatGPT/Codex adapter now returns `list[ModelInfo]`.
+Only the wire dialect is asserted - the ChatGPT-authenticated upstream is the
+Responses protocol, which is a protocol fact rather than a per-account guess.
+Availability, limits, retention and context for a given account are reported
+as **unknown**, with a note saying so, because OpenAI does not publish them.
+
+**Evidence:** `tests/test_adapter_contract.py` - both adapters return
+`list[ModelInfo]`; the ChatGPT dialect is the Responses protocol and the
+account-dependent facts are unknown; and the **generic** refresh handler is
+exercised over HTTP for both real adapters, asserting that the model list is
+populated with the right dialect.
+
+### R9 — Non-streaming responses are returned in the upstream dialect — **closed**
+**Severity: release blocker for OpenAI-compatible Chat Completions clients.** *(closed)*
 
 When the source and upstream dialect differ, request conversion runs, but the
 non-streaming response body is returned verbatim
@@ -264,6 +276,23 @@ conversion, not this response shape.
 **Required fix:** add bidirectional buffered-response conversion or refuse the
 unsupported non-streaming combination until conversion exists; cover both
 endpoint/dialect permutations with end-to-end assertions.
+
+**Resolution.** `gateway/bridge/buffered.py` converts a buffered response in
+both directions: a Responses object becomes a Chat Completions object, and a
+Chat Completions object becomes a Responses object. The assistant text, the
+tool calls with their identifiers, the finish reason and the usage counters
+all survive. A Responses reasoning item has no Chat Completions counterpart
+and is **dropped rather than invented as content**, and the absence of usage
+counters stays absent rather than becoming a zero.
+
+A body that cannot be parsed or converted is returned unchanged, so a caller
+sees the upstream's own object rather than a silently wrong one.
+
+**Evidence:** `tests/test_buffered_bridge.py` - the text, the tool calls and
+their identifiers, the finish reason and the usage counters survive in both
+directions; a reasoning item is dropped rather than invented; and, end to end
+over HTTP, a Chat Completions client receives a `chat.completion` object from
+a Responses upstream and a Responses client receives a `response` object.
 
 ### R10 — Device authorization is neither setup-only nor shown-once — **partly closed**
 **Severity: high credential-boundary and flow-correctness risk.** *(shown-once
