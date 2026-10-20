@@ -69,6 +69,10 @@ class RequestEvent:
     streamed: bool = False
     token_counters: dict[str, int] | None = None
     profile_id: str | None = None
+    #: Routes that were not eligible, with the reason.
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+    #: What was attempted, and how each attempt ended. Metadata only.
+    attempts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +90,8 @@ class RequestEvent:
             "streamed": self.streamed,
             "token_counters": self.token_counters,
             "profile_id": self.profile_id,
+            "skipped": list(self.skipped),
+            "attempts": list(self.attempts),
         }
 
 
