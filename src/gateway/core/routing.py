@@ -52,7 +52,7 @@ from gateway.core.capabilities import (
     DIALECT_OPENAI_RESPONSES,
     Capability,
 )
-from gateway.observability import RequestEvent
+from gateway.observability import RequestEvent, utc_now_iso
 
 #: Maps an error class onto the fallback trigger it satisfies.
 TRIGGER_FOR_ERROR = {
@@ -395,6 +395,7 @@ class Router:
 
         attribution = Attribution(requested_alias=alias_name)
         last_error: AdapterError | None = None
+        started = time.monotonic()
 
         for index, candidate in enumerate(eligible):
             is_last = index == len(eligible) - 1
@@ -432,7 +433,10 @@ class Router:
                 stream=stream,
                 alias=alias_name,
                 request_id=request_id,
-                session_id=session_id,
+                # The upstream session identifier is namespaced by provider, so
+                # two providers never share a conversation key and a fallback
+                # does not inherit the primary's session.
+                session_id=(f"{candidate.route.provider}.{session_id}" if session_id else None),
                 dialect=candidate.dialect,
                 client_ip=client_ip,
             )
@@ -468,26 +472,31 @@ class Router:
 
             attribution.serving_provider = candidate.route.provider
             attribution.serving_model = candidate.route.model
-            if self._ledger is not None:
-                self._ledger.record(
-                    RequestEvent(
-                        request_id=request_id,
-                        timestamp="",
-                        requested_alias=alias_name,
-                        requested_model=payload.get("model"),
-                        serving_provider=candidate.route.provider,
-                        serving_model=candidate.route.model,
-                        status=response.status,
-                        latency_ms=None,
-                        fallback_reason=attribution.fallback_reason,
-                        fallback_used=attribution.fallback_used,
-                        streamed=stream,
-                        profile_id=profile_id,
-                    )
-                )
+            self._record(
+                request_id=request_id,
+                alias_name=alias_name,
+                payload=payload,
+                attribution=attribution,
+                status=response.status,
+                error_class=None,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                stream=stream,
+                profile_id=profile_id,
+            )
             return RoutedResponse(response=response, attribution=attribution, request=request)
 
         # Every eligible route failed.
+        self._record(
+            request_id=request_id,
+            alias_name=alias_name,
+            payload=payload,
+            attribution=attribution,
+            status=502 if last_error is not None else 503,
+            error_class=last_error.error_class if last_error is not None else "unknown",
+            latency_ms=int((time.monotonic() - started) * 1000),
+            stream=stream,
+            profile_id=profile_id,
+        )
         if last_error is None:
             raise RoutingError(
                 f"no eligible route for alias '{alias_name}'",
@@ -502,6 +511,46 @@ class Router:
             code=last_error.error_class,
             status=502,
             detail={"attempts": attribution.attempts},
+        )
+
+    def _record(
+        self,
+        request_id: str,
+        alias_name: str,
+        payload: dict[str, Any],
+        attribution: Attribution,
+        status: int | None,
+        error_class: str | None,
+        latency_ms: int,
+        stream: bool,
+        profile_id: str | None,
+    ) -> None:
+        """Record one request outcome.
+
+        Every terminal path is recorded - success, provider failure, and
+        failed fallback - with a real timestamp and a measured latency. The
+        record is metadata only: the alias, the provider that served or
+        failed, the outcome and the duration. Never the request or the
+        response.
+        """
+        if self._ledger is None:
+            return
+        self._ledger.record(
+            RequestEvent(
+                request_id=request_id,
+                timestamp=utc_now_iso(),
+                requested_alias=alias_name,
+                requested_model=payload.get("model") if isinstance(payload, dict) else None,
+                serving_provider=attribution.serving_provider,
+                serving_model=attribution.serving_model,
+                status=status,
+                error_class=error_class,
+                latency_ms=latency_ms,
+                fallback_reason=attribution.fallback_reason,
+                fallback_used=attribution.fallback_used,
+                streamed=stream,
+                profile_id=profile_id,
+            )
         )
 
     def _maybe_cooldown(self, alias: Alias, candidate: Candidate, error: AdapterError) -> None:

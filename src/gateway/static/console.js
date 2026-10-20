@@ -281,6 +281,7 @@
     var ledgerCard = el("div", { class: "card" }, [
       el("h2", { text: "Recent request outcomes" }),
       el("p", { class: "small muted", text: "Metadata only. Prompts, responses, tokens and secrets are never stored." }),
+      el("p", { class: "small muted", text: "Kept in memory only, in a bounded ring of the most recent 10,000 requests. It is not written to disk and is lost when the gateway restarts." }),
       el("div", { class: "row" }, [
         statBox("Requests", totals.requests || 0),
         statBox("Errors", totals.errors || 0),

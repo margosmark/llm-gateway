@@ -158,8 +158,8 @@ to enabled registered models, reject duplicate/primary-equal fallbacks, and
 return actionable `4xx` errors. Add tests for invalid IDs, invalid routes, and
 a route that is rejected before publication.
 
-### R5 — Observability documentation overstates the current implementation
-**Severity: medium; honesty and operations risk.**
+### R5 — Observability documentation overstates the current implementation — **closed**
+**Severity: medium; honesty and operations risk.** *(closed)*
 
 `RequestLedger` describes request outcomes, timestamps, latency, and errors
 (`src/gateway/observability.py:54-123`), but `Router.invoke` records only the
@@ -173,6 +173,22 @@ metadata-only outcome ledger. If the latter, record safe error outcomes on
 all terminal paths with a generated timestamp and measured latency; preserve
 the no-content/no-secret rule. Add failure-path tests and make the Status UI
 label match the actual retention/durability.
+
+**Resolution.** The ledger is now a real metadata-only outcome ledger. Every
+terminal path is recorded - success, provider failure, failed fallback, and
+the "no eligible route" case - with a generated timestamp and a measured
+latency. The record still carries only the alias, the provider that served
+or failed, the outcome, the duration and the counters; the no-content rule is
+unchanged and covered by a test.
+
+The Status view now states the durability plainly: the ledger is in memory
+only, in a bounded ring of the most recent 10,000 requests, is not written to
+disk, and is lost on restart.
+
+**Evidence:** `tests/test_observability_records.py` - a success records a
+non-empty timestamp and a measured latency; a provider failure records its
+error class and updates the error, rate-limit and exhaustion counters; the
+record contains no prompt, message, content or completion field.
 
 ### R6 — Owner-session test TTL is ignored
 **Severity: medium testability/correctness defect.**

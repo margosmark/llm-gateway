@@ -68,7 +68,10 @@ POLICY_CODES = frozenset(
 )
 
 #: A safe upstream code looks like this. Anything else is not echoed.
-SAFE_CODE = re.compile(r"^[a-z0-9_.\-]{1,64}$")
+#: Uppercase is allowed, because providers use camel-cased type names such
+#: as ``MissingSessionID``; refusing them would hide the useful cause
+#: behind a generic code.
+SAFE_CODE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 
 #: Fixed, safe explanation per error class. These never contain upstream
 #: body text, because the body could echo request content.
