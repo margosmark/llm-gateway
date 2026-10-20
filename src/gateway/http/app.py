@@ -1,18 +1,4 @@
-"""The gateway application.
-
-One application, two browser surfaces, one API surface.
-
-* ``/owner/`` - the owner console, bound to the LAN address.
-* ``/setup/`` - the setup UI, bound to loopback only. This is the only
-  surface where a credential may be enrolled.
-* ``/v1/...`` - the OpenAI-compatible API.
-* ``/version``, ``/health`` - anonymous metadata.
-
-Both browser surfaces are served the same application. The difference is a
-capability set: the setup surface may enroll credentials, and the owner
-surface may do so only when an owner session is present. The console is
-never *casually reachable* into a credential form.
-"""
+"""Single-listener trusted-LAN console and OpenAI-compatible API."""
 
 from __future__ import annotations
 
@@ -27,19 +13,11 @@ from gateway.adapters.chatgpt_codex import (
     PREREQUISITE,
     ChatGPTCodexAdapter,
 )
-from gateway.auth import (
-    ANONYMOUS_PROFILE_ID,
-    OwnerAuth,
-    ProfileAuth,
-    access_mode_description,
-    parse_cookies,
-    profile_allows,
-)
+from gateway.auth import ProfileAuth, access_mode_description, profile_allows
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import convert_stream, sse_done
 from gateway.config import (
-    ACCESS_AUTHENTICATED,
-    ACCESS_LAN_NOAUTH,
+
     FALLBACK_TRIGGERS,
     STATE_CONFIGURED_UNTESTED,
     STATE_CONNECTED,
@@ -55,18 +33,7 @@ from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPON
 from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
-from gateway.http.security import (
-    CSRF_COOKIE,
-    MUTATING_METHODS,
-    SESSION_COOKIE,
-    SecurityError,
-    SecurityPolicy,
-    check_csrf,
-    check_forwarded_headers,
-    check_host,
-    check_origin,
-    require_loopback,
-)
+from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -80,7 +47,7 @@ from gateway.observability import (
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 SURFACE_OWNER = "owner"
-SURFACE_SETUP = "setup"
+
 
 
 class GatewayApp:
@@ -92,7 +59,6 @@ class GatewayApp:
         credentials: CredentialStore,
         router: Router,
         registry,
-        owner_auth: OwnerAuth,
         profile_auth: ProfileAuth,
         policy: SecurityPolicy,
         ledger: RequestLedger | None = None,
@@ -105,7 +71,7 @@ class GatewayApp:
         self.credentials = credentials
         self.router = router
         self.registry = registry
-        self.owner_auth = owner_auth
+
         self.profile_auth = profile_auth
         self.policy = policy
         self.ledger = ledger
@@ -141,9 +107,7 @@ class GatewayApp:
             r.add(["GET"], prefix + "/style.css", self.handle_static_css)
             r.add(["GET"], prefix + "/api/status", self.handle_public_status)
             r.add(["GET"], prefix + "/api/state", self.handle_state)
-            r.add(["GET"], prefix + "/api/session", self.handle_session_info)
-            r.add(["POST"], prefix + "/api/session", self.handle_login)
-            r.add(["DELETE"], prefix + "/api/session", self.handle_logout)
+
             r.add(["POST"], prefix + "/api/provider", self.handle_provider_action)
             r.add(["POST"], prefix + "/api/model", self.handle_model_action)
             r.add(["POST"], prefix + "/api/alias", self.handle_alias_action)
@@ -156,7 +120,7 @@ class GatewayApp:
             check_forwarded_headers(request)
             check_host(request, self.policy)
             check_origin(request, self.policy)
-            require_loopback(request, self.policy)
+
         except SecurityError as exc:
             return exc.to_response()
 
@@ -172,29 +136,11 @@ class GatewayApp:
             return json_response({"error": {"message": "not found", "type": "not_found"}}, 404)
 
         request.params = params
-        # The two listeners are separate applications: the LAN listener
-        # serves "/owner", the loopback listener serves "/setup".
-        request.context["surface"] = SURFACE_SETUP if "/setup" in self.mounts else SURFACE_OWNER
+        request.context["surface"] = SURFACE_OWNER
 
         # CSRF applies to the cookie-authenticated browser surfaces only.
         # The API authenticates with bearer tokens, which a browser never
         # sends ambiently, so it is not CSRF-relevant there.
-        if (
-            self.policy.is_browser_surface(request.path)
-            and request.method in MUTATING_METHODS
-            and not self._is_login_endpoint(request)
-        ):
-            session = self._session(request)
-            if session is None:
-                return json_response(
-                    {"error": {"message": "an owner session is required", "type": "owner_session_required"}},
-                    401,
-                )
-            try:
-                check_csrf(request, session.csrf)
-            except SecurityError as exc:
-                return exc.to_response()
-
         try:
             return route.handler(request)
         except SecurityError as exc:
@@ -216,66 +162,18 @@ class GatewayApp:
     def _surface(self, request: Request) -> str:
         return request.context.get("surface", SURFACE_OWNER)
 
-    def _is_login_endpoint(self, request: Request) -> bool:
-        """The login endpoint establishes the session, so it cannot require one.
 
-        It is protected by the owner passphrase instead. A cross-site login
-        request cannot do anything the attacker could not do by guessing the
-        passphrase, and the passphrase is the only secret it carries.
-        """
-        return request.method == "POST" and request.path.endswith("/api/session")
-
-    def _session(self, request: Request):
-        cookies = parse_cookies(request.headers.get("cookie"))
-        return self.owner_auth.session_from_cookies(cookies)
-
-    def _expected_csrf(self, request: Request) -> str | None:
-        """The CSRF token the browser should have presented, if any."""
-        if request.method not in MUTATING_METHODS:
-            return None
-        if not self.policy.is_browser_surface(request.path):
-            return None
-        session = self._session(request)
-        return session.csrf if session else None
-
-    def _require_owner_session(self, request: Request) -> Any:
-        """Return an error response if there is no owner session."""
-        if self._session(request) is None:
-            return json_response(
-                {"error": {"message": "an owner session is required", "type": "owner_session_required"}},
-                401,
-            )
-        return None
 
     def _can_mutate(self, request: Request) -> bool:
         """Whether this request may change configuration."""
-        if self._surface(request) == SURFACE_SETUP:
-            return self._session(request) is not None
-        config = self.config.snapshot()
-        if config.access_mode == ACCESS_AUTHENTICATED:
-            return self._session(request) is not None
-        # LAN no-auth mode: the console may not change anything from the LAN.
-        return False
+        return True
 
     def _can_enroll_credentials(self, request: Request) -> bool:
-        """Credential enrollment is loopback-only, always."""
-        return self._surface(request) == SURFACE_SETUP and self._session(request) is not None
+        """Every reachable trusted-LAN peer is an administrator."""
+        return True
 
     def _require_mutation(self, request: Request) -> Any:
-        if self._can_mutate(request):
-            return None
-        return json_response(
-            {
-                "error": {
-                    "message": (
-                        "this action requires the setup UI, which is reachable from the host itself "
-                        "or through an SSH local tunnel"
-                    ),
-                    "type": "mutation_not_permitted",
-                }
-            },
-            403,
-        )
+        return None
 
     # --- metadata --------------------------------------------------------
 
@@ -439,79 +337,6 @@ class GatewayApp:
             return json_response({"error": {"message": "console assets are missing", "type": "asset_error"}}, 500)
         return Response(200, [("Content-Type", "text/css; charset=utf-8"), ("Cache-Control", "no-store")], body)
 
-    def handle_session_info(self, request: Request) -> Response:
-        config = self.config.snapshot()
-        session = self._session(request)
-        return json_response(
-            {
-                "authenticated": session is not None,
-                "access_mode": config.access_mode,
-                "access_mode_description": access_mode_description(config.access_mode),
-                "passphrase_set": self.owner_auth.passphrase_is_set(),
-                "surface": self._surface(request),
-                "can_mutate": self._can_mutate(request),
-                "can_enroll_credentials": self._can_enroll_credentials(request),
-            }
-        )
-
-    def handle_login(self, request: Request) -> Response:
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
-        passphrase = payload.get("passphrase")
-        if not isinstance(passphrase, str) or not passphrase:
-            return json_response(
-                {"error": {"message": "a passphrase is required", "type": "malformed_request"}}, 400
-            )
-        if not self.owner_auth.passphrase_is_set():
-            # First run: the owner chooses the passphrase. This is only
-            # possible from the setup UI. Otherwise the first host to reach
-            # the LAN console could claim the gateway.
-            if self._surface(request) != SURFACE_SETUP:
-                return json_response(
-                    {
-                        "error": {
-                            "message": (
-                                "the owner passphrase is created in the setup UI, which is reachable "
-                                "from the host itself or through an SSH local tunnel"
-                            ),
-                            "type": "passphrase_creation_forbidden",
-                        }
-                    },
-                    403,
-                )
-            self.owner_auth.set_passphrase(passphrase)
-            session = self.owner_auth.create_session()
-            return Response(
-                200,
-                [("Content-Type", "application/json; charset=utf-8"), *self.owner_auth.session_cookies(session)],
-                json.dumps({"ok": True, "created": True, "csrf": session.csrf}).encode("utf-8"),
-            )
-        if not self.owner_auth.check_passphrase(passphrase):
-            return json_response(
-                {"error": {"message": "the passphrase was not accepted", "type": "unauthorised"}}, 401
-            )
-        session = self.owner_auth.create_session()
-        return Response(
-            200,
-            [("Content-Type", "application/json; charset=utf-8"), *self.owner_auth.session_cookies(session)],
-            json.dumps({"ok": True, "created": False, "csrf": session.csrf}).encode("utf-8"),
-        )
-
-    def handle_logout(self, request: Request) -> Response:
-        session = self._session(request)
-        if session is not None:
-            self.owner_auth.destroy_session(session.token)
-        return Response(
-            200,
-            [
-                ("Content-Type", "application/json; charset=utf-8"),
-                ("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
-                ("Set-Cookie", f"{CSRF_COOKIE}=; Path=/; SameSite=Strict; Max-Age=0"),
-            ],
-            b'{"ok":true}',
-        )
 
     # --- state -----------------------------------------------------------
 
@@ -549,14 +374,7 @@ class GatewayApp:
         )
 
     def handle_state(self, request: Request) -> Response:
-        session = self._session(request)
-        if session is None:
-            return json_response(
-                {"error": {"message": "an owner session is required", "type": "owner_session_required"}},
-                401,
-            )
         config = self.config.snapshot()
-        session = self._session(request)
         may_mutate = self._can_mutate(request)
 
         providers = []
@@ -634,7 +452,7 @@ class GatewayApp:
                 "surface": self._surface(request),
                 "can_mutate": may_mutate,
                 "can_enroll_credentials": self._can_enroll_credentials(request),
-                "authenticated": session is not None,
+                "authenticated": False,
                 "providers": providers,
                 "aliases": aliases,
                 "profiles": profiles,
@@ -788,16 +606,6 @@ class GatewayApp:
             return json_response(result)
 
         if action == "enroll_key":
-            if not self._can_enroll_credentials(request):
-                return json_response(
-                    {
-                        "error": {
-                            "message": "credentials may only be enrolled from the setup UI on the host itself",
-                            "type": "credential_enroll_forbidden",
-                        }
-                    },
-                    403,
-                )
             api_key = payload.get("api_key")
             if not isinstance(api_key, str) or not api_key.strip():
                 return json_response(
@@ -1079,23 +887,10 @@ class GatewayApp:
             payload = {}
         action = str(payload.get("action") or "")
         if action == "access_mode":
-            mode = str(payload.get("access_mode") or "")
-            if mode not in (ACCESS_LAN_NOAUTH, ACCESS_AUTHENTICATED):
-                return json_response(
-                    {"error": {"message": "unknown access mode", "type": "malformed_request"}}, 400
-                )
-            with self.config.mutate() as config:
-                config.access_mode = mode
-                if mode == ACCESS_AUTHENTICATED and ANONYMOUS_PROFILE_ID not in config.profiles:
-                    from gateway.config import Profile
-
-                    config.profiles[ANONYMOUS_PROFILE_ID] = Profile(
-                        profile_id=ANONYMOUS_PROFILE_ID,
-                        name="Anonymous LAN profile",
-                        enabled=True,
-                        anonymous=True,
-                    )
-            return json_response({"ok": True, "access_mode": mode})
+            return json_response(
+                {"error": {"message": "trusted LAN mode is anonymous and cannot be changed to authenticated access", "type": "unsupported_access_mode"}},
+                400,
+            )
         if action == "initialize":
             with self.config.mutate() as config:
                 config.initialized = True

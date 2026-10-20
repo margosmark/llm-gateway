@@ -6,24 +6,16 @@ supported or production-ready.
 
 ## Runtime topology
 
-The gateway starts two independent standard-library HTTP servers from
-`gateway.cli`:
+The gateway starts one standard-library HTTP server from `gateway.cli`:
 
-| Listener | Default bind | Mount | Purpose |
+| Listener | Default bind | Mounts | Purpose |
 |---|---|---|---|
-| LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version` | owner console and OpenAI-compatible client API |
-| setup | LAN bind by default; configurable, port `8766` | `/setup/`, `/health`, `/version`, `/v1/` | protected setup surface |
+| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version` | direct owner console/configuration and anonymous OpenAI-compatible API |
 
-The setup and LAN applications share one configuration store, credential
-store, adapter registry, router, owner-session authority, request ledger, and
-limit store. They differ only in their mounted browser surface and the
-canonical host/origin policy. `cli.py` refuses wildcard and non-private binds.
-
-`GATEWAY_SETUP_BIND` controls where setup binds. It defaults to the explicit
-LAN bind address; set it to `127.0.0.1` for host-only setup. In either mode it
-uses its own listener, canonical-host/origin checks, owner session, and CSRF.
-The loopback peer-address check applies only when the listener is configured
-to bind loopback. Forwarded headers are rejected rather than trusted.
+The owner console, credential forms, provider actions, and client API share the
+same listener. `cli.py` refuses wildcard and non-private binds. No setup
+listener or setup-port setting exists. Forwarded headers are rejected rather
+than trusted.
 
 ## State boundaries
 
@@ -34,13 +26,12 @@ and access mode. It must never contain a credential or caller-token hash.
 
 `gateway.credentials.CredentialStore` persists separate JSON files under a
 private `credentials/` directory. Provider adapters receive a handle scoped to
-one provider. The owner-passphrase hash and caller-token hashes also use that
-store. A read of a credential is available only to the internal adapter/auth
-code; console state renders presence, not values.
+one provider. Caller-token hashes also use that store. A read of a credential
+is available only to internal adapter/auth code; console state renders presence,
+not values.
 
 The following state is intentionally in-memory only and disappears on restart:
 
-* owner browser sessions and CSRF values;
 * in-flight ChatGPT/Codex device authorization state;
 * provider cooldowns;
 * request ledger events and totals;
@@ -53,29 +44,24 @@ audit or billing system.
 
 ### Browser configuration
 
-1. A browser reaches `/setup/` or `/owner/` on its canonical listener.
+1. A browser reaches `/owner/` on the configured canonical listener.
 2. `GatewayApp.handle` rejects forwarded headers, invalid `Host`, and invalid
-   `Origin` for browser mutations. It also rejects non-loopback peers when
-   setup is explicitly configured as a loopback-only listener.
-3. Owner login establishes an `HttpOnly`, `SameSite=Strict` session cookie and
-   a separate CSRF cookie. Mutating browser requests require a matching CSRF
-   header and an owner session.
-4. In default LAN no-auth mode the LAN owner console is deliberately
-   read-only; configuration and credential enrollment happen through setup.
-   Authenticated mode permits non-credential mutation in the LAN owner
-   console after owner sign-in. Credential enrollment remains setup-only and
-   requires an owner session whether setup is LAN-reachable or loopback-only.
-5. Provider tests and catalogue refreshes are explicit actions. No page load
-   should call a provider.
+   `Origin` on browser mutations. Direct requests from a reachable LAN peer are
+   administrators by product decision.
+3. Same-origin owner mutations require no password, session cookie, or CSRF
+   bootstrap token. Cross-origin browser mutations remain refused.
+4. The owner console may mutate configuration and enroll credentials on this
+   listener. Provider tests and catalogue refreshes are explicit actions; no
+   page load or ordinary configuration save calls a provider.
 
 ### Client inference
 
 1. A LAN client calls `GET /v1/models`, `POST /v1/chat/completions`, or
    `POST /v1/responses`.
-2. `ProfileAuth` resolves either the shared Anonymous LAN profile (LAN
-   no-auth) or a bearer-token profile (authenticated mode).
-3. The request model must name a published alias and be allowed for that
-   profile.
+2. `ProfileAuth` resolves every LAN request to a shared anonymous trusted-LAN
+   profile. Legacy profile/token metadata does not provide access control.
+3. The request model must name a published alias; any reachable peer may invoke
+   each published route.
 4. `Router` evaluates the primary route followed by configured fallbacks. A
    candidate must have a configured adapter, an enabled known model, a known
    supported dialect, matching capabilities, and no active local cooldown.

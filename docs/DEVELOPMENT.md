@@ -32,8 +32,8 @@ Before changing code, identify the boundary being touched:
 
 | Change | Required checks |
 |---|---|
-| HTTP/browser surface | Host, Origin, forwarded-header, configured setup bind, session, and CSRF tests |
-| Credential/auth path | no secret in config/state/log/error; private-file permissions; one-time token/code behavior |
+| HTTP/browser surface | canonical Host, Origin and forwarded-header tests; direct same-origin mutation and cross-origin refusal |
+| Credential/auth path | no secret in config/state/log/error; private-file permissions; one-time caller-token behavior |
 | Adapter | explicit connection/catalog action; safe error classification; no redirect/credential leak; fixture-based tests |
 | Router/bridge | capability compatibility; fallback hard stops; stream and tool-bearing behavior |
 | Config mutation | input validation; revision behavior; atomic persistence; invalid state cannot be published |
@@ -54,9 +54,9 @@ developing or reviewing the code.
 
 A credential may cross only this narrow path:
 
-1. owner-controlled setup UI on its separately configured private listener;
-2. request body handled by the relevant adapter action;
-3. owner-only credential store;
+1. the write-only credential form on `/owner/`;
+2. request body handled by the relevant explicit adapter action;
+3. private credential store;
 4. provider adapter request headers.
 
 It must not cross into `GatewayConfig`, a normal state/status response, a URL,
@@ -84,9 +84,8 @@ the artifact between verification and deployment.
 The release gate is necessary but not enough: it runs a disposable container.
 Before a deployment can be approved, separately prove the Compose deployment
 with its **actual named state volume** can start as UID/GID `10001`, write
-`config.json` and credentials, expose the LAN listener only on the intended
-private address, and expose setup only on the explicit `GATEWAY_SETUP_BIND`
-address. Then verify externally:
+`config.json` and credentials, expose only the intended explicit private
+listener, and serve `/owner/` directly with no login. Then verify externally:
 
 ```sh
 curl -sS http://<private-ip>:<port>/health

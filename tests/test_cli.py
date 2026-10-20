@@ -36,13 +36,10 @@ class BindRuleTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
-    def test_the_setup_bind_defaults_to_the_lan_address(self) -> None:
+    def test_parser_has_no_setup_listener_options(self) -> None:
         args = build_parser().parse_args(["--host", "10.10.11.109"])
-        self.assertEqual(args.setup_bind, "")
-
-    def test_the_setup_bind_can_be_pinned_to_loopback(self) -> None:
-        args = build_parser().parse_args(["--host", "10.10.11.109", "--setup-bind", "127.0.0.1"])
-        self.assertEqual(args.setup_bind, "127.0.0.1")
+        self.assertFalse(hasattr(args, "setup_bind"))
+        self.assertFalse(hasattr(args, "setup_port"))
 
 
 class ApplicationTests(unittest.TestCase):
@@ -60,51 +57,29 @@ class ApplicationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_the_setup_listener_defaults_to_the_lan_address(self) -> None:
-        result = build_application(self.data_dir, "10.10.11.109", 8765, 8766)
-        self.assertEqual(result[-1], "10.10.11.109")
-
-    def test_the_setup_listener_can_be_pinned_to_loopback(self) -> None:
-        result = build_application(self.data_dir, "10.10.11.109", 8765, 8766, "127.0.0.1")
-        self.assertEqual(result[-1], "127.0.0.1")
-
-    def test_a_non_local_setup_bind_is_refused(self) -> None:
-        with mock.patch("gateway.cli._address_is_local", return_value=False):
-            with self.assertRaises(SystemExit):
-                build_application(self.data_dir, "10.10.11.109", 8765, 8766, "10.10.11.109")
-
-    def test_a_wildcard_setup_bind_is_refused(self) -> None:
-        with self.assertRaises(SystemExit):
-            build_application(self.data_dir, "10.10.11.109", 8765, 8766, "0.0.0.0")
-
-    def test_a_public_setup_bind_is_refused(self) -> None:
-        with self.assertRaises(SystemExit):
-            build_application(self.data_dir, "10.10.11.109", 8765, 8766, "8.8.8.8")
-
     def test_both_providers_are_present_from_the_start(self) -> None:
-        result = build_application(self.data_dir, "10.10.11.109", 8765, 8766)
-        config = result[2]
+        result = build_application(self.data_dir, "10.10.11.109", 8765)
+        config = result[1]
         snapshot = config.snapshot()
         self.assertIn("chatgpt_codex", snapshot.providers)
         self.assertIn("opencode_go", snapshot.providers)
 
     def test_a_fresh_install_is_empty(self) -> None:
-        result = build_application(self.data_dir, "10.10.11.109", 8765, 8766)
-        snapshot = result[2].snapshot()
+        result = build_application(self.data_dir, "10.10.11.109", 8765)
+        snapshot = result[1].snapshot()
         self.assertFalse(snapshot.initialized)
         self.assertEqual(snapshot.aliases, {})
         self.assertEqual(snapshot.profiles, {})
         self.assertEqual(snapshot.published_aliases(), [])
 
-    def test_the_setup_surface_is_mounted_only_on_the_setup_listener(self) -> None:
-        result = build_application(self.data_dir, "10.10.11.109", 8765, 8766)
-        lan_app, setup_app = result[0], result[1]
-        self.assertEqual(lan_app.mounts, ("/owner",))
-        self.assertEqual(setup_app.mounts, ("/setup",))
+    def test_owner_console_is_mounted_on_the_only_application(self) -> None:
+        app, _, _, _ = build_application(self.data_dir, "10.10.11.109", 8765)
+        self.assertEqual(app.mounts, ("/owner",))
+        self.assertNotIn("/setup", app.mounts)
 
     def test_the_credential_store_is_owner_only(self) -> None:
-        result = build_application(self.data_dir, "10.10.11.109", 8765, 8766)
-        credentials = result[3]
+        result = build_application(self.data_dir, "10.10.11.109", 8765)
+        credentials = result[2]
         self.assertEqual(credentials.root.stat().st_mode & 0o777, 0o700)
 
 

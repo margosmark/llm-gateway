@@ -214,7 +214,6 @@ def main(argv: list[str]) -> int:
             "-e",
             "GATEWAY_PORT=18775",
             "-e",
-            "GATEWAY_SETUP_PORT=18776",
             reference,
         ],
         timeout=60,
@@ -298,50 +297,27 @@ def main(argv: list[str]) -> int:
             headers={"Origin": "http://evil.example.com"},
         )
         gate.record(
-            "the console does not expose state without a session",
-            status in (401, 403),
+            "the console exposes state directly (safe GET ignores Origin)",
+            status == 200,
             f"status={status}",
         )
 
         status, payload = http(base + "/setup/api/state")
         gate.record(
-            "the setup surface is not served on the owner listener",
+            "the retired setup path is not served",
             status == 404,
             f"status={status}",
         )
 
-        # The setup listener may be reachable from the network, by the
-        # operator's choice. What must never change is that it still
-        # requires an owner session before anything can be enrolled.
-        setup_base = "http://127.0.0.1:18776"
-        status, payload = http(setup_base + "/setup/api/state")
-        gate.record(
-            "the setup surface refuses state without a session",
-            status == 401,
-            f"status={status}",
-        )
-
         status, payload = http(
-            setup_base + "/setup/api/provider",
-            method="POST",
-            headers={"Origin": setup_base},
-            body={"action": "enroll_key", "provider_id": "opencode_go", "api_key": "gate-probe"},
-        )
-        gate.record(
-            "the setup surface refuses credential enrolment without a session",
-            status == 401,
-            f"status={status}",
-        )
-
-        status, payload = http(
-            base + "/owner/api/session",
+            base + "/owner/api/model",
             method="POST",
             headers={"Origin": base},
-            body={"passphrase": "gate-probe-should-not-create-a-session"},
+            body={"action": "enable", "provider_id": "unknown", "model_id": "unknown"},
         )
         gate.record(
-            "the console refuses an unauthenticated mutation",
-            status in (400, 401, 403),
+            "same-origin owner mutation is dispatched without session or CSRF",
+            status != 401 and status != 403,
             f"status={status}",
         )
 

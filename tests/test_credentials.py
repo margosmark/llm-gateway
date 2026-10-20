@@ -18,10 +18,8 @@ from gateway.credentials import (
     CredentialError,
     CredentialStore,
     hash_caller_token,
-    hash_passphrase,
     new_caller_token,
     verify_caller_token,
-    verify_passphrase,
 )
 
 
@@ -108,26 +106,6 @@ class CredentialStoreTests(unittest.TestCase):
 
     def test_clear_of_absent_store_reports_false(self) -> None:
         self.assertFalse(self.store.provider_handle("opencode_go").clear())
-
-
-class PassphraseTests(unittest.TestCase):
-    def test_hash_and_verify_round_trip(self) -> None:
-        digest, salt = hash_passphrase("correct horse", iterations=1000)
-        self.assertTrue(verify_passphrase("correct horse", digest, salt, iterations=1000))
-        self.assertFalse(verify_passphrase("wrong horse", digest, salt, iterations=1000))
-
-    def test_digest_does_not_contain_the_passphrase(self) -> None:
-        digest, salt = hash_passphrase("correct horse", iterations=1000)
-        self.assertNotIn("correct horse", digest)
-        self.assertNotIn("correct horse", salt)
-
-    def test_verify_rejects_malformed_storage(self) -> None:
-        self.assertFalse(verify_passphrase("x", "nothex", "nothex", iterations=1000))
-        self.assertFalse(verify_passphrase("x", None, None, iterations=1000))
-
-    def test_empty_passphrase_is_rejected(self) -> None:
-        with self.assertRaises(CredentialError):
-            hash_passphrase("", iterations=1000)
 
 
 class CallerTokenTests(unittest.TestCase):

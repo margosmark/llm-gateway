@@ -24,8 +24,8 @@ from gateway.adapters.base import (
     TestResult,
 )
 from gateway.adapters.registry import AdapterRegistry
-from gateway.auth import OwnerAuth, ProfileAuth
-from gateway.config import ConfigStore, ProviderState, RouteRef, ModelEntry
+from gateway.auth import ProfileAuth
+from gateway.config import ConfigStore, Profile, ProviderState, RouteRef, ModelEntry
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
@@ -116,7 +116,6 @@ class GatewayHarness:
         self._tmp = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmp.name)
         self.port = free_port()
-        self.setup_port = free_port()
 
         self.config = ConfigStore(self.data_dir / "config.json")
         self.credentials = CredentialStore(self.data_dir)
@@ -147,21 +146,17 @@ class GatewayHarness:
 
         self.router = Router(self.config, self.registry, ledger=RequestLedger())
         self.limits = LimitStore()
-        self.owner_auth = OwnerAuth(self.credentials, iterations=1000)
         self.profile_auth = ProfileAuth(self.config, self.credentials)
 
         policy = SecurityPolicy(
-            allowed_hosts=build_allowed_hosts("127.0.0.1", self.port)
-            | build_allowed_hosts("127.0.0.1", self.setup_port),
-            canonical_origins=build_canonical_origins("127.0.0.1", self.port)
-            | build_canonical_origins("127.0.0.1", self.setup_port),
+            allowed_hosts=build_allowed_hosts("127.0.0.1", self.port),
+            canonical_origins=build_canonical_origins("127.0.0.1", self.port),
         )
         self.app = GatewayApp(
             config=self.config,
             credentials=self.credentials,
             router=self.router,
             registry=self.registry,
-            owner_auth=self.owner_auth,
             profile_auth=self.profile_auth,
             policy=policy,
             ledger=self.router._ledger,
@@ -176,33 +171,11 @@ class GatewayHarness:
             mounts=("/owner",),
         )
 
-        self.setup_policy = SecurityPolicy(
-            allowed_hosts=build_allowed_hosts("127.0.0.1", self.setup_port),
-            canonical_origins=build_canonical_origins("127.0.0.1", self.setup_port),
-        )
-        self.setup_app = GatewayApp(
-            config=self.config,
-            credentials=self.credentials,
-            router=self.router,
-            registry=self.registry,
-            owner_auth=self.owner_auth,
-            profile_auth=self.profile_auth,
-            policy=self.setup_policy,
-            ledger=self.router._ledger,
-            limits=self.limits,
-            release_identity=lambda: {},
-            base_url=f"http://127.0.0.1:{self.setup_port}",
-            mounts=("/setup",),
-        )
-
         self.server = Server("127.0.0.1", self.port, self.app.handle)
-        self.setup_server = Server("127.0.0.1", self.setup_port, self.setup_app.handle)
         self.server.start_background()
-        self.setup_server.start_background()
 
     def close(self) -> None:
         self.server.stop()
-        self.setup_server.stop()
         self._tmp.cleanup()
 
     # --- requests --------------------------------------------------------
@@ -227,14 +200,13 @@ class GatewayHarness:
         # A browser always sends Origin on a same-origin mutation, and the
         # gateway requires it on the browser surfaces. A caller that supplies
         # its own Origin keeps it.
-        if (path.startswith("/owner/") or path.startswith("/setup/")) and not any(
+        if path.startswith("/owner/") and not any(
             key.lower() == "origin" for key in (headers or {})
         ):
             request.add_header("Origin", f"http://127.0.0.1:{port or self.port}")
         def collect(response) -> dict[str, Any]:
             headers = {key: value for key, value in response.headers.items()}
-            # Keep every Set-Cookie: the session and the CSRF token arrive
-            # as two separate headers.
+            # Preserve cookie headers for any response under test.
             headers["set-cookie"] = list(response.headers.get_all("Set-Cookie") or [])
             return headers
 
@@ -291,6 +263,13 @@ class SecurityProbeTests(unittest.TestCase):
             "GET", "/version", headers={"X-Forwarded-For": "203.0.113.9"}
         )
         self.assertEqual(status, 400)
+
+    def test_forwarded_header_is_rejected_on_owner_mutation(self) -> None:
+        status, payload, _ = self.harness.request(
+            "POST", "/owner/api/settings", body={"action": "save"},
+            headers={"X-Forwarded-Host": "evil.example"},
+        )
+        self.assertEqual(status, 400)
         self.assertEqual(payload["error"]["type"], "forwarded_header_rejected")
 
     def test_mismatched_host_is_rejected(self) -> None:
@@ -298,21 +277,16 @@ class SecurityProbeTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"]["type"], "host_mismatch")
 
-    def test_setup_surface_is_refused_from_a_non_loopback_peer(self) -> None:
-        # The setup listener binds loopback, so a LAN client cannot reach it
-        # at all. Reaching the path on the LAN listener is refused outright.
+    def test_setup_surface_is_removed(self) -> None:
         status, payload, _ = self.harness.request("GET", "/setup/api/state")
         self.assertEqual(status, 404)
 
-    def test_setup_listener_serves_the_setup_surface(self) -> None:
-        status, payload, _ = self.harness.request("GET", "/setup/api/status", port=self.harness.setup_port)
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["service"], "personal-llm-gateway")
-
-    def test_full_state_requires_a_session(self) -> None:
+    def test_full_state_is_available_without_a_session(self) -> None:
         status, payload, _ = self.harness.request("GET", "/owner/api/state")
-        self.assertEqual(status, 401)
-        self.assertEqual(payload["error"]["type"], "owner_session_required")
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["authenticated"])
+        self.assertTrue(payload["can_mutate"])
+        self.assertTrue(payload["can_enroll_credentials"])
 
     def test_safe_status_is_available_without_a_session(self) -> None:
         status, payload, _ = self.harness.request("GET", "/owner/api/status")
@@ -325,18 +299,21 @@ class SecurityProbeTests(unittest.TestCase):
         self.assertNotIn("limits", payload)
         self.assertNotIn("aliases", payload)
 
-    def test_passphrase_can_only_be_created_on_the_setup_surface(self) -> None:
+    def test_login_and_passphrase_route_are_removed(self) -> None:
         status, payload, _ = self.harness.request(
-            "POST", "/owner/api/session", body={"passphrase": "claimed-from-the-lan"}
+            "POST", "/owner/api/session", body={"passphrase": "synthetic-only"}
         )
-        self.assertEqual(status, 403)
-        self.assertEqual(payload["error"]["type"], "passphrase_creation_forbidden")
+        self.assertEqual(status, 404)
 
     def test_console_is_served(self) -> None:
         status, payload, headers = self.harness.request("GET", "/owner/", raw=True)
         self.assertEqual(status, 200)
         self.assertIn(b"Personal LLM Gateway", payload)
         self.assertIn("text/html", headers.get("Content-Type", ""))
+        status, script, _ = self.harness.request("GET", "/owner/app.js", raw=True)
+        self.assertEqual(status, 200)
+        self.assertIn(b"Trusted LAN admin mode ", script)
+        self.assertNotIn(b"/api/session", script)
 
     def test_console_html_carries_no_secret(self) -> None:
         _, payload, _ = self.harness.request("GET", "/owner/", raw=True)
@@ -360,6 +337,22 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertIn("notice", payload)
         self.assertIn("publish", payload["notice"].lower())
 
+    def test_fresh_anonymous_models_and_no_route_chat_never_call_provider(self) -> None:
+        with self.harness.config.mutate() as config:
+            config.aliases.clear()
+            config.profiles.clear()
+        status, payload, _ = self.harness.request("GET", "/v1/models")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["object"], "list")
+        self.assertEqual(payload["data"], [])
+        status, payload, _ = self.harness.request(
+            "POST", "/v1/chat/completions",
+            body={"model": "missing-route", "messages": [{"role": "user", "content": "synthetic"}]},
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+        self.assertEqual(self.harness.adapter.calls, [])
+
     def test_published_alias_appears_in_models(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True
@@ -367,6 +360,17 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual([entry["id"] for entry in payload["data"]], ["coding"])
         self.assertNotIn("notice", payload)
+
+    def test_api_remains_anonymous_even_when_legacy_access_mode_is_authenticated(self) -> None:
+        with self.harness.config.mutate() as config:
+            config.access_mode = "authenticated"
+            config.profiles["restricted-client"] = Profile(
+                profile_id="restricted-client", name="Restricted", allowed_aliases=[]
+            )
+            config.aliases["coding"].enabled = True
+        status, payload, _ = self.harness.request("GET", "/v1/models")
+        self.assertEqual(status, 200)
+        self.assertEqual([entry["id"] for entry in payload["data"]], ["coding"])
 
     def test_completion_is_routed_and_attributed(self) -> None:
         with self.harness.config.mutate() as config:
@@ -615,123 +619,74 @@ class ConsoleApiTests(unittest.TestCase):
         self.addCleanup(self.harness.close)
 
     def _login(self) -> dict[str, str]:
-        status, payload, headers = self.harness.request(
-            "POST",
-            "/setup/api/session",
-            body={"passphrase": "test-passphrase"},
-            port=self.harness.setup_port,
-        )
-        self.assertEqual(status, 200)
-        cookies = [value.split(";")[0] for value in headers.get("set-cookie", [])]
-        return {"Cookie": "; ".join(cookies)}
+        """Compatibility helper: trusted-LAN console needs no login headers."""
+        return {}
 
-    def test_first_run_creates_the_passphrase_and_a_session(self) -> None:
-        headers = self._login()
-        self.assertIn("gw_session", headers["Cookie"])
-        self.assertIn("gw_csrf", headers["Cookie"])
+    def test_owner_console_mutates_same_origin_without_session_or_csrf(self) -> None:
+        status, payload, _ = self.harness.request(
+            "POST", "/owner/api/model",
+            body={"action": "enable", "provider_id": "chatgpt_codex", "model_id": "gpt-6-luna"},
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ok"])
 
     def test_state_reports_the_zero_state(self) -> None:
-        headers = self._login()
-        status, payload, _ = self.harness.request("GET", "/owner/api/state", headers=headers)
+        status, payload, _ = self.harness.request("GET", "/owner/api/state")
         self.assertEqual(status, 200)
         self.assertFalse(payload["initialized"])
         self.assertEqual(len(payload["checklist"]), 7)
         self.assertEqual(payload["checklist"][0]["title"], "Connect a provider")
 
-    def test_console_cannot_mutate_in_lan_noauth_mode(self) -> None:
-        headers = self._login()
-        csrf = headers["Cookie"].split("gw_csrf=")[1].split(";")[0]
+    def test_owner_can_mutate_in_lan_noauth_mode(self) -> None:
         status, payload, _ = self.harness.request(
             "POST",
             "/owner/api/model",
             body={"action": "enable", "provider_id": "chatgpt_codex", "model_id": "gpt-6-luna"},
-            headers={**headers, "X-Gateway-CSRF": csrf},
         )
-        self.assertEqual(status, 403)
-        self.assertEqual(payload["error"]["type"], "mutation_not_permitted")
-
-    def test_mutation_requires_an_owner_session(self) -> None:
-        status, payload, _ = self.harness.request(
-            "POST", "/owner/api/model", body={"action": "enable", "provider_id": "x", "model_id": "y"}
-        )
-        self.assertEqual(status, 401)
-        self.assertEqual(payload["error"]["type"], "owner_session_required")
-
-    def test_mutation_requires_a_matching_csrf_token(self) -> None:
-        headers = self._login()
-        status, payload, _ = self.harness.request(
-            "POST", "/owner/api/model", body={"action": "enable"}, headers=headers
-        )
-        self.assertEqual(status, 403)
-        self.assertEqual(payload["error"]["type"], "csrf_missing")
-
-        csrf = headers["Cookie"].split("gw_csrf=")[1].split(";")[0]
-        status, payload, _ = self.harness.request(
-            "POST",
-            "/owner/api/model",
-            body={"action": "enable"},
-            headers={**headers, "X-Gateway-CSRF": "wrong-token"},
-        )
-        self.assertEqual(status, 403)
-        self.assertEqual(payload["error"]["type"], "csrf_mismatch")
+        self.assertEqual(status, 200, payload)
 
     def test_cross_origin_mutation_is_rejected(self) -> None:
-        headers = self._login()
-        csrf = headers["Cookie"].split("gw_csrf=")[1].split(";")[0]
         status, payload, _ = self.harness.request(
-            "POST",
-            "/owner/api/model",
-            body={"action": "enable"},
-            headers={**headers, "X-Gateway-CSRF": csrf, "Origin": "http://evil.example.com"},
+            "POST", "/owner/api/model", body={"action": "enable", "provider_id": "x", "model_id": "y"},
+            headers={"Origin": "http://evil.example.com"},
         )
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"]["type"], "origin_mismatch")
 
-    def test_credential_enrolment_is_refused_on_the_console(self) -> None:
+    def test_missing_origin_on_browser_mutation_is_rejected(self) -> None:
+        status, payload, _ = self.harness.request(
+            "POST", "/owner/api/model", body={"action": "enable"}, headers={"Origin": "null"}
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error"]["type"], "origin_mismatch")
+
+    def test_credential_enrolment_is_available_on_the_console(self) -> None:
         with self.harness.config.mutate() as config:
             config.access_mode = "authenticated"
-        headers = self._login()
-        csrf = headers["Cookie"].split("gw_csrf=")[1].split(";")[0]
         status, payload, _ = self.harness.request(
             "POST",
             "/owner/api/provider",
             body={"action": "enroll_key", "provider_id": "opencode_go", "api_key": "not-a-real-key"},
-            headers={**headers, "X-Gateway-CSRF": csrf},
         )
-        self.assertEqual(status, 403)
-        self.assertEqual(payload["error"]["type"], "credential_enroll_forbidden")
-
-    def test_credential_enrolment_succeeds_on_the_setup_surface(self) -> None:
-        csrf = None
-        status, payload, headers = self.harness.request(
-            "POST", "/setup/api/session", body={"passphrase": "test-passphrase"}, port=self.harness.setup_port
-        )
-        self.assertEqual(status, 200)
-        cookie_header = "; ".join(value.split(";")[0] for value in headers.get("set-cookie", []))
-        csrf = cookie_header.split("gw_csrf=")[1].split(";")[0]
-        status, payload, _ = self.harness.request(
-            "POST",
-            "/setup/api/provider",
-            body={"action": "enroll_key", "provider_id": "opencode_go", "api_key": "not-a-real-key"},
-            headers={"Cookie": cookie_header, "X-Gateway-CSRF": csrf},
-            port=self.harness.setup_port,
-        )
-        self.assertEqual(status, 200)
-        # The key is never echoed back.
+        self.assertEqual(status, 200, payload)
         self.assertNotIn("not-a-real-key", json.dumps(payload))
 
+    def test_authenticated_access_mode_cannot_be_enabled(self) -> None:
+        status, payload, _ = self.harness.request(
+            "POST", "/owner/api/settings",
+            body={"action": "access_mode", "access_mode": "authenticated"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["type"], "unsupported_access_mode")
+        self.assertEqual(self.harness.config.snapshot().access_mode, "lan_noauth")
+
     def test_refresh_publishes_limits_with_a_source_and_confidence(self) -> None:
-        headers = self._login()
-        csrf = headers["Cookie"].split("gw_csrf=")[1].split(";")[0]
         status, _, _ = self.harness.request(
-            "POST",
-            "/setup/api/provider",
+            "POST", "/owner/api/provider",
             body={"action": "refresh", "provider_id": FAKE_PROVIDER},
-            headers={"Cookie": headers["Cookie"], "X-Gateway-CSRF": csrf},
-            port=self.harness.setup_port,
         )
         self.assertEqual(status, 200)
-        status, state, _ = self.harness.request("GET", "/owner/api/state", headers=headers)
+        status, state, _ = self.harness.request("GET", "/owner/api/state")
         self.assertEqual(status, 200)
         limits = state["limits"]
         self.assertTrue(limits)
@@ -742,8 +697,7 @@ class ConsoleApiTests(unittest.TestCase):
             self.assertNotEqual(entry["source"], "provider_reported")
 
     def test_state_never_contains_credential_material(self) -> None:
-        headers = self._login()
-        _, payload, _ = self.harness.request("GET", "/owner/api/state", headers=headers)
+        _, payload, _ = self.harness.request("GET", "/owner/api/state")
         text = json.dumps(payload)
         self.assertNotIn("api_key", text.replace("api_key_", ""))
         self.assertNotIn("Bearer", text)

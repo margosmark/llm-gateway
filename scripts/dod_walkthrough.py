@@ -111,7 +111,7 @@ def main(argv: list[str]) -> int:
         4,
         "Connect OpenCode Go with an API key",
         OWNER if go.get("state") != "connected" else PASS,
-        "owner action: enrol the key in the setup UI"
+        "owner action: enter the key in the trusted-LAN console"
         if go.get("state") != "connected"
         else "connected",
     )
@@ -124,7 +124,7 @@ def main(argv: list[str]) -> int:
         5,
         "Test each provider independently",
         OWNER if not tested else PASS,
-        "run 'Test connection' for each provider in the setup UI"
+        "run 'Test connection' for each provider in the owner console"
         if not tested
         else f"{len(tested)} provider(s) connected",
     )
@@ -135,7 +135,7 @@ def main(argv: list[str]) -> int:
         6,
         "Refresh or manually enter model IDs",
         OWNER if not discovered else PASS,
-        "run 'Refresh model catalog' in the setup UI"
+        "run 'Refresh model catalog' in the owner console"
         if not discovered
         else f"{discovered} enabled model(s)",
     )
