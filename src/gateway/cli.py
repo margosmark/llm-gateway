@@ -53,11 +53,14 @@ def _address_is_local(host: str) -> bool:
     if host.strip() in ("localhost", "127.0.0.1", "::1"):
         return True
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        address = ipaddress.ip_address(host.strip())
+        family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+        endpoint = (host, 0, 0, 0) if address.version == 6 else (host, 0)
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            probe.bind((host, 0))
+            probe.bind(endpoint)
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -66,7 +69,17 @@ def _is_private_or_loopback(host: str) -> bool:
         address = ipaddress.ip_address(host.strip())
     except ValueError:
         return False
-    return address.is_private or address.is_loopback
+    if address.is_loopback:
+        return True
+    if address.version == 4:
+        supported = (ipaddress.ip_network("10.0.0.0/8"),
+                     ipaddress.ip_network("172.16.0.0/12"),
+                     ipaddress.ip_network("192.168.0.0/16"))
+    else:
+        supported = (ipaddress.ip_network("fc00::/7"),)
+    return not address.is_link_local and not address.is_multicast and any(
+        address in network for network in supported
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
