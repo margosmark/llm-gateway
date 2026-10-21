@@ -339,21 +339,14 @@ them.
   translate those dialects, so such a route is refused with a clear reason
   and its dialect is shown as Unknown. It is not guessed.
 * **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
-  a web dashboard, but no machine-readable API for a personal subscription.
-  The gateway does not call undocumented endpoints, so actual remaining
+  a web dashboard, but no machine-readable allowance API for a personal
+  plan. The gateway calls no undocumented endpoint, so actual remaining
   allowance and reset times are Unknown. Published estimates are shown with
   their source and date.
-* **ChatGPT/Codex onboarding is not ready for use yet.** The current UI cannot
-  complete device-code polling, and ChatGPT catalogue refresh does not satisfy
-  the common model-metadata contract. These release blockers are R1 and R8 in
-  `docs/REVIEW.md`.
-* **Cross-dialect buffered replies are not ready for use yet.** A request can
-  be converted to an upstream dialect while its non-streaming response is
-  returned unchanged. This is R9 in `docs/REVIEW.md`; use only matching
-  dialects until it is fixed.
-* **The device-code flow is a beta path** implemented from provider
-  integration behaviour, not from a published third-party contract. OpenAI
-  does not endorse this gateway.
+* **The device-code flow is a beta path.** It is implemented from provider
+  integration behaviour, and OpenAI documents the flow but does not endorse
+  this gateway's use of it. Device-code sign-in must also be enabled for
+  the account, or the provider answers 404.
 * **No TLS.** The gateway is HTTP-only and bearer tokens and request content
   require a trusted LAN. Do not place it behind a TLS terminator or proxy
   until an explicit proxy-trust/forwarded-header design is implemented; the
@@ -365,16 +358,14 @@ them.
 * **The bridge is verified against a recorded corpus**, not yet against live
   provider captures. The corpus and its round-trip runner are in
   `tests/fixtures/bridge_corpus.json`.
-* **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
-  a web dashboard, but no machine-readable allowance API for a personal
-  plan, and the gateway calls no undocumented endpoint. Published estimates
-  are shown with their source and date.
 * **OpenCode Go publishes no context windows**, so an alias with an
   OpenCode Go route reports an unknown context limit. That is the honest
   answer: the Go service's own limit is what matters, and it does not
   publish it.
-* **The device-code path is a beta path.** OpenAI documents it; OpenAI does
-  not endorse this gateway's use of it.
+* **Usage and cost are not yet recorded.** The bridge reads the provider's
+  token counters and the catalogue publishes per-token prices, but the
+  request ledger does not store either yet, so the Status page reports
+  request counts and timings rather than spend.
 
 ---
 

@@ -227,6 +227,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
     server_version = "personal-llm-gateway"
     sys_version = ""
 
+    #: Send without waiting for an acknowledgement.
+    #:
+    #: ``socketserver.StreamRequestHandler`` defaults this to False, so
+    #: TCP_NODELAY is not set on the accepted socket and Nagle's algorithm
+    #: applies. The handler writes a response in two segments - the header
+    #: block, then the body - so Nagle holds the body until the header
+    #: block is acknowledged, and the client's TCP delays that
+    #: acknowledgement. Every response of about one MSS or less then paid
+    #: a 41ms stall, on every request after the first on a connection.
+    #: See ``docs/REVIEW.md`` R28.
+    disable_nagle_algorithm = True
+
     # Silence the default stderr access log: it would echo request targets,
     # and request targets may carry data we do not want in logs.
     def log_message(self, fmt: str, *args: Any) -> None:  # pragma: no cover
@@ -298,9 +310,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         if not seen_length:
             self.send_header("Content-Length", str(len(response.body)))
-        self.end_headers()
-        if not head_only and response.body:
-            self.wfile.write(response.body)
+        if self.request_version == "HTTP/0.9":
+            # An HTTP/0.9 request has no header block at all.
+            if not head_only and response.body:
+                self.wfile.write(response.body)
+            return
+        # The status line, the header block and the body are written as
+        # **one** segment. Writing the body separately lets Nagle's
+        # algorithm hold it until the header block is acknowledged, which
+        # cost 41ms on every response of about one MSS or less.
+        # See ``docs/REVIEW.md`` R28.
+        head = b"".join(getattr(self, "_headers_buffer", [])) + b"\r\n"
+        self._headers_buffer = []
+        self.wfile.write(head if head_only else head + response.body)
 
     def _send_stream(self, response: StreamResponse, head_only: bool) -> None:
         self.send_response(response.status)
@@ -315,9 +337,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         for chunk in response.iterator:
             if not chunk:
                 continue
-            self.wfile.write(b"%x\r\n" % len(chunk))
-            self.wfile.write(chunk)
-            self.wfile.write(b"\r\n")
+            # One write per frame: the length line, the frame and the
+            # terminator belong to the same chunk on the wire.
+            self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
             self.wfile.flush()
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
