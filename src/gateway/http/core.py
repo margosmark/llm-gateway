@@ -24,6 +24,8 @@ import socketserver
 import sys
 import threading
 import traceback
+from gateway.http.keepalive import with_sse_keepalives
+
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -374,7 +376,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
             return
-        for chunk in response.iterator:
+        for chunk in with_sse_keepalives(response.iterator):
             if not chunk:
                 continue
             # One write per frame: the length line, the frame and the

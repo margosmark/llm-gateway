@@ -237,6 +237,14 @@ upstream reader yields complete frames, and every emitted frame is
 re-terminated. A stream without the terminator is read by a strict client as
 one event with no finish reason.
 
+The HTTP stream writer emits a gateway-owned `: ping` SSE comment after 15
+seconds without client-facing output. It wraps the already-converted stream,
+so keepalives never enter upstream frames or dialect conversion. Each comment
+is sent as its own HTTP chunk and does not alter event framing. The interval
+is fixed; clients may ignore SSE comments as usual. Regression coverage is in
+`tests/test_sse_keepalive.py`; `tests/test_sse_framing.py` still verifies
+upstream frame separators.
+
 ### Response segments
 
 A buffered response leaves the process in **one** segment: the status line,
