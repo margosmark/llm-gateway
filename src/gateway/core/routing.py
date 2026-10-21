@@ -147,6 +147,10 @@ class Candidate:
     dialect: str = ""
     capability: Capability | None = None
     excluded_reason: str | None = None
+    #: Set when the route can serve the request but something the client
+    #: asked for has to be dropped to do it. It is never silent: the
+    #: substitution is recorded and reported.
+    degraded_reason: str | None = None
 
     @property
     def eligible(self) -> bool:
@@ -160,6 +164,7 @@ class Candidate:
             "dialect": self.dialect,
             "eligible": self.eligible,
             "excluded_reason": self.excluded_reason,
+            "degraded_reason": self.degraded_reason,
         }
 
 
@@ -177,6 +182,8 @@ class Attribution:
     #: route other than the primary must say why the primary was skipped,
     #: otherwise it looks like an unexplained fallback.
     skipped: list[dict[str, Any]] = field(default_factory=list)
+    #: What was dropped to serve the request on this route, and why.
+    degradations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -187,6 +194,7 @@ class Attribution:
             "fallback_reason": self.fallback_reason,
             "attempts": self.attempts,
             "skipped": self.skipped,
+            "degradations": self.degradations,
         }
 
 
@@ -305,9 +313,17 @@ class Router:
                 candidates.append(candidate)
                 continue
             if reasoning_effort and not capability.supports_effort(reasoning_effort):
-                candidate.excluded_reason = f"this model does not support reasoning effort '{reasoning_effort}'"
-                candidates.append(candidate)
-                continue
+                # A reasoning effort is a *preference*, not a capability: the
+                # model can still answer without it. Excluding the route
+                # would fail the whole request when a usable route exists -
+                # and most OpenCode Go models publish no reasoning levels at
+                # all, so that would exclude every one of them from any
+                # reasoning request. The effort is dropped for this route
+                # and the substitution is recorded, never silent.
+                candidate.degraded_reason = (
+                    f"the requested reasoning effort '{reasoning_effort}' is not published for "
+                    "this model; it will be dropped for this route"
+                )
 
             candidates.append(candidate)
 
@@ -481,6 +497,23 @@ class Router:
             upstream_payload = dict(upstream_payload)
             upstream_payload["model"] = candidate.route.model
 
+            degradation: dict[str, Any] | None = None
+            if candidate.degraded_reason:
+                # Drop what this route cannot honour, and say so.
+                upstream_payload.pop("reasoning_effort", None)
+                reasoning = upstream_payload.get("reasoning")
+                if isinstance(reasoning, dict):
+                    upstream_payload["reasoning"] = {
+                        key: value for key, value in reasoning.items() if key != "effort"
+                    }
+                    if not upstream_payload["reasoning"]:
+                        upstream_payload.pop("reasoning")
+                degradation = {
+                    "provider": candidate.route.provider,
+                    "model": candidate.route.model,
+                    "reason": candidate.degraded_reason,
+                }
+
             request = ProviderRequest(
                 model=candidate.route.model,
                 payload=upstream_payload,
@@ -526,6 +559,10 @@ class Router:
 
             attribution.serving_provider = candidate.route.provider
             attribution.serving_model = candidate.route.model
+            if degradation is not None:
+                # Only the route that actually served the request records a
+                # substitution. A route that failed did not serve anything.
+                attribution.degradations.append(degradation)
             self._record(
                 request_id=request_id,
                 alias_name=alias_name,
@@ -606,6 +643,7 @@ class Router:
                 profile_id=profile_id,
                 skipped=attribution.skipped,
                 attempts=attribution.attempts,
+                degradations=attribution.degradations,
             )
         )
 
