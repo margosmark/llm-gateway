@@ -41,7 +41,7 @@ class SkippedPrimaryTests(unittest.TestCase):
 
     def test_a_cooldown_on_the_primary_is_recorded_as_a_fallback(self) -> None:
         # Put the primary provider into a local cooldown.
-        self.harness.router.cooldown.set(FAKE_PROVIDER, 300)
+        self.harness.router.circuits.set(FAKE_PROVIDER, 300)
 
         status, payload, _ = self.harness.request(
             "POST",
@@ -62,7 +62,7 @@ class SkippedPrimaryTests(unittest.TestCase):
         self.assertIn("cooldown", event["skipped"][0]["reason"])
 
     def test_the_fallback_counter_reflects_a_skipped_primary(self) -> None:
-        self.harness.router.cooldown.set(FAKE_PROVIDER, 300)
+        self.harness.router.circuits.set(FAKE_PROVIDER, 300)
         self.harness.request(
             "POST",
             "/v1/chat/completions",

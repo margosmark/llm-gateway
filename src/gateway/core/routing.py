@@ -31,6 +31,7 @@ from typing import Any, Iterator
 from gateway.adapters.base import Adapter, AdapterError, ProviderRequest, ProviderResponse
 from gateway.bridge.model import ConversionError
 from gateway.bridge.requests import convert_request
+from gateway.circuits import CircuitStore
 from gateway.config import (
     ERROR_AUTH,
     ERROR_EXHAUSTED,
@@ -94,68 +95,6 @@ class RoutingError(Exception):
         if self.detail is not None:
             payload["error"]["detail"] = self.detail
         return payload
-
-
-@dataclass
-class CooldownState:
-    """Local cooldown timers.
-
-    A cooldown is a **local retry policy**, never evidence that the provider
-    reset. There are no background probes.
-    """
-
-    _until: dict[str, float] = field(default_factory=dict)
-    #: Why each cooldown was set, so a skip can say so.
-    _reasons: dict[str, str] = field(default_factory=dict)
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-
-    def set(self, provider_id: str, seconds: int, reason: str | None = None) -> float:
-        until = time.monotonic() + max(0, seconds)
-        with self._lock:
-            self._until[provider_id] = until
-            self._reasons[provider_id] = reason or ""
-        return until
-
-    def active(self, provider_id: str) -> bool:
-        with self._lock:
-            until = self._until.get(provider_id)
-        return until is not None and until > time.monotonic()
-
-    def remaining(self, provider_id: str) -> int:
-        with self._lock:
-            until = self._until.get(provider_id)
-        if until is None:
-            return 0
-        return max(0, int(until - time.monotonic()))
-
-    def reason(self, provider_id: str) -> str:
-        """Why the cooldown was set, if it was set for a stated reason."""
-        with self._lock:
-            return self._reasons.get(provider_id, "")
-
-    def clear(self, provider_id: str | None = None) -> None:
-        with self._lock:
-            if provider_id is None:
-                self._until.clear()
-                self._reasons.clear()
-            else:
-                self._until.pop(provider_id, None)
-                self._reasons.pop(provider_id, None)
-
-    def snapshot(self) -> dict[str, int]:
-        with self._lock:
-            now = time.monotonic()
-            return {key: max(0, int(value - now)) for key, value in self._until.items() if value > now}
-
-    def details(self) -> dict[str, dict[str, object]]:
-        """The remaining time and the reason for each cooldown."""
-        with self._lock:
-            now = time.monotonic()
-            return {
-                key: {"remaining_seconds": max(0, int(value - now)), "reason": self._reasons.get(key, "")}
-                for key, value in self._until.items()
-                if value > now
-            }
 
 
 @dataclass
@@ -233,16 +172,18 @@ class Router:
         config: ConfigStore,
         registry,
         ledger=None,
-        cooldown: CooldownState | None = None,
+        circuits: CircuitStore | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
         self._ledger = ledger
-        self._cooldown = cooldown or CooldownState()
+        #: The open circuits. They are remembered on disk, so a restart
+        #: during an outage does not defeat them.
+        self._circuits = circuits if circuits is not None else CircuitStore()
 
     @property
-    def cooldown(self) -> CooldownState:
-        return self._cooldown
+    def circuits(self) -> CircuitStore:
+        return self._circuits
 
     # --- candidate selection --------------------------------------------
 
@@ -299,12 +240,9 @@ class Router:
                 candidate.excluded_reason = "model is not enabled for exposure"
                 candidates.append(candidate)
                 continue
-            if self._cooldown.active(route.provider):
-                reason = self._cooldown.reason(route.provider)
-                suffix = f" ({reason})" if reason else ""
-                candidate.excluded_reason = (
-                    f"provider is in a local cooldown for {self._cooldown.remaining(route.provider)}s{suffix}"
-                )
+            allowed, circuit_reason = self._circuits.check(route.provider, route.model)
+            if not allowed:
+                candidate.excluded_reason = circuit_reason
                 candidates.append(candidate)
                 continue
 
@@ -567,7 +505,7 @@ class Router:
                         "reason": exc.message,
                     }
                 )
-                self._maybe_cooldown(alias, candidate, exc)
+                self._maybe_open_circuit(alias, candidate, exc)
 
                 if is_last:
                     break
@@ -583,6 +521,10 @@ class Router:
 
             attribution.serving_provider = candidate.route.provider
             attribution.serving_model = candidate.route.model
+            # The route answered, so any circuit on it is closed. A success
+            # resets the failure count, so a route that recovers is not
+            # benched again by an old failure.
+            self._circuits.record_success(candidate.route.provider, candidate.route.model)
             if degradation is not None:
                 # Only the route that actually served the request records a
                 # substitution. A route that failed did not serve anything.
@@ -671,33 +613,31 @@ class Router:
             )
         )
 
-    def _maybe_cooldown(self, alias: Alias, candidate: Candidate, error: AdapterError) -> None:
-        """Apply the local cooldown policy after a qualifying failure.
+    def _maybe_open_circuit(self, alias: Alias, candidate: Candidate, error: AdapterError) -> None:
+        """Open the circuit a qualifying failure deserves.
 
         The provider's own ``Retry-After`` is honoured when it asks for
         **longer** than the local policy. Waiting too little is the worse
         error, so the window is the longer of the two - and the reason is
         recorded, so the skip says which one it was.
+
+        The class decides the rest: a confirmed exhaustion opens for a
+        long time and covers the provider, a rate limit opens the route
+        for as long as the provider asked, and a transient failure needs a
+        pattern before it opens anything.
         """
         trigger = TRIGGER_FOR_ERROR.get(error.error_class)
         if trigger is None:
             return
         if trigger not in alias.fallback_triggers:
             return
-        policy = alias.cooldown_seconds
-        asked = error.retry_after
-        if policy > 0:
-            seconds = policy
-            reason = f"the local cooldown policy for this alias is {policy}s"
-        elif asked:
-            seconds = asked
-            reason = f"the provider asked us to wait {asked}s"
-        else:
-            return
-        if asked and asked > seconds:
-            seconds = asked
-            reason = f"the provider asked us to wait {asked}s"
-        self._cooldown.set(candidate.route.provider, seconds, reason)
+        self._circuits.record_failure(
+            provider=candidate.route.provider,
+            model=candidate.route.model,
+            error_class=error.error_class,
+            base_seconds=alias.cooldown_seconds,
+            retry_after=error.retry_after,
+        )
 
     # --- helpers for the console -----------------------------------------
 

@@ -177,6 +177,12 @@ The credential store is a separate file and is never touched by a
 configuration rollback. Tokens the provider has already issued are not
 revoked by a rollback; the gateway will refresh or reject them on its own.
 
+The open circuits are a third file, `circuits.json`, and a configuration
+rollback leaves it alone as well. That is deliberate: a gateway that comes
+back after an outage stays away from the provider that was exhausted,
+instead of calling it again on the first request. Delete the file by hand
+if you want the gateway to try every route immediately.
+
 ---
 
 ## 6. Troubleshooting

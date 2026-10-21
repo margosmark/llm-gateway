@@ -14,6 +14,7 @@ from gateway.adapters.opencode_go import OpenCodeGoAdapter
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.buildinfo import release_identity
+from gateway.circuits import CircuitStore
 from gateway.config import ConfigStore, ProviderState
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
@@ -92,7 +93,10 @@ def build_application(data_dir: Path, host: str, port: int):
                 snapshot.providers[provider_id] = ProviderState(provider_id=provider_id, kind=provider_id)
     ledger = RequestLedger()
     limits = LimitStore()
-    router = Router(config, registry, ledger=ledger)
+    # The open circuits are remembered on disk, so a gateway that restarts
+    # during an outage does not call the exhausted provider again.
+    circuits = CircuitStore(data_dir / "circuits.json")
+    router = Router(config, registry, ledger=ledger, circuits=circuits)
     profile_auth = ProfileAuth(config, credentials)
     policy = SecurityPolicy(allowed_hosts=build_allowed_hosts(host, port), canonical_origins=build_canonical_origins(host, port))
     app = GatewayApp(config=config, credentials=credentials, router=router, registry=registry,

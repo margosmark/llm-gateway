@@ -143,27 +143,27 @@ class CooldownTests(unittest.TestCase):
     def test_a_longer_ask_wins_over_the_local_policy(self) -> None:
         self._fail_with(AdapterError("rate_limited", provider_id="chatgpt_codex", retry_after=3600))
         self._request()
-        cooldown = self.harness.router.cooldown
+        circuits = self.harness.router.circuits
         self.assertGreater(
-            cooldown.remaining("chatgpt_codex"),
+            circuits.remaining("chatgpt_codex", "gpt-6-luna"),
             300,
             "the provider asked for longer than the policy, so the longer window applies",
         )
-        self.assertIn("the provider asked us to wait", cooldown.reason("chatgpt_codex"))
+        self.assertIn("asked us to wait 3600s", circuits.reason("chatgpt_codex", "gpt-6-luna"))
 
     def test_a_shorter_ask_does_not_shorten_the_local_policy(self) -> None:
         self._fail_with(AdapterError("rate_limited", provider_id="chatgpt_codex", retry_after=30))
         self._request()
-        cooldown = self.harness.router.cooldown
-        self.assertGreaterEqual(cooldown.remaining("chatgpt_codex"), 250)
-        self.assertIn("the local cooldown policy", cooldown.reason("chatgpt_codex"))
+        circuits = self.harness.router.circuits
+        self.assertGreaterEqual(circuits.remaining("chatgpt_codex", "gpt-6-luna"), 250)
+        self.assertIn("the local cooldown policy is 300s", circuits.reason("chatgpt_codex", "gpt-6-luna"))
 
     def test_no_ask_leaves_the_local_policy_alone(self) -> None:
         self._fail_with(AdapterError("rate_limited", provider_id="chatgpt_codex"))
         self._request()
-        cooldown = self.harness.router.cooldown
-        self.assertGreaterEqual(cooldown.remaining("chatgpt_codex"), 250)
-        self.assertIn("the local cooldown policy", cooldown.reason("chatgpt_codex"))
+        circuits = self.harness.router.circuits
+        self.assertGreaterEqual(circuits.remaining("chatgpt_codex", "gpt-6-luna"), 250)
+        self.assertIn("the local cooldown policy is 300s", circuits.reason("chatgpt_codex", "gpt-6-luna"))
 
     def test_the_skip_says_which_one_it_was(self) -> None:
         self._fail_with(AdapterError("rate_limited", provider_id="chatgpt_codex", retry_after=3600))
@@ -174,15 +174,15 @@ class CooldownTests(unittest.TestCase):
         skipped = event["skipped"]
         self.assertTrue(skipped, "the skipped route must be recorded")
         self.assertIn("cooldown", skipped[0]["reason"])
-        self.assertIn("the provider asked us to wait", skipped[0]["reason"])
+        self.assertIn("asked us to wait 3600s", skipped[0]["reason"])
 
     def test_the_cooldown_details_carry_the_reason(self) -> None:
         self._fail_with(AdapterError("rate_limited", provider_id="chatgpt_codex", retry_after=3600))
         self._request()
-        details = self.harness.router.cooldown.details()
-        self.assertIn("chatgpt_codex", details)
-        self.assertIn("the provider asked us to wait", details["chatgpt_codex"]["reason"])
-        self.assertGreater(details["chatgpt_codex"]["remaining_seconds"], 300)
+        details = self.harness.router.circuits.details()
+        self.assertIn("chatgpt_codex/gpt-6-luna", details)
+        self.assertIn("asked us to wait 3600s", details["chatgpt_codex/gpt-6-luna"]["reason"])
+        self.assertGreater(details["chatgpt_codex/gpt-6-luna"]["remaining_seconds"], 300)
 
 
 class AdapterEndToEndTests(unittest.TestCase):
