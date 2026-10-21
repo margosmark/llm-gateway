@@ -641,7 +641,9 @@ with the traps that cost the most time:
   with each model identified by its `slug`, not an `id`.
 * **SSE frames must be terminated.** A frame is its data lines plus the
   blank line that ends it; a stream without it is read by a strict client as
-  one event with no finish reason.
+  one event with no finish reason. The gateway also emits a `: ping` SSE
+  comment after 15 seconds without client-facing output; comments carry no
+  response content.
 
 ## Known limitations
 
