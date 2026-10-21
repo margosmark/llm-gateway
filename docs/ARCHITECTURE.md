@@ -361,12 +361,17 @@ fallbacks after an upstream error are explicitly not evaluated.
    profile. Legacy profile/token metadata does not provide access control.
    This profile resolution is not the model-API key boundary: `/v1/*` is
    keyless until an owner sets a client key, and once one is set all seven
-   `/v1` routes require `Authorization: Bearer <key>` before the handler
+   `/v1` routes require `Authorization: Bearer <key> before the handler
    runs (the owner session never substitutes for it).
 3. The request model must name a published alias; any reachable peer may
    invoke each published route while the surface is keyless.
-4. `Router` evaluates the primary route followed by configured fallbacks. A
-   candidate must have a configured adapter, an enabled known model, a known
+4. `Router` evaluates the primary route followed by configured fallbacks. When
+   an alias has a weighted pool it uses deterministic weighted
+   rendezvous-by-conversation selection first, then treats the other pool
+   members and configured fallbacks strictly as failure candidates. Pool
+   selection is stable for the derived conversation identifier and does not
+   persist client content. A candidate must have a configured adapter, an
+   enabled known model, a known
    supported dialect, matching capabilities, and no active local cooldown.
 5. The bridge converts between Chat Completions and Responses only when the
    target capability permits it. Unsupported capability/dialect combinations
