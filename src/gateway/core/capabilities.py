@@ -3,6 +3,14 @@
 Every route in the gateway carries a capability row. It answers two
 questions:
 
+Image input and built-in/hosted tools are hard routing requirements: the
+router must exclude models that publish either capability as unsupported.
+Previous-response continuation is also fail-closed: absent per-model support
+metadata is unknown, so the router treats it as unsupported rather than
+risking a request the provider cannot continue. Chat Completions conversion
+also refuses this stateful field directly because that dialect cannot express
+it; see ``gateway.bridge.requests.to_chat_completions``.
+
 1. **May this route serve this request?** Compatibility is checked *before*
    route eligibility, and the owner sees the reason during route validation.
 2. **Which conversions may the bridge perform?** The capability row doubles

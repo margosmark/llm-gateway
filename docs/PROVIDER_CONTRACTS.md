@@ -45,8 +45,19 @@ The rule now is:
 
 | Requirement | Treatment |
 |---|---|
-| wire dialect, streaming, function tools | **Hard.** The route is excluded. Dropping tools would change the API contract. |
+| wire dialect, streaming, function tools, built-in tools, image input, previous-response continuation | **Hard.** The route is excluded with a capability-specific reason. Dropping tools, images, or continuation would change the request contract. |
 | `reasoning_effort` | **A preference.** The route stays eligible, the effort is dropped *for that route*, and the substitution is recorded. Never silent. |
+
+Image input is detected in both Chat Completions (`image_url`) and Responses
+(`input_image`) request content. Non-function tool types require
+`supports_builtin_tools`; function tools continue to require
+`supports_function_tools`. A `previous_response_id` requires
+`supports_previous_response_id`. That metadata is not currently represented
+on `ModelEntry`, so it defaults to unsupported and fails closed; continuation
+also remains untranslatable to Chat Completions and is refused by the bridge.
+When no route is eligible, the gateway returns each excluded route and its
+reason in the routing error detail; when a fallback serves, skipped-route
+reasons are retained in attribution/ledger.
 
 A degradation is recorded only for the route that **actually served** the
 request. A route that failed did not serve anything, so it does not get to
