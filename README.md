@@ -63,11 +63,14 @@ git clone https://github.com/margosmark/llm-gateway.git
 cd llm-gateway
 
 export GATEWAY_BIND=10.10.11.109          # your explicit private LAN address
-export SOURCE_REVISION="$(git rev-parse HEAD)"
-export SOURCE_TREE="$(git rev-parse HEAD^{tree})"
 
-docker compose up -d --build
+python3 scripts/release.py --build --image personal-llm-gateway:candidate
 ```
+
+That one command builds the image from this checkout, starts the
+deployment, publishes the running image's identity into the state volume
+and verifies it. **Run it on the machine that owns `GATEWAY_BIND`** - the
+gateway refuses to start on an address the host does not hold.
 
 Then, from a trusted LAN device:
 
@@ -267,6 +270,8 @@ third-party runtime dependency, nothing to `pip install`, and no build step.
 PYTHONPATH=src python3 -m unittest discover -s tests    # the suite
 PYTHONPATH=src python3 -m gateway --help                 # the CLI
 python3 scripts/build_go_catalog_snapshot.py              # regenerate the Go catalogue
+python3 scripts/release.py --build --image personal-llm-gateway:candidate
+                                                       # build, deploy, publish the identity, verify
 ```
 
 ### Layout
@@ -289,7 +294,9 @@ data/
   go_catalog.json   the dated OpenCode Go catalogue snapshot
 scripts/
   build_go_catalog_snapshot.py
-  release_gate.py
+  init_state_dir.py    prepares the state volume for the non-root runtime
+  release.py           the cutover step: build, deploy, publish identity, verify
+  release_gate.py      the gate against one exact candidate image
 ```
 
 ### The release gate
@@ -307,6 +314,75 @@ identity, wildcard refusal, forwarded-header / `Host` / same-origin `Origin`
 probes, direct owner-console use, and that no credential material is in the image.
 It is not a substitute for a Compose-equivalent deployment check: state-volume
 ownership and production `/version` identity still require explicit proof.
+
+### Deploying a release
+
+**Run these on the machine that owns `GATEWAY_BIND`.** The gateway binds
+one explicit address and refuses to start on an address the host does not
+hold, so a release run from the wrong machine fails at startup rather than
+serving somewhere unexpected.
+
+```sh
+export GATEWAY_BIND=10.10.11.109          # an address THIS machine owns
+
+python3 scripts/release.py --build --image personal-llm-gateway:candidate
+```
+
+One command. It:
+
+1. builds the image from the checkout, stamping the source revision and
+   tree, so the image can say what it was built from;
+2. starts the Compose deployment - including the one-shot `state-init`
+   step that prepares the state volume for the non-root runtime;
+3. writes the running image's identity into the state volume, atomically,
+   as the runtime user;
+4. verifies from outside the container that `/health` answers, that
+   `/version` reports exactly the identity that was published, that the
+   running container *is* that image, and that the process listens only on
+   the configured address.
+
+Every step is checked. A mismatch stops the release rather than leaving a
+deployment that cannot say what it is.
+
+To build and gate without deploying:
+
+```sh
+export SOURCE_REVISION="$(git rev-parse HEAD)"
+export SOURCE_TREE="$(git rev-parse HEAD^{tree})"
+
+docker build --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
+             --build-arg SOURCE_TREE="$SOURCE_TREE" \
+             -t personal-llm-gateway:candidate .
+python3 scripts/release_gate.py personal-llm-gateway:candidate
+```
+
+Then deploy that exact image:
+
+```sh
+python3 scripts/release.py --image personal-llm-gateway:candidate
+```
+
+**Never rebuild between the gate and the deployment.** The gate inspects
+one artifact; the deployment must be that artifact. The image tag is
+convenience only - the digest is what identifies it.
+
+**Do not deploy with a bare `docker compose up -d --build`.** Compose
+passes `SOURCE_REVISION` through from the environment, so without it the
+image is built with `unknown`, and in any case only the release step
+publishes the image digest into the state volume. A deployment that
+skipped it reports `image_revision: unknown`, and the gateway warns about
+that at startup, because a deployment that cannot identify itself cannot
+be audited.
+
+To check what is running:
+
+```sh
+curl -s http://10.10.11.109:8765/version
+```
+
+`/version` has exactly four keys, and `image_revision` must be the digest
+of the image that is actually running. The runbook has the rest:
+[`RUNBOOK.md`](docs/RUNBOOK.md) covers verification, cutover and rollback.
 
 ---
 
