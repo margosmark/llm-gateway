@@ -130,7 +130,6 @@ class ModelInfo:
     supports_builtin_tools: bool = False
     supports_image_input: bool = False
     supports_previous_response_id: bool = False
-    context_window: int | None = None
     context_limit: int | None = None
     retention_class: str = RETENTION_UNKNOWN
     monthly_limit_usd: float | None = None

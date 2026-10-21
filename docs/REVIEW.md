@@ -704,6 +704,35 @@ cannot be audited - and because it is easy not to notice.
 **Evidence:** `scripts/release.py --build`, and the startup warning in
 `gateway/cli.py`.
 
+### R24 — A dataclass field was declared twice, and the second one was shadowed — **closed**
+**Severity: low latent-correctness risk.** *(closed)*
+
+`ModelInfo` declared `context_window` twice in its class body
+(`src/gateway/core/capabilities.py:125` and `:133`). A dataclass cannot hold
+two fields of one name: the second declaration silently overwrites the first,
+and the shadowed declaration is invisible at runtime, because
+`dataclasses.fields` reports a mapping and a mapping cannot have a duplicate
+key. Both declarations were identical, so no behaviour was wrong - but a
+reader who changed only one of them would have had no signal that the other
+existed, and the field's position in the generated `__init__` came from the
+*first* declaration while its type and default came from the *second*.
+
+**Resolution.** The shadowing declaration is removed. The surviving
+declaration keeps the first declaration's position, so the generated
+`__init__` signature is byte-for-byte the same: `model_id, dialect,
+context_window, max_output_tokens, reasoning_efforts, supports_streaming,
+supports_function_tools, supports_builtin_tools, supports_image_input,
+supports_previous_response_id, context_limit, retention_class,
+monthly_limit_usd, limits_source, limits_observed_at, source, notes`.
+
+The defect is invisible to the runtime, so the regression test reads the
+source instead: it parses every module under `src/gateway` and fails if any
+class body declares the same annotated field name twice.
+
+**Evidence:** `tests/test_capabilities.py` - the package-wide scan passes on
+the current source and names the exact `(file, line, class, field)` when a
+duplicate is reintroduced.
+
 ## Recommended order
 
 Every finding above is closed or superseded. The register is kept so the next
