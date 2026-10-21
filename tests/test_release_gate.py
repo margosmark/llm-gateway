@@ -34,6 +34,67 @@ _spec.loader.exec_module(release_gate)
 TCP_HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode"
 
 
+class DigestResolutionTests(unittest.TestCase):
+    """The identity the gate resolves must be one the gateway can report.
+
+    Regression cover for **R31**: the gate resolved a registry digest as
+    ``repository@sha256:...`` and wrote that into ``release.json``. The
+    gateway's release identity deliberately accepts only a bare
+    ``sha256:<64 hex>`` digest, so the value was rejected and ``/version``
+    reported ``unknown`` - which made the gate's own identity check fail
+    for every image that had a repository digest.
+    """
+
+    def _inspect_returns(self, repo_digest: str, image_id: str) -> None:
+        def fake_run(args, timeout=120):
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            result = Result()
+            if "--format" in args:
+                template = args[args.index("--format") + 1]
+                result.stdout = image_id if template == "{{.Id}}" else repo_digest
+            return result
+
+        release_gate.run = fake_run  # type: ignore[assignment]
+
+    def _restore_run(self) -> None:
+        release_gate.run = self._original_run  # type: ignore[assignment]
+
+    def setUp(self) -> None:
+        self._original_run = release_gate.run
+
+    def tearDown(self) -> None:
+        self._restore_run()
+
+    def test_a_repository_digest_is_reduced_to_the_digest(self) -> None:
+        digest = "sha256:" + "a" * 64
+        self._inspect_returns(f"personal-llm-gateway@{digest}", "sha256:" + "b" * 64)
+        self.assertEqual(release_gate.image_digest("personal-llm-gateway:candidate"), digest)
+
+    def test_a_bare_digest_is_kept(self) -> None:
+        digest = "sha256:" + "c" * 64
+        self._inspect_returns(digest, "sha256:" + "d" * 64)
+        self.assertEqual(release_gate.image_digest("personal-llm-gateway:candidate"), digest)
+
+    def test_a_local_image_falls_back_to_its_id(self) -> None:
+        identity = "sha256:" + "e" * 64
+        self._inspect_returns("", identity)
+        self.assertEqual(release_gate.image_digest("personal-llm-gateway:candidate"), identity)
+
+    def test_the_value_is_one_the_gateway_accepts(self) -> None:
+        """The gateway accepts a bare digest and nothing else."""
+        from gateway.buildinfo import _valid_revision
+
+        digest = "sha256:" + "f" * 64
+        self._inspect_returns(f"personal-llm-gateway@{digest}", "sha256:" + "0" * 64)
+        resolved = release_gate.image_digest("personal-llm-gateway:candidate")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(_valid_revision(resolved), resolved)
+
+
 class DecodeTests(unittest.TestCase):
     def test_ipv4_loopback(self) -> None:
         self.assertEqual(release_gate._decode_ipv4_hex("0100007F"), "127.0.0.1")

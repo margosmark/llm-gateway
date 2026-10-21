@@ -58,16 +58,17 @@ def compose(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
 
 
 def image_identity(reference: str) -> str | None:
-    """The immutable identity of an image: its registry digest, else its ID."""
-    result = run(["docker", "image", "inspect", reference, "--format", "{{index .RepoDigests 0}}"])
-    digest = result.stdout.strip() if result.returncode == 0 else ""
-    if digest and digest.startswith("sha256:"):
-        return digest
-    result = run(["docker", "image", "inspect", reference, "--format", "{{.Id}}"])
-    identity = result.stdout.strip() if result.returncode == 0 else ""
-    if identity.startswith("sha256:"):
-        return identity
-    return None
+    """The immutable identity of an image: its digest, or its ID.
+
+    This delegates to the release gate, so the gate and the deployment
+    can never disagree about which artifact is running. The value is a
+    bare ``sha256:<64 hex>`` digest, which is the only form the gateway
+    accepts in its release identity.
+    """
+    sys.path.insert(0, str(GATE.parent))
+    from release_gate import image_digest as _gate_image_digest
+
+    return _gate_image_digest(reference)
 
 
 def http(url: str, timeout: float = 10.0) -> tuple[int, object]:

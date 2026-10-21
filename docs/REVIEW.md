@@ -1024,12 +1024,48 @@ records the skip with its reason.
 
 **Planned as** `docs/TODO.md` item **T32**.
 
+### R31 — The release gate resolved an identity the gateway cannot report — **closed**
+**Severity: high release-traceability risk.** *(closed)*
+
+`release_gate.image_digest()` returned whatever `{{index .RepoDigests 0}}`
+produced. For an image that has a repository digest, that is a
+**reference** - `repository@sha256:...` - not a digest.
+
+The gate then wrote that value into `release.json`, and the gateway's
+release identity deliberately accepts only a **bare** `sha256:<64 hex>`
+digest (`src/gateway/buildinfo.py:44-62`), so that no arbitrary string can
+be smuggled into `/version`. The value was therefore rejected, `/version`
+reported `unknown`, and the gate's own identity check failed:
+
+```text
+[FAIL] /version reports the exact running image digest - reported=unknown
+```
+
+The release step was **not** affected, because `release.py` resolved the
+identity differently: it required the value to start with `sha256:` and
+fell back to the image ID, which is the bare form. That is why the running
+deployment reported its digest correctly while the gate could not pass.
+
+The two paths were also free to drift, which is exactly what R7 warned
+about when it asked the workflow and the gate to share one resolution.
+
+**Resolution.** `release_gate.image_digest()` now resolves **one**
+canonical identity: a bare `sha256:<64 hex>`, taken from the repository
+digest when there is one (dropping the repository part) and from the
+image ID otherwise. `release.py` delegates to it, so the gate and the
+deployment can never disagree about which artifact is running. The CI
+workflow records the same value.
+
+**Evidence:** `tests/test_release_gate.py` - a repository digest is
+reduced to the digest, a bare digest is kept, a local image falls back to
+its ID, and the resolved value is one the gateway's own validator accepts.
+
 ## Recommended order
 
-Findings R0-R24, R28, R29 and R30 are closed or superseded. **R25, R26
-and R27 are open**; all three are planned in `docs/TODO.md` (T4, T2 and
-T16). The register is kept so the next agent can see what was already paid
-for in time.
+Findings R0-R24 and R28-R31 are closed or superseded. **R25, R26 and R27
+are open**; all three are planned in `docs/TODO.md` (T4, T2 and T16). The
+register is kept so the next agent can see what was already paid for in
+time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or

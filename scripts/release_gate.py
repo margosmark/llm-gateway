@@ -250,14 +250,37 @@ def run(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
 
 
 def image_digest(reference: str) -> str | None:
+    """The immutable identity of an image, as the gateway can report it.
+
+    This is a **bare** ``sha256:<64 hex>`` digest, and it is the only
+    form the gateway accepts in ``release.json``: the release identity
+    deliberately rejects anything else, so that no arbitrary string can
+    be smuggled into ``/version``.
+
+    A registry digest arrives as ``repository@sha256:...``, which is a
+    *reference* rather than a digest, so the repository part is dropped.
+    A locally built image has no repository digest at all, and its image
+    ID is the content hash of the image configuration - which is the same
+    value, and is what identifies the artifact.
+
+    The release step resolves the identity through this same function, so
+    the gate and the deployment can never disagree about which artifact
+    is running.
+    """
     result = run(["docker", "image", "inspect", reference, "--format", "{{index .RepoDigests 0}}"])
-    if result.returncode != 0:
-        result = run(["docker", "image", "inspect", reference, "--format", "{{.Id}}"])
-        if result.returncode != 0:
-            return None
-        return result.stdout.strip()
-    digest = result.stdout.strip()
-    return digest or None
+    digest = result.stdout.strip() if result.returncode == 0 else ""
+    if digest.startswith("sha256:"):
+        return digest
+    if "@sha256:" in digest:
+        # A repository digest: keep the digest, drop the repository.
+        candidate = digest.rsplit("@", 1)[1]
+        if candidate.startswith("sha256:"):
+            return candidate
+    result = run(["docker", "image", "inspect", reference, "--format", "{{.Id}}"])
+    identity = result.stdout.strip() if result.returncode == 0 else ""
+    if identity.startswith("sha256:"):
+        return identity
+    return None
 
 
 def http(
