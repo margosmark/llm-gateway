@@ -426,6 +426,37 @@ class MetadataDetailsTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"status": "ok"})
 
+    def test_metrics_uses_prometheus_format_and_rejects_untrusted_headers(self) -> None:
+        status, payload, headers = self.harness.request("GET", "/metrics", raw=True)
+        self.assertEqual(status, 200)
+        self.assertIn("text/plain; version=0.0.4", next(value for key, value in headers.items() if key.lower() == "content-type"))
+        self.assertIn(b"gateway_requests_total", payload)
+        status, _, _ = self.harness.request("GET", "/metrics", headers={"X-Forwarded-For": "203.0.113.9"})
+        self.assertEqual(status, 400)
+        status, _, _ = self.harness.request("GET", "/metrics", headers={"Host": "evil.example"})
+        self.assertEqual(status, 403)
+        status, _, _ = self.harness.request("POST", "/metrics", headers={"Origin": "https://evil.example"}, raw=True)
+        self.assertEqual(status, 405)
+        self.assertNotIn("allow", headers)
+        self.assertNotIn("client_address", payload.decode())
+        self.assertNotIn("credential", payload.decode())
+        self.assertNotIn("prompt", payload.decode())
+        self.assertNotIn("token", payload.decode())
+        from prometheus_client.parser import text_string_to_metric_families
+        self.assertTrue(list(text_string_to_metric_families(payload.decode())))
+
+    def test_metrics_is_not_routed_from_owner_mount(self) -> None:
+        status, _, _ = self.harness.request("GET", "/owner/metrics")
+        self.assertEqual(status, 404)
+
+    def test_metrics_forwarded_and_host_refusals_follow_shared_policy(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/metrics", headers={"X-Forwarded-Host": "bad.example"})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["type"], "forwarded_header_rejected")
+        status, payload, _ = self.harness.request("GET", "/metrics", headers={"Host": "bad.example"})
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error"]["type"], "host_mismatch")
+
 
 class SecurityProbeTests(unittest.TestCase):
     def setUp(self) -> None:

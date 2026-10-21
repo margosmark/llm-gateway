@@ -6,6 +6,14 @@ in the browser.
 
 ---
 
+## Operational metrics
+
+`GET /metrics` on the configured trusted-LAN listener returns Prometheus text
+exposition with counts and latency derived from the bounded in-memory request
+ledger and the remaining duration of active local provider cooldowns. It is
+metadata only; the endpoint uses the same canonical Host/Origin and forwarded-
+header checks as other gateway routes. No token totals are currently emitted.
+
 ## 1. First run
 
 ### 1.1 Build the candidate
