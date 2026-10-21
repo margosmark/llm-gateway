@@ -170,6 +170,21 @@ class AdapterContractTests(unittest.TestCase):
         self.assertEqual(models["gpt-6-luna"].dialect, "openai_responses")
         self.assertEqual(models["mimo-v2.6-flash"].dialect, "openai_chat")
 
+    def test_the_generic_refresh_handler_works_for_anthropic(self) -> None:
+        from gateway.adapters.anthropic import AnthropicAdapter
+
+        store = self._store()
+        store.provider_handle("anthropic").write({"api_key": "synthetic"})
+        upstream = ScriptedUpstream(json.dumps({"data": [{"id": "claude-synthetic"}]}).encode())
+        adapter = AnthropicAdapter(store.provider_handle("anthropic"), client=upstream)
+        app = self._app([adapter])
+        status, result = self._refresh(app, "anthropic")
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["model_count"], 1)
+        state = app.config.snapshot().providers["anthropic"]
+        self.assertEqual(state.models["claude-synthetic"].dialect, "anthropic_messages")
+        self.assertEqual(len(upstream.requests), 1)
+
     def _store(self) -> CredentialStore:
         return CredentialStore(self.root)
 
