@@ -390,18 +390,19 @@ is refused.
 
 ## Tier 2 — operational completeness
 
-### T7 — A durable request ledger — `todo`
+### T7 — A durable request ledger — `done`
 
-**Why.** The ledger is a 10,000-entry **in-memory** ring
-(`observability.py:101-108`). It is lost on every restart, and the console
-says so (`static/console.js:299`). The Status page is operationally
-useful, but it is not a record.
+**Landed.** Request outcomes are persisted asynchronously as metadata-only
+records on the state volume in `request-ledger.jsonl`, rotated at 5 MiB with
+two backups and a 30-day retention window. The in-memory ring remains the hot
+view, is restored at startup, and exposes an `amend(request_id, **fields)`
+seam for updating safe outcome metadata without exposing storage details. The
+Status view reports the persistence mode and explicitly says the ledger is
+not a billing system.
 
-**Scope.** Persist to the state volume as metadata-only records, rotated
-and size-capped; keep the in-memory ring as the hot path; a declared
-retention window; a truthful durability statement in the Status view.
-
-**Rule.** Still not a billing system, and must not be described as one.
+**Evidence.** `src/gateway/ledger_persistence.py`,
+`tests/test_ledger_persistence.py` (including restart survival and content
+refusal), and the Status payload/UI; full suite passed (385 tests, 2 skipped).
 
 ### T8 — Backup, export and import in the console — `todo`
 

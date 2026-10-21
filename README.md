@@ -154,6 +154,9 @@ Your client asks for the **alias**; the provider only knows its own model
 ids. The gateway substitutes the upstream model id for the chosen route and
 never sends the alias upstream, and the request ledger records both the
 alias you asked for and the provider and model that actually served it.
+Metadata-only outcomes are persisted asynchronously on the state volume with
+bounded rotation and a 30-day retention window; the Status view reports the
+current durability mode. This is not a billing system.
 
 ```text
 Alias: coding
