@@ -295,7 +295,8 @@ class CircuitStore:
                         f"{self._label(entry)}, so this route is not used yet"
                     )
             # Nothing is holding the route. Claim the probe, if there is a
-            # half-open circuit to probe.
+            # half-open circuit to probe. Only an invocation path (claim=True)
+            # reserves it; the read-only enumeration path never does.
             if claim:
                 for entry in entries:
                     entry.probe_in_flight = True

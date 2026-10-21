@@ -835,7 +835,7 @@ table as the log.
 
 **Depends on.** **T7** for anything older than the in-memory ring.
 
-### T25 — A dry run: show the upstream payload without sending it — `todo`
+### T25 — A dry run: show the upstream payload without sending it — `done`
 
 **Why.** Every dialect bug in this project's history - R9, R18, R21, R25 -
 was "the upstream received something I did not expect". The alias test
@@ -859,6 +859,14 @@ level, the tool list, and the converted shape of the request.
 
 **Done when.** A preview of a request that would be refused says so, and
 a preview of a converted request shows the converted shape.
+
+**Landed.** `POST /owner/api/preview` returns the converted request for the
+first currently eligible route without invoking an adapter. It uses the normal
+profile/alias authorization, candidate capability checks, model substitution,
+reasoning degradation, and derived session logic. Refusals are returned as
+normal gateway errors. Provider-error fallbacks are explicitly unevaluated.
+Regression evidence: `ApiSurfaceTests.test_preview_converts_request_without_provider_call_or_ledger_entry`
+and `ApiSurfaceTests.test_preview_refuses_unpublished_alias`.
 
 ### T26 — Weighted routes within an alias — `todo`
 
@@ -1176,7 +1184,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T22 | A budget per alias, enforced locally | 4 | **done** |
 | T23 | Statistics per alias | 4 | todo |
 | T24 | Export the ledger | 4 | todo |
-| T25 | A dry run: show the upstream payload without sending it | 4 | todo |
+| T25 | A dry run: show the upstream payload without sending it | 4 | **done** |
 | T26 | Weighted routes within an alias | 4 | todo |
 | T27 | Honour a client-supplied request id | 4 | todo |
 | T28 | Keepalive comments on a long stream | 4 | todo |

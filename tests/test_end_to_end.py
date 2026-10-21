@@ -598,6 +598,31 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(len(self.harness.adapter.calls), 1)
         self.assertNotIn("reasoning_effort", self.harness.adapter.calls[0].payload)
 
+    def test_preview_converts_request_without_provider_call_or_ledger_entry(self) -> None:
+        before_events = self.harness.router._ledger.totals()["requests"]
+        status, result, headers = self.harness.request(
+            "POST", "/owner/api/preview",
+            {"model": "coding", "messages": [{"role": "user", "content": "preview marker"}], "stream": False},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["dialect"], "openai_responses")
+        self.assertEqual(result["model"], "gpt-6-luna")
+        self.assertNotIn("coding", json.dumps(result["payload"]))
+        self.assertEqual(result["payload"]["model"], "gpt-6-luna")
+        self.assertEqual(result["payload"]["input"][0]["content"][0]["text"], "preview marker")
+        self.assertTrue(result["session_id"].startswith(FAKE_PROVIDER + "."))
+        self.assertEqual(self.harness.adapter.calls, [])
+        self.assertEqual(self.harness.router._ledger.totals()["requests"], before_events)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+
+    def test_preview_refuses_unpublished_alias(self) -> None:
+        status, result, _ = self.harness.request(
+            "POST", "/owner/api/preview", {"model": "missing", "messages": []}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(result["error"]["type"], "unknown_model")
+        self.assertEqual(self.harness.adapter.calls, [])
+
     def test_chat_request_is_converted_to_the_responses_dialect(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True

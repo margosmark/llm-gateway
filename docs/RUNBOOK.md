@@ -106,6 +106,7 @@ Everything else happens in the browser.
 | Manage profile metadata | Owner console → Profiles (does not restrict LAN invocation) |
 | Read status and limits | Owner console → Status |
 | Make the aliases appear in OpenCode's `/models` | Install `integrations/opencode/` once (see §3.1) |
+| Preview a Chat Completions request without sending it | `POST /owner/api/preview` (JSON body, published alias in `model`) |
 
 ### OpenCode Console Jev / System One
 
@@ -179,6 +180,12 @@ bridged to Chat Completions and Responses; Anthropic-compatible clients can use
 `POST /v1/messages` under the same Host/Origin and forwarded-header policy as
 the other API routes. Credentials are stored separately and never returned by
 state or status APIs.
+
+The read-only preview endpoint returns the converted payload for the first
+currently eligible route, plus its derived session identifier. It never invokes
+a provider or adds a ledger event; any fallback after a provider error is
+necessarily unevaluated. Treat the returned request body as sensitive: it is
+returned only to the caller and is not logged or retained.
 
 ---
 

@@ -394,6 +394,7 @@ class GatewayApp:
             r.add(["GET"], prefix + "/api/ledger/export", self.handle_ledger_export)
             r.add(["GET"], prefix + "/api/backup/export", self.handle_backup_export)
             r.add(["POST"], prefix + "/api/backup/import", self.handle_backup_import)
+            r.add(["POST"], prefix + "/api/preview", self.handle_preview)
 
             r.add(["POST"], prefix + "/api/provider", self.handle_provider_action)
             r.add(["POST"], prefix + "/api/model", self.handle_model_action)
@@ -662,6 +663,40 @@ class GatewayApp:
             "requested_alias": None, "serving_provider": "opencode_console", "serving_model": model,
         }
         return Response(200, [("Content-Type", "application/json")], adapter.invoke_systemone(payload))
+
+    def handle_preview(self, request: Request) -> Response:
+        """Show the primary upstream request without invoking a provider."""
+        from gateway.preview import preview_request
+
+        profile = self._resolve_profile(request)
+        try:
+            payload = request.json()
+        except ValueError:
+            raise RoutingError("request body is not valid JSON", code="malformed_request", status=400)
+        if not isinstance(payload, dict):
+            raise RoutingError("request body is not valid JSON", code="malformed_request", status=400)
+        alias_name = payload.get("model")
+        if not isinstance(alias_name, str) or not alias_name:
+            raise RoutingError("request is missing a model", code="malformed_request", status=400)
+        alias = self.config.snapshot().aliases.get(alias_name)
+        if alias is None or not alias.enabled:
+            raise RoutingError(
+                f"model '{alias_name}' is not published by this gateway",
+                code="unknown_model", status=404,
+            )
+        if not profile_allows(profile, alias.name):
+            raise RoutingError(
+                f"this client profile may not use model '{alias_name}'",
+                code="model_not_allowed", status=403,
+            )
+        preview = preview_request(
+            self.router, alias_name, payload,
+            source_dialect=DIALECT_OPENAI_CHAT,
+            profile_id=profile.profile_id,
+            client_ip=request.client_address[0],
+            session_hint=self._session_hint(request),
+        )
+        return json_response(preview, headers=[("Cache-Control", "no-store")])
 
     def handle_chat_completions(self, request: Request) -> Any:
         return self._handle_inference(request, DIALECT_OPENAI_CHAT)
