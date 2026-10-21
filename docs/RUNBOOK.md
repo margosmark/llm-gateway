@@ -183,7 +183,7 @@ revoked by a rollback; the gateway will refresh or reject them on its own.
 
 | Symptom | Cause | Action |
 |---|---|---|
-| `refusing to start: a wildcard bind...` | `GATEWAY_BIND` is `0.0.0.0` | Set it to the explicit private LAN address |
+| `refusing to start: a wildcard bind...` | `GATEWAY_BIND` is `0.0.0.0` | Set it to an explicit local RFC1918 IPv4 or IPv6 ULA address |
 | The owner console will not load | The configured private address is not assigned to the host, or the listener is unavailable | Use the configured private address and port; login/bootstrap is not part of this product mode |
 | A provider shows *Failed* | The credential was rejected or the provider is unreachable | **Test connection** and read the message; the stored credential is never displayed |
 | A model shows an empty dialect | The provider serves it but does not document the endpoint | Enter it manually and set the dialect, or use an OpenAI-dialect model |

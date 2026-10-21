@@ -28,14 +28,13 @@ class BindRuleTests(unittest.TestCase):
             self.assertFalse(_is_wildcard(host), host)
 
     def test_private_and_loopback_addresses_are_accepted(self) -> None:
-        for host in ("10.10.11.109", "192.168.0.30", "172.16.0.1", "127.0.0.1"):
+        for host in ("10.10.11.109", "192.168.0.30", "172.16.0.1", "127.0.0.1", "fc00::1", "fd12:3456::1", "::1"):
             self.assertTrue(_is_private_or_loopback(host), host)
 
     def test_public_addresses_are_refused(self) -> None:
-        # Documentation ranges (192.0.2.0/24, 198.51.100.0/24,
-        # 203.0.113.0/24) are treated as private by Python's ipaddress
-        # module, so the test uses genuinely routable public addresses.
-        for host in ("8.8.8.8", "1.1.1.1", "93.184.216.34", "not-an-address"):
+        for host in ("8.8.8.8", "1.1.1.1", "93.184.216.34",
+                     "192.0.2.1", "198.51.100.1", "203.0.113.1",
+                     "169.254.1.1", "fe80::1", "ff02::1", "not-an-address"):
             self.assertFalse(_is_private_or_loopback(host), host)
 
 
@@ -67,6 +66,24 @@ class ParserTests(unittest.TestCase):
         self.assertIn("port 8766 is reserved", error.getvalue())
         build_app.assert_not_called()
         server.assert_not_called()
+
+    def test_test_net_addresses_are_refused_before_startup(self) -> None:
+        for host in ("192.0.2.1", "198.51.100.1", "203.0.113.1"):
+            error = StringIO()
+            with self.subTest(host=host), redirect_stderr(error), \
+                    mock.patch("gateway.cli.build_application") as build_app:
+                self.assertEqual(main(["--host", host]), 2)
+            self.assertIn("not a private or loopback address", error.getvalue())
+            build_app.assert_not_called()
+
+    def test_owned_ipv6_ula_uses_startup_path(self) -> None:
+        with mock.patch("gateway.cli._address_is_local", return_value=True) as local_check, \
+                mock.patch("gateway.cli.build_application", return_value=(None, None, None, None)) as build_app:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--host", "fd12:3456::1", "--print-url"]), 0)
+        local_check.assert_called_once_with("fd12:3456::1")
+        build_app.assert_called_once()
+        self.assertEqual(build_app.call_args.args[1], "fd12:3456::1")
 
     def test_allowed_explicit_private_port_remains_configurable(self) -> None:
         with mock.patch("gateway.cli._address_is_local", return_value=True), \

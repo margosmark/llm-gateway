@@ -745,3 +745,21 @@ error, before application construction or listener startup. Regression tests
 `test_reserved_setup_port_is_rejected_from_environment_before_startup`, and
 `test_allowed_explicit_private_port_remains_configurable` cover refusal and
 the valid configurable-port path.
+
+
+## Bind-policy follow-up (SEC-2–SEC-4) — closed in current worktree
+
+The bind predicate now uses explicit allowlists: RFC1918 IPv4, IPv6 ULA
+(`fc00::/7`), and loopback. It rejects RFC 5737 TEST-NET, other public
+addresses, multicast, link-local, and unspecified addresses instead of
+relying on Python's version-dependent `ipaddress.is_private`. The local-address
+probe selects `AF_INET` or `AF_INET6` from the parsed address, so an assigned
+ULA can proceed through startup validation. Bind policy documentation now
+states these same supported classes.
+
+Evidence: `tests/test_cli.py` — `test_public_addresses_are_refused` covers all
+three TEST-NET examples and forbidden address classes;
+`test_test_net_addresses_are_refused_before_startup` verifies `main()` refuses
+all three before application construction; `test_owned_ipv6_ula_uses_startup_path`
+verifies ULA is accepted by startup validation when locally owned. Focused
+CLI suite: 14 tests passed.

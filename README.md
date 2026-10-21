@@ -42,8 +42,9 @@ and use the gateway, including replacing provider credentials. There is no
 owner password, login/session bootstrap, separate setup listener, or
 per-device administrative boundary. Use this only on a LAN you trust.
 
-The gateway binds an explicit private address. A wildcard bind is refused at
-startup. It never creates a firewall or router rule, and it is never publicly
+The gateway binds an explicit RFC1918 IPv4, IPv6 unique-local (`fc00::/7`),
+or loopback address owned by the host. Public addresses (including RFC 5737
+TEST-NET), multicast, link-local and wildcard binds are refused at startup. It never creates a firewall or router rule, and it is never publicly
 exposed. All owner configuration and client APIs share the one listener.
 Canonical same-origin browser mutations work without cookies, passwords,
 sessions, or CSRF bootstrap values; cross-origin browser mutations, hostile
