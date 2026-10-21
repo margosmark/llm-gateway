@@ -309,7 +309,8 @@
       var table = el("table", {}, [
         el("thead", {}, [el("tr", {}, [
           el("th", { text: "When" }), el("th", { text: "Alias" }),
-          el("th", { text: "Served by" }), el("th", { text: "Outcome" })
+          el("th", { text: "Served by" }), el("th", { text: "Outcome" }),
+          el("th", { text: "Note" })
         ])])
       ]);
       var tbody = el("tbody");
@@ -318,7 +319,8 @@
           el("td", { class: "small", text: when(event.timestamp) }),
           el("td", { text: event.requested_alias }),
           el("td", { class: "small", text: event.serving_provider ? providerLabel(event.serving_provider) + " → " + event.serving_model : "—" }),
-          el("td", { class: "small", text: event.error_class ? event.error_class : ("status " + (event.status || "")) + (event.fallback_used ? " (fallback)" : "") })
+          el("td", { class: "small", text: event.error_class ? event.error_class : ("status " + (event.status || "")) + (event.fallback_used ? " (fallback)" : "") }),
+          el("td", { class: "small muted", text: (event.degradations || []).map(function (d) { return d.reason; }).join("; ") })
         ]));
       });
       table.appendChild(tbody);

@@ -73,6 +73,8 @@ class RequestEvent:
     skipped: list[dict[str, Any]] = field(default_factory=list)
     #: What was attempted, and how each attempt ended. Metadata only.
     attempts: list[dict[str, Any]] = field(default_factory=list)
+    #: What was dropped to serve the request on the route that served it.
+    degradations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +94,7 @@ class RequestEvent:
             "profile_id": self.profile_id,
             "skipped": list(self.skipped),
             "attempts": list(self.attempts),
+            "degradations": list(self.degradations),
         }
 
 
