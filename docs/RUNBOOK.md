@@ -122,8 +122,11 @@ The Status ledger is metadata-only and asynchronously persisted to
 bounded rotation (5 MiB active file plus two rotations); disk-write errors or
 a full queue can cause a persistence update to be dropped. The in-memory ring
 is the live view. Local usage aggregates cover the last 24 hours; costs use
-published prices only and display their source and observation date. A model
-without published prices reports **Unknown**. This is not a billing system.
+published prices only and display their source and observation date. Request
+statistics can be selected for the last hour, day or 30 days, grouped by alias,
+serving provider and model. Counts and latency percentiles use available ledger
+history (up to 10,000 recent records); unavailable usage, latency or prices are
+reported as **Unknown**, never zero. This is not a billing system.
 
 The same append path also maintains `request-ledger-rollup.json` beside the
 ledger: one row per UTC day, alias, provider and model with requests, input,

@@ -37,6 +37,7 @@ from gateway.costs import (
     stream_token_counters,
 )
 from gateway.ledger_persistence import ROLLUP_SCHEMA
+from gateway.statistics import aggregate_statistics
 from gateway.stores import atomic_write_json
 from gateway.config import (
 
@@ -1012,6 +1013,7 @@ class GatewayApp:
                 "totals": self.ledger.totals() if self.ledger else {},
                 "usage_costs": aggregate_usage(usage_ledger, window_hours=24, evicted_events=self.ledger.evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
                 "analytics": analytics,
+                "request_statistics": {window: aggregate_statistics(self.ledger.recent(limit=10_000), window) for window in ("hour", "day", "month")} if self.ledger else {},
                 "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),

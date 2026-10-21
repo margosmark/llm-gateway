@@ -465,6 +465,15 @@ Export the recent ledger from the owner console's read-only
 `?format=json`, bounded to 1,000 rows (default 500). Only the six metadata
 columns shown in the ledger table are included, with the same redaction
 rules as the log.
+and displays the price source and observation date.
+
+The **Request statistics** table groups request/error counts, error classes,
+fallback rates, recorded latency percentiles, reported token totals and local
+cost estimates by alias, serving provider and serving model for the last
+hour, day or 30 days. It uses the metadata-only ledger history available to
+the gateway (bounded to the recent 10,000 in-memory records, with
+asynchronously persisted history restored on restart); unavailable usage,
+latency or prices remain Unknown.
 
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
