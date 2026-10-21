@@ -18,7 +18,12 @@ from gateway.config import ConfigStore, ProviderState
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
-from gateway.http.core import Server
+from gateway.http.core import (
+    DEFAULT_MAX_WORKERS,
+    DEFAULT_RATE_LIMIT_REQUESTS,
+    DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+    Server,
+)
 from gateway.http.security import build_allowed_hosts, build_canonical_origins, SecurityPolicy
 from gateway.observability import LimitStore, RequestLedger
 
@@ -74,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default=os.environ.get("GATEWAY_BIND", "127.0.0.1"), help="Explicit private address to bind; wildcard binds are refused.")
     parser.add_argument("--port", type=_gateway_port, default=os.environ.get("GATEWAY_PORT", str(DEFAULT_PORT)), help="Port for the gateway listener; 8766 is reserved.")
     parser.add_argument("--data-dir", default=os.environ.get("GATEWAY_DATA_DIR", DEFAULT_DATA_DIR), help="Directory holding configuration and credentials.")
+    parser.add_argument("--max-workers", type=int, default=int(os.environ.get("GATEWAY_MAX_WORKERS", DEFAULT_MAX_WORKERS)), help="Maximum concurrent HTTP workers (default: 32).")
+    parser.add_argument("--rate-limit-requests", type=int, default=int(os.environ.get("GATEWAY_RATE_LIMIT_REQUESTS", DEFAULT_RATE_LIMIT_REQUESTS)), help="Requests per client in the rolling window (default: 120).")
+    parser.add_argument("--rate-limit-window-seconds", type=float, default=float(os.environ.get("GATEWAY_RATE_LIMIT_WINDOW_SECONDS", DEFAULT_RATE_LIMIT_WINDOW_SECONDS)), help="Per-client rolling window in seconds (default: 60).")
     parser.add_argument("--print-url", action="store_true", help="Print gateway URLs and exit.")
     return parser
 
@@ -112,11 +120,18 @@ def main(argv: list[str] | None = None) -> int:
     if not _address_is_local(args.host):
         print(f"refusing to start: '{args.host}' is not an address on this host. Set GATEWAY_BIND to an address this machine owns.", file=sys.stderr)
         return 2
+    if args.max_workers < 1 or args.rate_limit_requests < 1 or args.rate_limit_window_seconds <= 0:
+        print("refusing to start: worker and rate-limit settings must be positive.", file=sys.stderr)
+        return 2
     app, _, _, _ = build_application(Path(args.data_dir), args.host, args.port)
     if args.print_url:
         print(f"console: http://{args.host}:{args.port}/owner/\nAPI:     http://{args.host}:{args.port}/v1/\nrelease: http://{args.host}:{args.port}/version")
         return 0
-    server = Server(args.host, args.port, app.handle)
+    server = Server(
+        args.host, args.port, app.handle, max_workers=args.max_workers,
+        rate_limit_requests=args.rate_limit_requests,
+        rate_limit_window_seconds=args.rate_limit_window_seconds,
+    )
     server.start_background()
     identity = release_identity()
     print(f"personal-llm-gateway listening on http://{args.host}:{args.port}/owner/ (trusted LAN)", flush=True)

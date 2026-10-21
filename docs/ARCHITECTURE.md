@@ -17,7 +17,11 @@ same listener. `cli.py` refuses wildcard and non-private binds. No setup
 listener or setup-port setting exists. Forwarded headers are rejected rather
 than trusted.
 The gateway port is configurable, but `8766` is reserved and rejected so the
-retired setup port cannot be reused.
+retired setup port cannot be reused. HTTP request handling is bounded to 32
+worker threads by default; a full pool returns 429 `rate_limited` instead of
+creating unbounded workers. A process-local rolling window allows 120 requests
+per peer IP per 60 seconds by default. These are local capacity protections,
+not an access-control boundary or defense against an on-path LAN attacker.
 
 ## State boundaries
 

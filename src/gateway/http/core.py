@@ -29,6 +29,9 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import parse_qs, unquote, urlsplit
 
 MAX_BODY_BYTES = 4 * 1024 * 1024
+DEFAULT_MAX_WORKERS = 32
+DEFAULT_RATE_LIMIT_REQUESTS = 120
+DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
 """Request bodies above this size are refused with 413."""
 
 
@@ -254,6 +257,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._handle("OPTIONS")
 
     def _handle(self, method: str) -> None:
+        limiter = self.server.rate_limiter  # type: ignore[attr-defined]
+        if not limiter.allow(self.client_address[0]):
+            self.close_connection = True
+            self.server._reject(  # type: ignore[attr-defined]
+                self.connection,
+                b'{"error":{"message":"local request rate limit exceeded","type":"rate_limited"}}',
+            )
+            return
         parts = urlsplit(self.path)
         path = unquote(parts.path) or "/"
 
@@ -328,13 +339,59 @@ class _ThreadingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     request_queue_size = 64
 
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler],
+                 max_workers: int, rate_limit_requests: int, rate_limit_window_seconds: float) -> None:
+        self._workers = threading.BoundedSemaphore(max_workers)
+        from gateway.http.rate_limit import RateLimiter
+
+        self.rate_limiter = RateLimiter(rate_limit_requests, rate_limit_window_seconds)
+        super().__init__(address, handler)
+
+    @staticmethod
+    def _reject(request: Any, message: bytes) -> None:
+        response = (
+            b"HTTP/1.1 429 Too Many Requests\r\n"
+            b"Content-Type: application/json; charset=utf-8\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: " + str(len(message)).encode("ascii") + b"\r\n\r\n" + message
+        )
+        try:
+            request.sendall(response)
+        except OSError:
+            pass
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._workers.acquire(blocking=False):
+            self._reject(request, b'{"error":{"message":"worker capacity exceeded","type":"rate_limited"}}')
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._workers.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._workers.release()
+
 
 class Server:
     """Threaded HTTP server bound to an explicit address."""
 
-    def __init__(self, host: str, port: int, handler: Handler) -> None:
+    def __init__(self, host: str, port: int, handler: Handler, *,
+                 max_workers: int = DEFAULT_MAX_WORKERS,
+                 rate_limit_requests: int = DEFAULT_RATE_LIMIT_REQUESTS,
+                 rate_limit_window_seconds: float = DEFAULT_RATE_LIMIT_WINDOW_SECONDS) -> None:
         self.host = host
         self.port = port
+        if max_workers < 1:
+            raise ValueError("max_workers must be positive")
+        self.max_workers = max_workers
+        self.rate_limit_requests = rate_limit_requests
+        self.rate_limit_window_seconds = rate_limit_window_seconds
         self._handler = handler
         self._httpd: _ThreadingServer | None = None
         self._thread: threading.Thread | None = None
@@ -344,7 +401,10 @@ class Server:
         self._httpd.serve_forever(poll_interval=0.2)
 
     def start_background(self) -> None:
-        self._httpd = _ThreadingServer((self.host, self.port), _RequestHandler)
+        self._httpd = _ThreadingServer(
+            (self.host, self.port), _RequestHandler, self.max_workers,
+            self.rate_limit_requests, self.rate_limit_window_seconds,
+        )
         self._httpd.application = self._handler  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._httpd.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
         self._thread.start()
