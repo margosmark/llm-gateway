@@ -1,0 +1,405 @@
+# Roadmap and open work
+
+The register of work this project has agreed to do next. Every item is
+derived from a fact in this repository — a code path, a catalogue field, a
+documented provider contract — and every item says what "done" means
+before it is started.
+
+Findings that describe **defects** live in [`REVIEW.md`](REVIEW.md) and are
+referenced from here. This file is the **plan**.
+
+## How to read the status column
+
+| Status | Meaning |
+|---|---|
+| `todo` | Agreed, not started. |
+| `doing` | In progress. |
+| `blocked` | Waiting on something outside the repository — a provider contract, an owner decision. |
+| `done` | Landed, with its regression test and its documentation update. |
+
+## Definitions of done
+
+These are the repository's existing rules, restated because every item
+below inherits them:
+
+1. **A regression test for every defect**, and for every new capability a
+   refusal test as well as the happy path.
+2. **No real credentials, provider accounts or network access** in the test
+   suite. Tests use the adapter seam and synthetic values.
+3. **Update the README, runbook, architecture/contract docs** when a
+   behaviour, endpoint, UI label, security invariant or deployment procedure
+   changes.
+4. **Close a finding in `REVIEW.md` only with a cited fix and regression
+   evidence.**
+5. **Never silently drop or invent.** A value the target dialect cannot
+   express is refused or dropped *with the substitution recorded* — never
+   discarded quietly. This is the rule that R19 turned into a capability /
+   preference distinction, and it applies to every conversion.
+6. **Unknown is a valid answer.** Provider entitlement, limits, budgets and
+   undocumented capabilities stay Unknown unless backed by official
+   evidence. Do not fill a gap from a vendor's marketing page or from
+   another project.
+
+## Non-negotiable boundaries
+
+These are product decisions, not gaps. Do not close an item below by
+adding one of them.
+
+* No owner passphrase, login page, session cookie, setup listener, or
+  reserved port `8766`. **Any device that can reach the configured address
+  is an administrator and a caller, by decision.**
+* No TLS terminator, proxy trust model, forwarded-header acceptance,
+  wildcard/public bind, firewall or router rule, or public exposure.
+* No implicit provider calls. Saving configuration, loading a page or
+  reading status never calls a provider.
+* No new runtime dependency, external database, or background probe.
+* Profiles stay configuration and attribution objects. They are **not**
+  access control, and they must not be presented as if they were.
+
+---
+
+## Tier 1 — functional gaps
+
+### T1 — Refresh the README's Known Limitations — `todo`
+
+**Why.** The README states that two features are *not ready* and cites R1,
+R8 and R9 as open release blockers. All three are **closed** in
+[`REVIEW.md`](REVIEW.md) with passing tests (`tests/test_device_flow.py`,
+`tests/test_adapter_contract.py`, `tests/test_buffered_bridge.py`), and the
+console does complete the device-code poll (`static/console.js:528-571`).
+The README also **duplicates two bullets verbatim** — "ChatGPT limits are
+Unknown" and "the device-code path is a beta path".
+
+This matters more than a stale list usually would: the README is the
+product contract, and it currently understates what works while pointing a
+reader at findings that are already closed.
+
+**Done when.** Every limitation maps to an open finding or to a fact
+observed in this repository; no bullet is duplicated; each citation points
+at the right finding; and each claim has been re-read against the code that
+implements it.
+
+### T2 — Local usage and cost accounting — `todo`
+
+**Why.** Three finished pieces are not connected to each other:
+
+* the bridge **already normalises usage** on both paths
+  (`bridge/streams.py:174-190`, `bridge/buffered.py:103-127`);
+* `RequestEvent` **already has** a `token_counters` field
+  (`observability.py:70`) that is **never populated** — it appears in the
+  declaration and its serialiser and nowhere else;
+* the catalogue **already publishes** `price_input_per_m`,
+  `price_output_per_m` and `price_cached_read_per_m` for 29 of its 37
+  models, and **no code in `src/` reads any of them** (only
+  `monthly_limit_usd` is used, and only for display).
+
+The gateway therefore knows the token counts and the prices and reports
+neither. This is the only way to get a *real* number for the one thing the
+project says most often: **the provider's allowance is Unknown**. Local
+spend is computable from metadata alone — counts times published price —
+which the observability rules explicitly permit.
+
+**Scope.** Populate `token_counters` on the buffered *and* the streamed
+path; compute per-request cost from the published prices, carrying the
+price's source and observation date; aggregate by alias, provider and model
+over a window; show it on the Status page.
+
+**Rules.** Metadata only — counts and published prices, never content. A
+model with no published price reports **Unknown**, never `0` and never
+"unlimited". Keep the price's source and as-of date next to the number.
+
+**Depends on.** T7 if the aggregates must survive a restart. Otherwise the
+totals are in-memory like today's ledger, and the Status page must keep
+saying so.
+
+### T3 — Enforce the capabilities that are declared but never checked — `todo`
+
+**Why.** `core/routing.py:311` is the **only** capability check in the
+router, and it checks `supports_function_tools` alone. But
+`supports_image_input`, `supports_builtin_tools` and
+`supports_previous_response_id` are carried through the config, the model
+entry, the state API and the console (`core/capabilities.py:60-64`) and are
+then **never consulted**.
+
+So a route whose model publishes `supports_image_input: false` — which is
+most of the catalogue — can be selected for an image request and fail at the
+provider with an opaque error, instead of being excluded at the gateway
+with the clear reason the router already gives for every other mismatch.
+This is the same shape as R19: a requirement that is not checked is a
+failure that happens in the wrong place.
+
+**Scope.** Decide, per capability, whether it is a hard requirement (route
+excluded, reason recorded) or is refused at the bridge:
+
+| Capability | Reading |
+|---|---|
+| `supports_image_input` | **Hard.** A model that cannot see an image cannot serve an image request. |
+| `supports_builtin_tools` | **Hard**, for the same reason tools are hard. |
+| `supports_previous_response_id` | The bridge already refuses continuation it cannot serve (`bridge/requests.py:366-370`). Decide whether the router should exclude the route earlier, and why. |
+
+**Done when.** Each of the three is either enforced in `candidates()` with
+its exclusion reason, or is explicitly documented as informational-only with
+a cited reason for that choice — and each has a refusal test.
+
+### T4 — Normalised thinking levels — `todo`
+
+**Why.** "Thinking level" is the one control a client is most likely to
+send and the gateway is least able to honour. Today:
+
+* only OpenAI's flat `reasoning_effort` string is understood
+  (`bridge/requests.py:265`);
+* the newer Chat Completions spelling `reasoning: {"effort": "high"}` is
+  **silently dropped** on a converted path, even though
+  `_without_disabled_reasoning` reads that same field for the disabled case
+  (`bridge/requests.py:58`) — the two paths disagree about one field;
+* Anthropic's `thinking: {"type": "enabled", "budget_tokens": N}` is not
+  understood at all, and is **silently dropped** on a converted path;
+* Google's `thinkingConfig` / `thinkingLevel` are not understood.
+
+Both silent drops break the bridge's own stated contract
+(`bridge/requests.py:7`: "Nothing is silently dropped. If the target
+dialect cannot express the request, the request is refused."). They are
+filed as **R25** and **R26** in [`REVIEW.md`](REVIEW.md).
+
+The published data is thin and must stay honest: only **2 of 37** catalogue
+models publish reasoning levels (`gpt-5.6-luna`, `gpt-6-luna`), and the
+gateway's own vocabulary (`core/capabilities.py:51`) contains `minimal` and
+`ultra`, which **no** catalogue model publishes.
+
+**Scope.**
+
+1. **One canonical vocabulary**, reconciled against what providers actually
+   publish. Keep the gateway's extra levels only if a provider publishes
+   them or the gateway documents them as its own alias.
+2. **Parse every inbound spelling** — `reasoning_effort`,
+   `reasoning.effort`, `thinking.type`/`thinking.budget_tokens`,
+   `thinkingConfig.thinkingLevel` / `thinkingBudget` — and normalise to the
+   canonical level.
+3. **Render per dialect** — `reasoning: {effort}` for Responses,
+   `reasoning_effort` for Chat Completions, `thinking` for Anthropic
+   Messages, `thinkingConfig` for Google v1beta.
+4. **A level is a preference, not a capability** (the R19 rule). The route
+   stays eligible, the level is dropped *for that route*, and the
+   substitution is recorded in the attribution and the ledger. Only the
+   route that actually served the request records it.
+5. **Per-model level and budget tables must be sourced from official
+   provider documentation.** No invented budgets. Where a provider publishes
+   no table for a model, that model's levels are **Unknown**, the level is
+   dropped, and the substitution is recorded.
+6. **No silent drops.** A level the target dialect cannot express is
+   refused with an actionable message, never discarded.
+
+**Done when.** A client may send any supported spelling and the upstream
+receives the dialect-correct form; a level the model does not publish is
+dropped *and recorded*; a dialect that cannot express it refuses; and
+R25/R26 are closed with regression evidence.
+
+### T5 — The Anthropic Messages dialect, and a `/v1/messages` surface — `todo`
+
+**Why.** Five of the 37 catalogued models are served over Anthropic
+Messages and are **permanently refused** by the router
+(`core/routing.py:301-306`): `claude-haiku-5-5`, `minimax-m3`,
+`qwen3.7-plus`, `qwen3.8-flash`, `qwen3.8-max`. The gateway exposes only
+`/v1/models`, `/v1/chat/completions` and `/v1/responses`
+(`http/app.py:120-122`), so there is no Anthropic-shaped surface either.
+
+That is a quarter of the published catalogue — including the most
+recognisable model in it — sitting permanently outside the product.
+
+**Scope.** Two separable pieces; do the first before the second.
+
+1. **Bridge Anthropic Messages to the OpenAI dialects**, so those five
+   models become servable through the existing surfaces. The conversion
+   must be symmetric and must work on the buffered *and* the streamed path.
+2. **Add `/v1/messages`**, an Anthropic-compatible public surface, so
+   Anthropic-style clients can call the gateway natively.
+
+**Note.** Retention differs: `claude-haiku-5-5` is 30 days; the other four
+are 0 days. The console's cross-provider fallback warning must reflect the
+route that is actually selected.
+
+### T6 — The Google v1beta dialect — `blocked`
+
+**Why.** One catalogued model, `gemini-4-argon-contributor`, is served over
+Google v1beta and is refused today. It is the only model in the catalogue
+whose retention class is **`training_permitted`**.
+
+**Blocked on** a decision: one model does not justify a third conversion
+path, and the model it would unlock is the one with the weakest privacy
+posture. A passthrough would be enough if it is ever wanted. Revisit after
+T5.
+
+### T16 — A manual model entry must merge, not replace — `todo`
+
+**Why.** The `manual` model action rebuilds the whole `ModelEntry`
+(`http/app.py:835-850`) instead of merging into it, so the
+provider-published fields are silently discarded: `context_window`,
+`context_limit`, `reasoning_efforts`, `monthly_limit_usd`,
+`limits_source`, `limits_observed_at` and the `supports_*` flags.
+
+Verified: a manual dialect edit on a discovered `gpt-6-luna` takes the
+context limit from 258,400 to **None** — so the alias's limit becomes
+Unknown — and empties the reasoning levels, so a reasoning request is
+dropped as a degradation instead of honoured. The action still returns
+`{"ok": true}` and tells the owner nothing.
+
+This is a **documented workflow**: the README's troubleshooting table
+sends the owner to "enter it manually and set the dialect" when a model
+shows an empty dialect. The fix for a missing dialect must not destroy the
+context limit and the reasoning levels of the model it was applied to.
+
+**Scope.** The manual action changes only the fields the owner actually
+supplied, and preserves published metadata it has no opinion about. A
+manual entry that cannot supply a published fact keeps the published one.
+The same merge discipline applies wherever an owner action edits a
+discovered model.
+
+**Done when.** A manual dialect edit preserves the context limit, the
+reasoning levels and the capability flags; a test covers it; and the
+console does not report a limit it does not have.
+
+---
+
+## Tier 2 — operational completeness
+
+### T7 — A durable request ledger — `todo`
+
+**Why.** The ledger is a 10,000-entry **in-memory** ring
+(`observability.py:101-108`). It is lost on every restart, and the console
+says so (`static/console.js:299`). The Status page is operationally
+useful, but it is not a record.
+
+**Scope.** Persist to the state volume as metadata-only records, rotated
+and size-capped; keep the in-memory ring as the hot path; a declared
+retention window; a truthful durability statement in the Status view.
+
+**Rule.** Still not a billing system, and must not be described as one.
+
+### T8 — Backup, export and import in the console — `todo`
+
+**Why.** Configuration backup is currently a manual `docker run … cp`
+(`RUNBOOK.md` §5). The owner has to leave the console to protect the
+gateway's state.
+
+**Scope.** A sanitised configuration export (never credentials, never
+caller-token hashes), an import that validates through `gateway/identifiers.py`
+and `gateway/routes.py` before it persists anything, and an optional
+scheduled snapshot of `config.json` into the state volume.
+
+### T9 — A `/metrics` endpoint — `todo`
+
+**Why.** Every operational question is currently answered by reading the
+Status page in a browser, or by parsing the container's stdout.
+
+**Scope.** Prometheus text format: request counts by outcome, error classes,
+a latency histogram, fallback counts, token totals (T2), cooldown state.
+Metadata only. No content, no credential, no client identity beyond what
+the ledger already holds.
+
+### T10 — A concurrency cap and a per-client rate limit — `todo`
+
+**Why.** The server is a thread-per-request server with no cap
+(`http/core.py:326`). The request body is capped at 4 MiB
+(`http/core.py:31`), but concurrent requests are not, so one reachable
+peer can saturate the host.
+
+**Scope.** A bounded worker pool with a clear `429` and the `rate_limited`
+error class; a per-client rolling window keyed on the same client identity
+the session derivation already uses (`core/routing.py:461`).
+
+**Note.** This is a *local* protection, and it must be described as such. It
+is not an access-control boundary, and the console must not imply it is.
+
+### T11 — Cancel the upstream when the client disconnects — `todo`
+
+**Why.** A broken pipe is caught at the HTTP layer (`http/core.py:289`),
+but the upstream request is not cancelled. An abandoned stream keeps
+running upstream and keeps consuming the provider's allowance.
+
+**Scope.** Propagate the client disconnect to the adapter, abort the
+upstream request, and record the outcome as a client abort rather than a
+provider failure.
+
+### T12 — Present cooldowns and skipped routes properly — `todo`
+
+**Why.** Cooldowns are rendered as raw JSON
+(`static/console.js:1027`), and the reason a route was skipped is visible
+only in the ledger. The owner learns that a route is excluded by reading a
+request record, which is the wrong way round: R5 made the record complete
+precisely so that the console could be the friendly view of it.
+
+**Scope.** A readable cooldown list with the remaining time and the reason
+it was set, and the skipped-route reasons surfaced on the route itself.
+
+---
+
+## Tier 3 — provider breadth
+
+The provider seam is the strongest part of this codebase: a provider is an
+adapter, not a conditional in the routing core
+(`core/routing.py:1-21`). Adding one is a module, a registry entry, model
+capability handling, safe error classification, UI/state support, tests and
+a credential-isolation review — **not** just a URL and an API key.
+
+Each item below also needs: a `list_models()` returning `list[ModelInfo]`,
+tested through the **generic** refresh handler; safe error classification
+into the shared classes; and no implicit provider calls.
+
+### T13 — A plain OpenAI API-key provider — `todo`
+
+The most requested provider, and the least novel: a standard
+`/v1/chat/completions` and `/v1/responses` upstream with a bearer token.
+
+### T14 — A native Anthropic API-key provider — `todo`
+
+A real Anthropic Messages upstream. It also makes T5's `/v1/messages`
+surface meaningful for a second reason: the gateway would have an Anthropic
+dialect it is natively serving, not only one it converts to.
+
+### T15 — A local provider — `todo`
+
+Ollama or LM Studio, on the LAN, with no credential. It fits this product
+better than anything else on this list: a fallback route that keeps the
+prompt on the LAN instead of sending it to a third party with a published
+retention class. It would also give the gateway a route that is available
+when every provider is in cooldown.
+
+---
+
+## Summary
+
+| ID | Item | Tier | Status |
+|---|---|---|---|
+| T1 | Refresh the README's Known Limitations | 1 | todo |
+| T2 | Local usage and cost accounting | 1 | todo |
+| T3 | Enforce the declared-but-unchecked capabilities | 1 | todo |
+| T4 | Normalised thinking levels | 1 | todo |
+| T5 | Anthropic Messages dialect and `/v1/messages` | 1 | todo |
+| T6 | Google v1beta dialect | 1 | blocked |
+| T7 | A durable request ledger | 2 | todo |
+| T8 | Console backup, export and import | 2 | todo |
+| T9 | A `/metrics` endpoint | 2 | todo |
+| T10 | Concurrency cap and per-client rate limit | 2 | todo |
+| T11 | Cancel the upstream on client disconnect | 2 | todo |
+| T12 | Present cooldowns and skipped routes properly | 2 | todo |
+| T13 | A plain OpenAI API-key provider | 3 | todo |
+| T14 | A native Anthropic API-key provider | 3 | todo |
+| T15 | A local provider | 3 | todo |
+| T16 | A manual model entry must merge, not replace | 1 | todo |
+
+## Suggested order
+
+1. **T1** — cheap, and it removes false statements from the product
+   contract.
+2. **T4** — the silent drops (R25, R26) are live defects, and the
+   normalised thinking model is what fixes them properly.
+3. **T2** — the pieces exist; this is plumbing, and it changes what the
+   Status page can honestly claim.
+4. **T3** — small, and it closes a class of opaque upstream failures.
+5. **T16** — a live defect: a documented owner action silently destroys
+   published capability metadata.
+6. **T5** — the largest functional gain; it unlocks a quarter of the
+   catalogue and a second client shape.
+7. **T7, T8, T9** — operational durability, then observability.
+8. **T10, T11, T12** — robustness and presentation.
+9. **T13–T15** — breadth, once the core is complete.
