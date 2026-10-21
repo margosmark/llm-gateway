@@ -362,7 +362,12 @@ and invoke every published route.
 
 Status, analytics and exports are metadata only. A request ledger records
 which alias was asked for, which provider and model actually served it, how
-long it took and how it ended — never what it said.
+long it took and how it ended — never what it said. Token counters come from
+reported provider usage; local cost estimates use published prices only and
+are not provider bills. The Status page aggregates usage for the last 24 hours
+and displays the price source and observation date. No published price means
+**Unknown**, never zero. Request metadata is retained on the state volume for
+up to 30 days; it is not a billing system.
 
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and

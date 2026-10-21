@@ -507,6 +507,9 @@ class ApiSurfaceTests(unittest.TestCase):
     def test_ledger_records_the_serving_provider(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True
+        self.harness.adapter.invoke = lambda request: ProviderResponse(
+            status=200, body=b'{"usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}}'
+        )
         self.harness.request(
             "POST",
             "/v1/chat/completions",
@@ -517,6 +520,21 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(events[0]["requested_alias"], "coding")
         self.assertEqual(events[0]["serving_provider"], FAKE_PROVIDER)
         self.assertEqual(events[0]["serving_model"], "gpt-6-luna")
+        self.assertEqual(events[0]["token_counters"], {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13})
+
+    def test_streamed_usage_is_amended_into_request_ledger(self) -> None:
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"].enabled = True
+        self.harness.adapter.stream_frames = [
+            b'data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":2}}}\n\n'
+        ]
+        self.harness.request(
+            "POST", "/v1/responses",
+            body={"model": "coding", "input": "hi", "stream": True}, raw=True,
+        )
+        event = self.harness.router._ledger.recent()[0]
+        self.assertEqual(event["token_counters"], {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9})
+        self.assertNotIn("content", event)
 
 
 def _alias():
@@ -709,6 +727,14 @@ class ConsoleApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertTrue(payload["ok"])
+
+    def test_state_reports_usage_costs_and_durability(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["usage_costs"]["window_hours"], 24)
+        self.assertEqual(set(payload["usage_costs"]) - {"window_hours"}, {"alias", "provider", "model"})
+        self.assertIn("enabled", payload["ledger_durability"])
+        self.assertFalse(payload["ledger_durability"]["billing_system"])
 
     def test_state_reports_the_zero_state(self) -> None:
         status, payload, _ = self.harness.request("GET", "/owner/api/state")
