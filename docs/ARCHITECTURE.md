@@ -121,6 +121,21 @@ upstream reader yields complete frames, and every emitted frame is
 re-terminated. A stream without the terminator is read by a strict client as
 one event with no finish reason.
 
+### Response segments
+
+A buffered response leaves the process in **one** segment: the status line,
+the header block and the body are written together, and each streamed
+frame is a single write.
+
+This is not a micro-optimisation. Written as two segments, Nagle's
+algorithm holds the body until the header block is acknowledged, and the
+client's TCP delays that acknowledgement. Every response of about one MSS
+or less - every `/health`, every `/v1/models`, and every short
+non-streaming completion - then paid a **41ms stall**, on every request
+after the first on a connection. The accepted socket also sets
+TCP_NODELAY, so a response never depends on the client's acknowledgement
+timing at all. See `REVIEW.md` R28.
+
 ### Reported limits
 
 A route's context limit is the **smallest applicable constraint**: the

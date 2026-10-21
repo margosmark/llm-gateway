@@ -838,11 +838,102 @@ reasoning levels and the capability flags.
 
 **Planned as** `docs/TODO.md` item **T16**.
 
+### R28 — Every small response paid a 41ms stall from Nagle and the delayed ACK — **closed**
+**Severity: high latency defect on every request path.** *(closed)*
+
+`_RequestHandler` does not set `disable_nagle_algorithm`, and
+`socketserver.StreamRequestHandler` defaults it to **False**, so TCP_NODELAY
+is not set on the accepted socket (`src/gateway/http/core.py:225`). The
+handler also writes a buffered response in **three** separate `send()`
+calls - the status line from `send_response`, the header block from
+`end_headers`, and then the body (`core.py:292-303`) - with
+`wbufsize = 0`, so each one is its own syscall and its own segment.
+
+Nagle's algorithm therefore holds the header block and the body until the
+status line is acknowledged, and the client's TCP delays that
+acknowledgement. The result is a **41ms stall on every response whose body
+fits in one segment**.
+
+Measured against the running deployment at `10.10.11.109:8765`, on a real
+network segment, reusing the connection as every modern client does:
+
+```text
+endpoint               keep-alive   close-per-request
+/health                  52.4ms            6.9ms
+/version                 52.0ms            7.1ms
+/v1/models               53.3ms            8.9ms
+/owner/api/state         13.8ms           15.2ms   (29,516 bytes)
+```
+
+The last row is the control: a body larger than the MSS is not held, so it
+does not stall. Reproduced in an isolated namespace with a veth pair,
+serving the real handler:
+
+```text
+                      TCP_NODELAY OFF        TCP_NODELAY ON
+body    200B          41.08ms                 0.09ms
+body    800B          41.01ms                 0.07ms
+body   1400B          41.07ms                 0.08ms
+body   2000B           0.24ms                 0.08ms
+body   3000B           0.15ms                 0.04ms
+   (streaming)         0.01ms gap             0.01ms gap
+```
+
+Two things follow. The stall hits **every response of about 1.4KB or
+less** - which is every `/health`, every `/version`, every `/v1/models`,
+and **every short non-streaming completion**. A longer completion is
+faster than a shorter one, which is the signature of the bug. Streaming is
+unaffected, because a streaming client keeps the connection in quick-ack
+mode.
+
+The first request on a fresh connection is fast (0.7ms); every later one
+on the same connection pays the full stall. A client that reconnects per
+request hides the defect entirely, which is why it can pass a casual
+look.
+
+**Resolution.** Two changes, together in
+`src/gateway/http/core.py`:
+
+1. `_RequestHandler` now sets `disable_nagle_algorithm = True`, so
+   TCP_NODELAY is set on the accepted socket and the response no longer
+   depends on the client's acknowledgement timing.
+2. A buffered response is written in **one** segment: the status line, the
+   header block and the body go out in a single `write()`, instead of the
+   body being written after the header block. Each streamed frame is one
+   write as well, rather than three.
+
+The second change is the substantive one. Measured against the same
+handler, over the same veth segment, with TCP_NODELAY deliberately turned
+**off** so that only the write coalescing is in play, a small response
+went from 41ms to 0.07ms - the stall was never really about the socket
+option, it was about a second segment queued behind an unacknowledged
+first one. TCP_NODELAY is kept because it removes the dependence on the
+client's ACK behaviour entirely.
+
+```text
+                      before      after (TCP_NODELAY off)   after (on)
+/small                 40.98ms            0.07ms               0.09ms
+body 200B              41.08ms            0.09ms               0.07ms
+body 1400B             41.07ms            0.09ms               0.07ms
+body 2000B              0.24ms            0.06ms               0.06ms
+streaming              0.01ms gap        0.00ms gap           0.01ms gap
+```
+
+**Evidence:** `tests/test_response_writes.py` - the handler is exercised
+over a real TCP connection with a socket that records every write and
+every socket option. It asserts that TCP_NODELAY is set on the accepted
+socket, that a buffered response is written in **one** write carrying the
+status line, the headers and the body, that a `HEAD` request sends the
+headers without the body, and that each streamed frame is a single write.
+
+**Planned as** `docs/TODO.md` item **T17**.
+
 ## Recommended order
 
 Findings R0-R24 are closed or superseded. **R25, R26 and R27 are open**;
-all three are planned in `docs/TODO.md` (T4, T2 and T16). The register is
-kept so the next agent can see what was already paid for in time.
+all three are planned in `docs/TODO.md` (T4, T2 and T16). R28 is closed.
+The register is kept so the next agent can see what was already paid for
+in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or

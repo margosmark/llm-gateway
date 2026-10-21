@@ -60,7 +60,16 @@ adding one of them.
 
 ## Tier 1 — functional gaps
 
-### T1 — Refresh the README's Known Limitations — `todo`
+### T1 — Refresh the README's Known Limitations — `done`
+
+**Landed.** The three claims that cited R1, R8 and R9 as open release
+blockers are gone - all three findings are closed, and the behaviour they
+described is implemented and tested. The duplicated bullets are merged, and
+the section now carries the limitations that are true today: the
+non-OpenAI dialects, the Unknown ChatGPT allowance, the beta device-code
+path, no TLS, no authentication boundary, the recorded bridge corpus, the
+unknown Go context window, and the fact that usage and cost are not yet
+recorded.
 
 **Why.** The README states that two features are *not ready* and cites R1,
 R8 and R9 as open release blockers. All three are **closed** in
@@ -333,6 +342,121 @@ it was set, and the skipped-route reasons surfaced on the route itself.
 
 ---
 
+## Performance
+
+Measured against the running deployment on a real network segment. The
+numbers below were taken with the real handler, not a mock.
+
+### T17 — Stop the 41ms stall on every small response — `done`
+
+**Landed.** Closed as **R28**. `disable_nagle_algorithm = True` on the
+handler, and a buffered response is written in one segment instead of two.
+
+**Why.** This is the largest latency defect in the gateway, and it is
+invisible to a casual look because the first request on a fresh connection
+is fast and every later one on the same connection is slow.
+
+`_RequestHandler` does not set `disable_nagle_algorithm`, so TCP_NODELAY
+is **not** set on the accepted socket (`http/core.py:225` -
+`socketserver.StreamRequestHandler` defaults it to False). The handler
+writes a buffered response in **three** separate `send()` calls - the
+status line, the header block, then the body (`core.py:292-303`) - and
+with `wbufsize = 0` each one is its own segment. Nagle holds the last two
+until the first is acknowledged; the client's TCP delays that
+acknowledgement.
+
+Measured against `10.10.11.109:8765`, reusing the connection as every
+modern client does:
+
+| endpoint | keep-alive | close-per-request |
+|---|---|---|
+| `/health` | 52.4ms | 6.9ms |
+| `/version` | 52.0ms | 7.1ms |
+| `/v1/models` | 53.3ms | 8.9ms |
+| `/owner/api/state` (29,516 B) | 13.8ms | 15.2ms |
+
+The last row is the control: a body bigger than the MSS is not held. The
+threshold is exactly the MSS - **every response of about 1.4KB or less
+stalls**:
+
+| body | TCP_NODELAY off | TCP_NODELAY on |
+|---|---|---|
+| 200 B | 41.08ms | 0.09ms |
+| 1400 B | 41.07ms | 0.08ms |
+| 2000 B | 0.24ms | 0.08ms |
+| streaming | 0.01ms/frame | 0.01ms/frame |
+
+So `/health`, `/version`, `/v1/models` **and every short non-streaming
+completion** pay 41ms of pure delay. A *longer* completion is faster than
+a shorter one - the signature of the bug. Streaming is unaffected.
+
+**Scope.** Set `disable_nagle_algorithm = True` on the handler, and write
+the status line, the header block and the body as a single `send()`. Both
+together take a small response from 41ms to 0.06ms.
+
+**Done when.** A buffered response is written in one write, a regression
+test asserts it, and the measured stall is gone. Filed as **R28**.
+
+### T18 — Reuse upstream connections to the providers — `todo`
+
+**Why.** `UpstreamClient` uses `urllib.request` (`adapters/http_client.py`),
+which opens a **new connection for every request** and never keeps one
+alive. A TLS handshake to a remote provider measures **~55ms** on this
+network, so every provider request pays that before the provider does any
+work.
+
+For a streaming request the connection is held for the whole generation, so
+the handshake is amortised. For a short non-streaming request it is pure
+added latency, on top of the provider's own time.
+
+**Scope.** A per-provider connection pool with keep-alive, a bounded idle
+pool, and a clean close on shutdown. It must keep the existing guarantees:
+**no redirects followed**, no credential in an exception, and the timeout
+behaviour unchanged.
+
+**Note.** This is the one performance item that changes the shape of the
+network code, so it wants its own tests: pooled reuse, exhaustion, and
+that a redirect is still refused.
+
+### T19 — Stop deep-copying the whole configuration on every read — `todo`
+
+**Why.** `ConfigStore.snapshot()` rebuilds the entire configuration by
+serialising it to a dict and parsing it back
+(`config.py:461-464`). It is called **three times per inference request**
+- once in `_handle_inference`, once in `Router.resolve_alias` and once in
+`Router.candidates` - so every request copies every provider, every model
+entry, every alias and every profile.
+
+Measured with a realistic configuration (2 providers, 38 models, 5
+aliases): **0.225ms per snapshot, 0.67ms per request**, scaling with the
+size of the configuration. It is small today and irrelevant at a few
+requests per second, and it becomes waste as the catalogue grows.
+
+**Scope.** An immutable snapshot that is published on mutation and shared
+by readers, rather than copied per read. The transaction must still be
+atomic and must still persist before it becomes visible.
+
+**Done when.** A read no longer copies the configuration, the mutation
+semantics are unchanged, and a test proves a reader never observes a
+half-applied transaction.
+
+### T20 — Separate the connect timeout from the read timeout — `todo`
+
+**Why.** `DEFAULT_TIMEOUT = 120.0` is used for both the connect and the
+read (`adapters/http_client.py:30,121`). A provider that accepts a
+connection and then goes quiet holds a **gateway thread for two minutes**,
+and with no concurrency cap (T10) a few such requests can exhaust the
+process.
+
+**Scope.** A short connect timeout and a separate, generous read timeout
+for the body. A stream that pauses must be judged by its own rule, not by
+the connect timeout.
+
+**Done when.** A provider that accepts and stalls is abandoned after the
+connect budget, a long-but-progressing stream is not, and both are tested.
+
+---
+
 ## Tier 3 — provider breadth
 
 The provider seam is the strongest part of this codebase: a provider is an
@@ -370,7 +494,7 @@ when every provider is in cooldown.
 
 | ID | Item | Tier | Status |
 |---|---|---|---|
-| T1 | Refresh the README's Known Limitations | 1 | todo |
+| T1 | Refresh the README's Known Limitations | 1 | **done** |
 | T2 | Local usage and cost accounting | 1 | todo |
 | T3 | Enforce the declared-but-unchecked capabilities | 1 | todo |
 | T4 | Normalised thinking levels | 1 | todo |
@@ -386,11 +510,15 @@ when every provider is in cooldown.
 | T14 | A native Anthropic API-key provider | 3 | todo |
 | T15 | A local provider | 3 | todo |
 | T16 | A manual model entry must merge, not replace | 1 | todo |
+| T17 | Stop the 41ms stall on every small response | perf | **done** |
+| T18 | Reuse upstream connections to the providers | perf | todo |
+| T19 | Stop deep-copying the configuration on every read | perf | todo |
+| T20 | Separate the connect timeout from the read timeout | perf | todo |
 
 ## Suggested order
 
-1. **T1** — cheap, and it removes false statements from the product
-   contract.
+1. **T1** — done. The README's Known Limitations no longer cites closed
+   findings.
 2. **T4** — the silent drops (R25, R26) are live defects, and the
    normalised thinking model is what fixes them properly.
 3. **T2** — the pieces exist; this is plumbing, and it changes what the
@@ -400,6 +528,9 @@ when every provider is in cooldown.
    published capability metadata.
 6. **T5** — the largest functional gain; it unlocks a quarter of the
    catalogue and a second client shape.
-7. **T7, T8, T9** — operational durability, then observability.
-8. **T10, T11, T12** — robustness and presentation.
-9. **T13–T15** — breadth, once the core is complete.
+7. **T17** — done. 41ms is off every small response.
+8. **T7, T8, T9** — operational durability, then observability.
+9. **T10, T11, T12** — robustness and presentation.
+10. **T18, T19, T20** — network and CPU efficiency, once the latency
+    defect is gone.
+11. **T13–T15** — breadth, once the core is complete.
