@@ -1408,6 +1408,8 @@ class GatewayApp:
             payload = request.json() or {}
         except ValueError:
             payload = {}
+        if not isinstance(payload, dict):
+            return json_response({"error": {"message": "request body must be an object", "type": "invalid_request"}}, 400)
         from gateway.alias_groups import set_group_enabled
 
         action = payload.get("action")
@@ -1431,6 +1433,8 @@ class GatewayApp:
             payload = request.json() or {}
         except ValueError:
             payload = {}
+        if not isinstance(payload, dict):
+            return json_response({"error": {"message": "request body must be an object", "type": "invalid_request"}}, 400)
         action = str(payload.get("action") or "")
         name = str(payload.get("name") or "")
 

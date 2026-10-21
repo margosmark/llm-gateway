@@ -792,6 +792,13 @@ class AliasGroupHttpTests(unittest.TestCase):
         self.assertFalse(self.harness.config.snapshot().aliases["writing"].enabled)
         self.assertFalse(self.harness.config.snapshot().aliases["other"].enabled)
 
+    def test_non_object_group_payload_is_rejected_without_mutation(self) -> None:
+        before = self.harness.config.snapshot().aliases
+        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", ["publish", "team"])
+        self.assertEqual(status, 400)
+        after = self.harness.config.snapshot().aliases
+        self.assertEqual(after, before)
+
     def test_group_refusal_does_not_partially_publish(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["writing"].primary = None
