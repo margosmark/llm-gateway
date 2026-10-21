@@ -39,15 +39,20 @@ jobs:
             --build-arg SOURCE_TREE="$(git rev-parse HEAD^{tree})" \
             -t personal-llm-gateway:candidate .
       - name: Record the candidate digest
-        # A locally built image has no registry digest, so fall back to the
-        # image ID, which is the same value the release gate resolves and
-        # writes into the release identity.
+        # The bare sha256 digest, which is the only form the gateway
+        # accepts in its release identity. A registry digest arrives as
+        # repository@sha256:..., so the repository part is dropped; a
+        # locally built image has no repository digest, and its image ID
+        # is the same content hash. This is the value the release gate
+        # resolves and writes into the running deployment.
         run: |
           DIGEST="$(docker image inspect personal-llm-gateway:candidate \
             --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
-          if [ -z "$DIGEST" ]; then
-            DIGEST="$(docker image inspect personal-llm-gateway:candidate --format '{{.Id}}')"
-          fi
+          case "$DIGEST" in
+            sha256:*) ;;
+            *@sha256:*) DIGEST="${DIGEST##*@}" ;;
+            *) DIGEST="$(docker image inspect personal-llm-gateway:candidate --format '{{.Id}}')" ;;
+          esac
           printf '%s\n' "$DIGEST" > candidate-digest.txt
           cat candidate-digest.txt
       - name: Run the release gate against the exact candidate
