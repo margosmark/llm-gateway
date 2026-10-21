@@ -31,6 +31,16 @@ DEFAULT_TIMEOUT = 120.0
 DEFAULT_CONNECT_TIMEOUT = 10.0
 
 
+def _sse_frame(buffer: str) -> bytes:
+    """Render one complete SSE frame: its data lines and its terminator.
+
+    A frame is terminated by a blank line. Without it, a client that
+    parses SSE strictly reads the whole stream as a single event.
+    """
+    text = buffer if buffer.endswith("\n") else buffer + "\n"
+    return (text + "\n").encode("utf-8")
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102, ANN001
         return None
@@ -181,7 +191,13 @@ class UpstreamClient:
         )
 
     def _iter_sse(self, raw: Any) -> Iterator[bytes]:
-        """Yield SSE frames as they arrive."""
+        """Yield SSE frames as they arrive.
+
+        Each yielded frame is a **complete** SSE frame: the data lines plus
+        the blank line that terminates it. The terminator matters - a
+        client that parses SSE strictly reads a stream without it as a
+        single event, and reports an empty stream with no finish reason.
+        """
         buffer = ""
         try:
             while True:
@@ -191,7 +207,8 @@ class UpstreamClient:
                 text = line.decode("utf-8", errors="replace")
                 if not text.strip():
                     if buffer.strip():
-                        yield buffer.encode("utf-8")
+                        # The blank line ends the frame, so it belongs to it.
+                        yield _sse_frame(buffer)
                         buffer = ""
                     continue
                 if text.startswith("data:") or text.startswith("event:") or text.startswith(":"):
@@ -210,7 +227,7 @@ class UpstreamClient:
             except Exception:  # pragma: no cover - defensive
                 pass
         if buffer.strip():
-            yield buffer.encode("utf-8")
+            yield _sse_frame(buffer)
 
 
 def parse_json_body(body: bytes | None) -> Any:
