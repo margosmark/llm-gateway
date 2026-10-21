@@ -14,6 +14,8 @@ from gateway.adapters.opencode_go import OpenCodeGoAdapter
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.buildinfo import release_identity
+from gateway.backup import snapshot_interval_seconds
+from gateway.snapshots import SnapshotWorker
 from gateway.config import ConfigStore, ProviderState
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
@@ -112,11 +114,13 @@ def main(argv: list[str] | None = None) -> int:
     if not _address_is_local(args.host):
         print(f"refusing to start: '{args.host}' is not an address on this host. Set GATEWAY_BIND to an address this machine owns.", file=sys.stderr)
         return 2
-    app, _, _, _ = build_application(Path(args.data_dir), args.host, args.port)
+    app, config, _, _ = build_application(Path(args.data_dir), args.host, args.port)
     if args.print_url:
         print(f"console: http://{args.host}:{args.port}/owner/\nAPI:     http://{args.host}:{args.port}/v1/\nrelease: http://{args.host}:{args.port}/version")
         return 0
+    snapshots = SnapshotWorker(config, snapshot_interval_seconds(config.snapshot()))
     server = Server(args.host, args.port, app.handle)
+    snapshots.start()
     server.start_background()
     identity = release_identity()
     print(f"personal-llm-gateway listening on http://{args.host}:{args.port}/owner/ (trusted LAN)", flush=True)
@@ -139,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         stop.wait()
     finally:
         server.stop()
+        snapshots.stop()
     return 0
 
 

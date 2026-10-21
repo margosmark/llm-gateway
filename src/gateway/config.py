@@ -472,6 +472,12 @@ class ConfigStore:
             self._config = config
             self._persist()
 
+    def replace_validated(self, config: GatewayConfig) -> None:
+        """Persist a prevalidated replacement before publishing it in memory."""
+        with self._lock:
+            atomic_write_json(self._path, config.to_dict(), mode=0o600)
+            self._config = GatewayConfig.from_dict(config.to_dict())
+
     def _persist(self) -> None:
         atomic_write_json(self._path, self._config.to_dict(), mode=0o600)
 

@@ -22,6 +22,8 @@ from gateway.bridge.aggregate import aggregate_stream
 from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_chat
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import convert_stream, sse_done
+from gateway.backup import export_config, import_config, snapshot_interval_seconds
+from gateway.stores import atomic_write_json
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
@@ -128,6 +130,8 @@ class GatewayApp:
             r.add(["GET"], prefix + "/style.css", self.handle_static_css)
             r.add(["GET"], prefix + "/api/status", self.handle_public_status)
             r.add(["GET"], prefix + "/api/state", self.handle_state)
+            r.add(["GET"], prefix + "/api/backup/export", self.handle_backup_export)
+            r.add(["POST"], prefix + "/api/backup/import", self.handle_backup_import)
 
             r.add(["POST"], prefix + "/api/provider", self.handle_provider_action)
             r.add(["POST"], prefix + "/api/model", self.handle_model_action)
@@ -570,6 +574,7 @@ class GatewayApp:
             {
                 "initialized": config.initialized,
                 "revision": config.revision,
+                "snapshot_interval_seconds": snapshot_interval_seconds(config),
                 "access_mode": config.access_mode,
                 "access_mode_description": access_mode_description(config.access_mode),
                 "surface": self._surface(request),
@@ -594,6 +599,25 @@ class GatewayApp:
                 "checklist": self._checklist(config),
             }
         )
+
+    def handle_backup_export(self, request: Request) -> Response:
+        config = self.config.snapshot()
+        return json_response({"snapshot_interval_seconds": snapshot_interval_seconds(config),
+                              "export": export_config(config)})
+
+    def handle_backup_import(self, request: Request) -> Response:
+        denied = self._require_mutation(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = request.json()
+            imported = import_config(payload, self.config.snapshot(), self.registry)
+            self.config.replace_validated(imported)
+        except ValidationError as exc:
+            return json_response({"error": {"message": exc.message, "type": "invalid_import", "field": exc.field}}, 400)
+        except (ValueError, TypeError) as exc:
+            return json_response({"error": {"message": str(exc), "type": "invalid_import"}}, 400)
+        return json_response({"ok": True, "revision": self.config.snapshot().revision})
 
     def _checklist(self, config: GatewayConfig) -> list[dict[str, Any]]:
         """The get-started checklist. Every step states whether it is done."""
@@ -1059,6 +1083,17 @@ class GatewayApp:
         except ValueError:
             payload = {}
         action = str(payload.get("action") or "")
+        if action == "snapshot_interval":
+            interval = payload.get("seconds")
+            if not isinstance(interval, int) or isinstance(interval, bool) or interval not in (0, 3600, 21600, 86400):
+                return json_response({"error": {"message": "snapshot interval must be 0, 3600, 21600, or 86400 seconds", "type": "invalid_setting"}}, 400)
+            with self.config.mutate() as config:
+                config.settings["snapshot_interval_seconds"] = interval
+            if interval > 0:
+                snapshot_dir = self.config.path.parent / "snapshots"
+                stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                atomic_write_json(snapshot_dir / f"config-{stamp}.json", self.config.snapshot().to_dict())
+            return json_response({"ok": True, "snapshot_interval_seconds": interval})
         if action == "access_mode":
             return json_response(
                 {"error": {"message": "trusted LAN mode is anonymous and cannot be changed to authenticated access", "type": "unsupported_access_mode"}},
