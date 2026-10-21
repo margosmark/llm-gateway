@@ -84,9 +84,12 @@ the rest of the state.
    profile. Legacy profile/token metadata does not provide access control.
 3. The request model must name a published alias; any reachable peer may invoke
    each published route.
-4. `Router` evaluates the primary route followed by configured fallbacks. A
-   candidate must have a configured adapter, an enabled known model, a known
-   supported dialect, matching capabilities, and no active local cooldown.
+4. `Router` uses deterministic weighted rendezvous-by-conversation selection
+   when an alias has a weighted pool, then treats the other pool members and
+   configured fallbacks strictly as failure candidates. Pool selection is
+   stable for the derived conversation identifier and does not persist client
+   content. A candidate must have a configured adapter, an enabled known model,
+   a known supported dialect, matching capabilities, and no active local cooldown.
 5. The bridge converts between Chat Completions and Responses only when the
    target capability permits it. Unsupported capability/dialect combinations
    fail closed.
