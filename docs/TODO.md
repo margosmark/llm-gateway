@@ -732,7 +732,10 @@ rate from the ledger.
 
 **Depends on.** **T23** for the rates; the rest is available now.
 
-### T32 — A durable circuit breaker, remembered across restarts — `todo`
+### T32 — A durable circuit breaker, remembered across restarts — `done`
+
+**Landed.** Closed as **R30**. The state is written to `circuits.json` in
+the state directory and reloaded on start.
 
 **Why.** The gateway already has a cooldown, and it is the right idea in
 the wrong shape. `CooldownState` (`core/routing.py:100-145`) is
@@ -782,9 +785,43 @@ from the alias's `cooldown_seconds`. So:
   own: an exhausted account fails every route at that provider, and each
   one opens its own circuit.
 
-**Done when.** The circuit state survives a restart, the classes get
-different windows, the backoff escalates, one probe is let through, and
-every skip is recorded with its reason.
+**Resolution.** `gateway.circuits` replaces the flat timer.
+
+* **Durable.** The state is written to `circuits.json` in the state
+  directory with the same atomic, owner-only rules as the rest of the
+  state, and it is reloaded on start. A gateway that comes back up during
+  an outage stays out of the way.
+* **Per route.** The key is the provider *and* the model, so one broken
+  model does not hold the others at the same provider.
+* **Class-driven.** A confirmed **exhaustion** is account-scoped: it opens
+  for at least an hour and covers the whole provider, because the
+  account's allowance is gone rather than one route's share of it. A
+  **rate limit** opens the route for as long as the provider asked. A
+  **transient** failure is a blip: it opens the route only after a
+  pattern of consecutive failures, and a success resets the count.
+* **Escalating.** The window grows with consecutive failures, up to a day.
+* **Half-open.** When a window ends, exactly **one** request is let
+  through. A success closes the circuit; a failure reopens it for longer.
+  A probe that never returns is reclaimed after five minutes, and a probe
+  is **never remembered** across a restart - a stale probe must not block
+  a route for ever.
+* **Bounded and forgotten.** The store keeps at most 512 circuits, the
+  oldest first, and a circuit that has not been touched for a week is
+  forgotten.
+* **Metadata only.** The file holds a provider, a model, a failure class,
+  counters and timestamps. No prompt, no completion, no content.
+* The route is still **recorded as skipped, with its reason**, so a
+  cooldown can never look like a silent fallback.
+
+**Evidence:** `tests/test_circuits.py` - the state survives a restart; the
+stored file is metadata only and mode `0600`; a probe is never remembered;
+an old entry is forgotten; the store stays bounded; an exhaustion opens
+for an hour and covers the provider; a rate limit opens the route only; a
+transient failure needs a pattern and a success resets it; the window
+escalates and is capped; exactly one probe is let through; a successful
+probe closes the circuit; a failed probe reopens it for longer; an
+abandoned probe does not block the route; and the router records the skip
+with its reason.
 
 ### T33 — Honour the provider's `Retry-After` — `done`
 
@@ -885,7 +922,7 @@ no content.
 | T29 | A concurrency cap per provider | 4 | todo |
 | T30 | Groups of aliases | 4 | todo |
 | T31 | One provider health view | 4 | todo |
-| T32 | A durable circuit breaker, remembered across restarts | 4 | todo |
+| T32 | A durable circuit breaker, remembered across restarts | 4 | **done** |
 | T33 | Honour the provider's `Retry-After` | 4 | **done** |
 | T34 | Decide whether a response cache may exist at all | 4 | blocked |
 

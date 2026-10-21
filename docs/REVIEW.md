@@ -968,12 +968,68 @@ driven through the OpenCode Go adapter.
 
 **Planned as** `docs/TODO.md` item **T33**.
 
+### R30 — A cooldown was lost on every restart, and one blip benched a provider for five minutes — **closed**
+**Severity: high availability and allowance risk.** *(closed)*
+
+`CooldownState` was an in-memory timer keyed by **provider**. Four
+weaknesses showed up in the same situation - a provider that is out of
+allowance:
+
+* **It was lost on a restart.** A gateway that came back up during an
+  outage immediately called the exhausted provider again, which is
+  exactly the moment a cooldown is worth most.
+* **It was flat.** Every qualifying failure produced the same window,
+  however many had already happened, and a success reset nothing.
+* **It treated a blip like an outage.** A single transient error - a 520
+  from an edge - benched the provider for the same five minutes as a
+  confirmed exhaustion of the allowance.
+* **It was per provider.** One route's failure benched every model at
+  that provider, including the models that were working.
+
+**Resolution.** `gateway.circuits` replaces the timer with a durable
+circuit breaker:
+
+* the state is written to `circuits.json` in the state directory, with the
+  same atomic, owner-only rules as the rest of the state, and is reloaded
+  on start - **metadata only**, never content;
+* it is keyed by **route** - provider *and* model;
+* a confirmed **exhaustion** is account-scoped and opens for at least an
+  hour across the provider; a **rate limit** opens the route for as long
+  as the provider asked; a **transient** failure is a blip and needs a
+  pattern of consecutive failures before it opens anything;
+* the window **escalates** with consecutive failures, up to a day, and a
+  success resets the count;
+* a circuit that ends is **half-open**: exactly one request is let
+  through, a success closes it, a failure reopens it for longer, an
+  abandoned probe is reclaimed after five minutes, and a probe is never
+  remembered across a restart;
+* the store is bounded, and a circuit that has not been touched for a
+  week is forgotten;
+* the route is still **recorded as skipped, with its reason**, so a
+  cooldown can never look like a silent fallback.
+
+The circuit remains what a cooldown always was: a **local retry policy,
+never evidence that the provider reset**. There are still no background
+probes.
+
+**Evidence:** `tests/test_circuits.py` - the state survives a restart; the
+stored file is metadata only and mode `0600`; a probe is never
+remembered; an old entry is forgotten; the store stays bounded; an
+exhaustion opens for an hour and covers the provider; a rate limit opens
+the route only; a transient failure needs a pattern and a success resets
+it; the window escalates and is capped; exactly one probe is let through;
+a successful probe closes the circuit; a failed probe reopens it for
+longer; an abandoned probe does not block the route; and the router
+records the skip with its reason.
+
+**Planned as** `docs/TODO.md` item **T32**.
+
 ## Recommended order
 
-Findings R0-R24, R28 and R29 are closed or superseded. **R25, R26 and R27
-are open**; all three are planned in `docs/TODO.md` (T4, T2 and T16). The
-register is kept so the next agent can see what was already paid for in
-time.
+Findings R0-R24, R28, R29 and R30 are closed or superseded. **R25, R26
+and R27 are open**; all three are planned in `docs/TODO.md` (T4, T2 and
+T16). The register is kept so the next agent can see what was already paid
+for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or

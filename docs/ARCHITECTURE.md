@@ -35,12 +35,18 @@ not values.
 The following state is intentionally in-memory only and disappears on restart:
 
 * in-flight ChatGPT/Codex device authorization state;
-* provider cooldowns;
 * request ledger events and totals;
 * limit snapshots.
 
 This means the Status page is operationally useful but is **not** a durable
 audit or billing system.
+
+The open circuits are the exception: they are written to
+`circuits.json` in the state directory, because a gateway that restarts
+during a provider outage must not call that provider again. The file holds
+**metadata only** - a provider, a model, a failure class, counters and
+timestamps - and it is written with the same atomic, owner-only rules as
+the rest of the state.
 
 ## Request paths
 
@@ -181,9 +187,9 @@ does not retry a stream after the caller has begun receiving bytes.
 ### Cooldowns
 
 A route that fails in a way the owner has enabled a trigger for is put
-into a **local cooldown**: the provider is skipped for a while, and the
-skip is recorded with its reason, so a cooldown can never look like a
-silent failover.
+into a **local cooldown**: it is skipped for a while, and the skip is
+recorded with its reason, so a cooldown can never look like a silent
+fallback.
 
 A cooldown is a **local retry policy, never evidence that the provider
 reset**. There are no background probes and no health checks.
@@ -195,6 +201,27 @@ to recover, so its answer is honoured - but it is a value from the
 network, so it is bounded to an hour, and a value that is unparseable,
 negative or already in the past is ignored in favour of the local policy.
 The cooldown records which of the two it used, and the skip says so.
+
+The state lives in `gateway.circuits` and is **remembered on disk**, in
+`circuits.json` in the state directory. A gateway that restarts during an
+outage stays out of the way, which is exactly when the cooldown is worth
+most.
+
+* It is keyed by **route** - provider *and* model - so one broken model
+  does not hold the others at the same provider.
+* A **confirmed exhaustion** is account-scoped: it opens for at least an
+  hour and covers the whole provider, because the account's allowance is
+  gone rather than one route's share of it.
+* A **rate limit** opens the route for as long as the provider asked.
+* A **transient** failure is a blip. It opens the route only after a
+  pattern of consecutive failures, and a success resets the count.
+* The window **escalates** with consecutive failures, up to a day.
+* When a window ends the circuit is **half-open**: exactly one request is
+  let through to find out whether the provider recovered. A success closes
+  it; a failure reopens it for longer. A probe that never returns is
+  reclaimed after five minutes, and a probe is never remembered across a
+  restart.
+* The stored state is **metadata only**, and it is forgotten after a week.
 
 ## Release identity
 
