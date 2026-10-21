@@ -173,7 +173,7 @@ covered by a regression test. They are listed in full in
 
 ## The review register
 
-`docs/REVIEW.md` holds every finding, with its evidence. All of R0–R22 are
+`docs/REVIEW.md` holds every finding, with its evidence. All of R0–R24 are
 closed or superseded. **Add a finding when a defect is found**, and close it
 only with a cited fix and a regression test — the register is how the next
 agent avoids repeating the same work.
