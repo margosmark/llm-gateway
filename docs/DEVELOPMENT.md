@@ -36,7 +36,7 @@ Before changing code, identify the boundary being touched:
 | Credential/auth path | no secret in config/state/log/error; private-file permissions; one-time caller-token behavior |
 | Adapter | explicit connection/catalog action; safe error classification; no redirect/credential leak; fixture-based tests |
 | Router/bridge | capability compatibility; fallback hard stops; stream and tool-bearing behavior |
-| Config mutation | input validation; revision behavior; atomic persistence; invalid state cannot be published |
+| Config mutation/import | input validation; revision behavior; atomic persistence; invalid state cannot be published; sanitised export excludes credentials, token hashes and secret-adjacent metadata |
 | Container/release | exact image identity, non-root startup with the real state volume, listener exposure, metadata-only `/version` |
 | Documentation | command, URL, endpoint, UI label, and limitation checked against the code in this repository |
 
