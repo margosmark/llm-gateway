@@ -73,6 +73,28 @@ def validate_route(
     return RouteRef(provider=provider_id, model=model)
 
 
+def validate_weighted_routes(config: ConfigStore, registry, weighted_routes: Any) -> list[tuple[RouteRef, int]]:
+    """Validate an alias's distribution pool, keeping it distinct from fallbacks."""
+    if not isinstance(weighted_routes, list) or len(weighted_routes) < 2:
+        raise ValidationError("a weighted pool must contain at least two routes", "weighted_routes")
+    resolved: list[tuple[RouteRef, int]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(weighted_routes):
+        field = f"weighted route {index + 1}"
+        if not isinstance(item, dict):
+            raise ValidationError(f"the {field} must be an object", field)
+        weight = item.get("weight")
+        if isinstance(weight, bool) or not isinstance(weight, int) or not 1 <= weight <= 1000:
+            raise ValidationError(f"the {field} weight must be an integer from 1 to 1000", field)
+        ref = validate_route(config, registry, item.get("provider"), item.get("model"), field)
+        key = (ref.provider, ref.model)
+        if key in seen:
+            raise ValidationError(f"the {field} repeats an earlier pool route", field)
+        seen.add(key)
+        resolved.append((ref, weight))
+    return resolved
+
+
 def validate_alias_routes(
     config: ConfigStore,
     registry,

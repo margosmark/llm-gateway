@@ -42,9 +42,10 @@ curl http://10.10.11.109:8765/v1/chat/completions \
   -d '{"model": "coding", "messages": [{"role": "user", "content": "hello"}]}'
 ```
 
-`coding` is an alias you defined in the console. It resolves to a primary
-route and, if you explicitly allow it, to ordered fallbacks. Provider churn
-never breaks your client's configuration.
+`coding` is an alias you defined in the console. It resolves either to a
+primary route or a weighted pool selected consistently for each conversation;
+if you explicitly allow it, other pool members and ordered configured routes
+are failure fallbacks. Provider churn never breaks your client's configuration.
 
 ---
 
