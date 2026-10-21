@@ -97,6 +97,8 @@ class CircuitStoreTests(unittest.TestCase):
                 "opened_at",
                 "until",
                 "reason",
+                "request_id",
+                "set_at",
             },
         )
         for field in ("prompt", "content", "message", "completion", "body"):

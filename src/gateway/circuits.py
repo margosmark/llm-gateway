@@ -127,6 +127,11 @@ class CircuitEntry:
     until: float
     #: Why the circuit was opened, in the owner's language.
     reason: str
+    #: The request whose failure set this hold, and when it was set, so
+    #: the operator can correlate a cooldown with the ledger row that
+    #: caused it. Metadata only, like every field here.
+    request_id: str = ""
+    set_at: float | None = None
     #: Whether a recovery probe has been claimed. **In memory only**: a
     #: restart must not leave a route blocked by a probe that no longer
     #: exists.
@@ -157,6 +162,8 @@ class CircuitEntry:
             "opened_at": self.opened_at,
             "until": self.until,
             "reason": self.reason,
+            "request_id": self.request_id,
+            "set_at": self.set_at,
         }
 
     @classmethod
@@ -380,6 +387,8 @@ class CircuitStore:
                     "next_probe_at": max(now, entry.until),
                     "probe_in_flight": entry.probe_in_flight,
                     "reason": entry.reason,
+                    "request_id": entry.request_id,
+                    "set_at": entry.set_at,
                     "state": (
                         "counting"
                         if not entry.armed
@@ -448,6 +457,7 @@ class CircuitStore:
         error_class: str,
         base_seconds: int,
         retry_after: int | None = None,
+        request_id: str = "",
     ) -> None:
         """Record a failure and open the circuit it deserves.
 
@@ -484,6 +494,8 @@ class CircuitStore:
                         reason="a transient failure was seen",
                     )
                     entry.failures = failures
+                    entry.request_id = request_id
+                    entry.set_at = now
                     entry.probe_in_flight = False
                     self._entries[route_key] = entry
                     self._persist()
@@ -527,6 +539,8 @@ class CircuitStore:
                 opened_at=now,
                 until=now + window,
                 reason=reason,
+                request_id=request_id,
+                set_at=now,
             )
             if account_scoped:
                 # The failure is account-scoped, so it covers the provider
@@ -542,6 +556,8 @@ class CircuitStore:
                     opened_at=now,
                     until=now + window,
                     reason=reason,
+                    request_id=request_id,
+                    set_at=now,
                 )
             self._prune(now)
             self._persist()

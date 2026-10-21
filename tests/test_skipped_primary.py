@@ -98,6 +98,24 @@ class SkippedPrimaryTests(unittest.TestCase):
         self.assertTrue(event["attempts"])
         self.assertEqual(event["attempts"][0]["error_class"], "exhausted")
         self.assertEqual(event["serving_provider"], "opencode_go")
+        # An exhausted failure is account-scoped, so the provider-wide
+        # circuit carries the correlation to the request that set it.
+        cooldown = self.harness.router.circuits.details()[f"{FAKE_PROVIDER}/*"]
+        self.assertEqual(cooldown["error_class"], "exhausted")
+        self.assertEqual(cooldown["request_id"], event["request_id"])
+        self.assertGreater(cooldown["set_at"], 0)
+
+    def test_a_new_failure_replaces_the_cooldown_correlation_atomically(self) -> None:
+        circuits = self.harness.router.circuits
+        circuits.record_failure(FAKE_PROVIDER, "gpt-6-luna", "exhausted", 300, request_id="request-old")
+        circuits.record_failure(FAKE_PROVIDER, "gpt-6-luna", "exhausted", 300, request_id="request-new")
+        entry = circuits.details()[f"{FAKE_PROVIDER}/*"]
+        self.assertEqual(entry["request_id"], "request-new")
+        self.assertEqual(entry["failures"], 2)
+        self.assertGreater(entry["remaining_seconds"], 0)
+        removed = circuits.clear(FAKE_PROVIDER)
+        self.assertTrue(removed)
+        self.assertEqual(circuits.details(), {})
 
 
 class SkipPathAuthorizationTests(unittest.TestCase):
