@@ -28,6 +28,15 @@ creating unbounded workers. A process-local rolling window allows 120 requests
 per peer IP per 60 seconds by default. These are local capacity protections,
 not an access-control boundary or defense against an on-path LAN attacker.
 
+## Provider concurrency
+
+Inference adapters are wrapped by a process-local concurrency guard with a
+fixed limit of four active requests per provider. Excess calls fail promptly
+with the `rate_limited` error class; no queue or provider probe is introduced.
+A streamed response retains its slot until the stream finishes or closes. This
+is a local protection only, not a provider guarantee or provider-reported
+limit. The cap is not persisted and is independent per process.
+
 ## State boundaries
 
 `gateway.config.ConfigStore` persists the non-secret configuration as

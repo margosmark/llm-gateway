@@ -66,6 +66,7 @@ from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
 from gateway.logging import RequestLogger
 from gateway.routes import validate_alias_routes, validate_phase_routing
+from gateway.provider_concurrency import CappedAdapterRegistry, ProviderConcurrency
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -334,6 +335,7 @@ class GatewayApp:
         self.credentials = credentials
         self.router = router
         self.registry = registry
+        self.router._registry = CappedAdapterRegistry(registry, ProviderConcurrency())
 
         self.profile_auth = profile_auth
         self.policy = policy

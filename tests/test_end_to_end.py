@@ -265,6 +265,104 @@ class GatewayHarness:
                 return exc.code, payload.decode("utf-8", "replace"), collect(exc)
 
 
+class ProviderConcurrencyTests(unittest.TestCase):
+    def test_requests_over_provider_cap_are_refused_and_capacity_recovers(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        count_lock = threading.Lock()
+        started = 0
+
+        class BlockingAdapter(FakeAdapter):
+            def invoke(self, request: ProviderRequest) -> ProviderResponse:
+                nonlocal started
+                with count_lock:
+                    started += 1
+                    if started == 4:
+                        entered.set()
+                release.wait(timeout=5)
+                return super().invoke(request)
+
+        adapter = BlockingAdapter()
+        harness = GatewayHarness(adapter)
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            config.aliases["coding"] = _alias()
+        results: list[int] = []
+
+        def first_request() -> None:
+            status, _, _ = harness.request(
+                "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+            )
+            results.append(status)
+
+        workers = [threading.Thread(target=first_request) for _ in range(4)]
+        for worker in workers:
+            worker.start()
+        self.assertTrue(entered.wait(timeout=3))
+        status, payload, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        self.assertEqual(status, 502)
+        self.assertEqual(payload["error"]["type"], "rate_limited")
+        self.assertIn("local concurrency limit", payload["error"]["message"])
+        self.assertEqual(len(adapter.calls), 0)
+
+        release.set()
+        for worker in workers:
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [200] * 4)
+        status, _, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        self.assertEqual(status, 200)
+
+    def test_capacity_is_independent_per_provider(self) -> None:
+        from gateway.provider_concurrency import ProviderConcurrency
+
+        cap = ProviderConcurrency(1)
+        cap.acquire("provider-a")
+        cap.acquire("provider-b")
+        with self.assertRaises(Exception) as raised:
+            cap.acquire("provider-a")
+        self.assertEqual(raised.exception.error_class, "rate_limited")
+        cap.release("provider-a")
+        cap.acquire("provider-a")
+        cap.release("provider-a")
+        cap.release("provider-b")
+
+    def test_streaming_response_holds_capacity_until_consumed(self) -> None:
+        from gateway.provider_concurrency import ProviderConcurrency, _CappedAdapter
+
+        class StreamingAdapter:
+            provider_id = "stream-provider"
+
+            def invoke(self, request: ProviderRequest) -> ProviderResponse:
+                return ProviderResponse(
+                    status=200,
+                    stream=iter((b"one", b"two")),
+                    content_type="text/event-stream",
+                    dialect="openai_responses",
+                )
+
+        limits = ProviderConcurrency(1)
+        adapter = _CappedAdapter(StreamingAdapter(), limits)
+        response = adapter.invoke(ProviderRequest(model="m", payload={}, stream=True))
+        with self.assertRaises(Exception) as raised:
+            limits.acquire("stream-provider")
+        self.assertEqual(raised.exception.error_class, "rate_limited")
+        self.assertEqual(list(response.stream or ()), [b"one", b"two"])
+        limits.acquire("stream-provider")
+        limits.release("stream-provider")
+
+    def test_invalid_limit_is_refused(self) -> None:
+        from gateway.provider_concurrency import ProviderConcurrency
+
+        for limit in (0, -1, True, 1.5):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                ProviderConcurrency(limit)
+
+
 class MetadataTests(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = GatewayHarness()
