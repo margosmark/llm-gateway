@@ -898,6 +898,21 @@ is created enabled; and the alias's limit survives the edit.
 
 **Planned as** `docs/TODO.md` item **T16**.
 
+### R29 — Cooldown display must cite the cooldown-setting failure — **closed**
+
+A cooldown is now stored together with the failure reason, request ID, and
+set timestamp at the point `_maybe_cooldown` activates it
+(`src/gateway/core/routing.py`). The state API exposes that event with the
+remaining duration; it does not infer a cause by searching unrelated ledger
+attempts. The Runtime console renders a readable countdown and the stored
+reason/event reference, preserves the local-policy warning, and shows an
+explicit empty state (`src/gateway/static/console.js`).
+
+**Evidence:** `node tests/console_dom_test.js` exercises the rendered DOM text
+with a synthetic cooldown event, confirms that the matching failure reason
+and request reference render, and confirms an unrelated stale error is not
+shown. The test also checks the empty state.
+
 ### R28 — Every small response paid a 41ms stall from Nagle and the delayed ACK — **closed**
 **Severity: high latency defect on every request path.** *(closed)*
 

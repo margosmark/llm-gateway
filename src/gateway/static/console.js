@@ -163,10 +163,10 @@
     return value || "Unknown";
   }
 
-  function emptyState(title, message) {
+  function emptyState(title, detail) {
     return el("div", { class: "empty-state", role: "status", "aria-live": "polite" }, [
       el("strong", { text: title }),
-      el("p", { class: "small", text: message })
+      el("p", { class: "small", text: detail })
     ]);
   }
 
@@ -823,7 +823,7 @@
         el("td", { class: "small", text: (entry.remaining_seconds || 0) + "s" }),
         el("td", { class: "small", text: entry.next_probe_at ? when(new Date(entry.next_probe_at * 1000).toISOString()) : "Unknown" }),
         el("td", { class: "small", text: (entry.state || "unknown") + (entry.probe_in_flight ? " · probe in flight" : "") }),
-        el("td", { class: "small muted", text: entry.reason || "" })
+        el("td", { class: "small muted", text: (entry.reason || "") + (entry.request_id ? " · event " + entry.request_id : "") })
       ]));
     });
     table.appendChild(tbody);
@@ -1834,6 +1834,15 @@
         } finally {
           state = previous;
           usageDay = previousDay;
+        }
+      },
+      renderSettingsForTest: function (view) {
+        var previous = state;
+        state = view;
+        try {
+          return renderSettings();
+        } finally {
+          state = previous;
         }
       }
     };

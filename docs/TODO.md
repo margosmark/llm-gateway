@@ -490,16 +490,19 @@ running upstream and keeps consuming the provider's allowance.
 upstream request, and record the outcome as a client abort rather than a
 provider failure.
 
-### T12 — Present cooldowns and skipped routes properly — `todo`
+### T12 — Present cooldowns and skipped routes properly — `done`
 
-**Why.** Cooldowns are rendered as raw JSON
-(`static/console.js:1027`), and the reason a route was skipped is visible
-only in the ledger. The owner learns that a route is excluded by reading a
-request record, which is the wrong way round: R5 made the record complete
-precisely so that the console could be the friendly view of it.
+**Landed.** Runtime now renders active cooldowns as a readable countdown
+with the reason and request reference recorded at the instant the cooldown
+was set. Recent outcome notes also name skipped routes and their reasons.
+Cooldown wording explicitly describes local policy, and the empty state is
+explicit. R29 in [`REVIEW.md`](REVIEW.md) records the fix and behavioural
+test evidence.
 
-**Scope.** A readable cooldown list with the remaining time and the reason
-it was set, and the skipped-route reasons surfaced on the route itself.
+**Evidence.** `tests/test_skipped_primary.py` verifies that a cooldown
+snapshot carries the triggering failure's reason and request ID and that a
+replacement event updates as one unit. `tests/console_dom_test.js` asserts
+the rendered cooldown text and skipped-route note.
 
 ---
 
@@ -1171,7 +1174,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T9 | A `/metrics` endpoint | 2 | todo |
 | T10 | Concurrency cap and per-client rate limit | 2 | todo |
 | T11 | Cancel the upstream on client disconnect | 2 | todo |
-| T12 | Present cooldowns and skipped routes properly | 2 | todo |
+| T12 | Present cooldowns and skipped routes properly | 2 | **done** |
 | T13 | A plain OpenAI API-key provider | 3 | todo |
 | T14 | A native Anthropic API-key provider | 3 | todo |
 | T15 | A local provider | 3 | todo |
