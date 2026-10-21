@@ -112,6 +112,36 @@ def write_identity(identity: str) -> tuple[bool, str]:
     return True, result.stdout.strip()
 
 
+def build_candidate(image: str) -> subprocess.CompletedProcess:
+    """Build the candidate, stamping the source identity into the image.
+
+    The revision and the tree come from the checkout, so the image can say
+    what it was built from. Without them the release identity is "unknown",
+    which is true but useless.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    revision = run(["git", "rev-parse", "HEAD"], timeout=60).stdout.strip()
+    tree = run(["git", "rev-parse", "HEAD^{tree}"], timeout=60).stdout.strip()
+    if not revision or not tree:
+        print("could not read the git revision; build the image manually", file=sys.stderr)
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+    print(f"building {image} from {revision[:12]}")
+    return run(
+        [
+            "docker",
+            "build",
+            "--build-arg",
+            f"SOURCE_REVISION={revision}",
+            "--build-arg",
+            f"SOURCE_TREE={tree}",
+            "-t",
+            image,
+            ".",
+        ],
+        timeout=1800,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--image", default="personal-llm-gateway:candidate")
@@ -126,6 +156,14 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("COMPOSE_PROJECT_NAME", ""),
         help="the Compose project to release onto",
     )
+    parser.add_argument(
+        "--build",
+        action="store_true",
+        help=(
+            "build the candidate from the current checkout first, passing the "
+            "source revision and tree so the release identity is truthful"
+        ),
+    )
     args = parser.parse_args(argv)
     global PROJECT
     PROJECT = args.project
@@ -137,6 +175,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{marker}] {name}" + (f" - {detail}" if detail else ""), flush=True)
         if not ok:
             failures.append(name)
+
+    if args.build:
+        built = build_candidate(args.image)
+        if built.returncode != 0:
+            print((built.stderr or built.stdout).strip()[:600], file=sys.stderr)
+            return 1
 
     identity = image_identity(args.image)
     if identity is None:
