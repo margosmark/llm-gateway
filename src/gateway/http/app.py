@@ -584,6 +584,7 @@ class GatewayApp:
                 "ledger": self.ledger.recent(limit=25) if self.ledger else [],
                 "totals": self.ledger.totals() if self.ledger else {},
                 "cooldowns": self.router.cooldown.snapshot(),
+                "cooldown_details": self.router.cooldown.details(),
                 "release": self._release_identity() if self._release_identity else {},
                 "base_url": self.base_url,
                 "fallback_triggers": list(FALLBACK_TRIGGERS),

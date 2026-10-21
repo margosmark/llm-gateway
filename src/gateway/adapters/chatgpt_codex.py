@@ -627,6 +627,7 @@ class ChatGPTCodexAdapter:
                 PROVIDER_ID,
                 parse_json_body(response.body),
                 operation="the ChatGPT / Codex responses request",
+                headers=response.headers,
             )
 
         return ProviderResponse(
