@@ -19,7 +19,7 @@ from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
 from gateway.http.core import Server
-from gateway.http.security import build_allowed_hosts, build_canonical_origins, SecurityPolicy
+from gateway.http.security import build_allowed_hosts, build_canonical_origins, SecurityPolicy, format_authority_host
 from gateway.observability import LimitStore, RequestLedger
 
 DEFAULT_DATA_DIR = "/var/lib/gateway"
@@ -110,7 +110,7 @@ def build_application(data_dir: Path, host: str, port: int):
     policy = SecurityPolicy(allowed_hosts=build_allowed_hosts(host, port), canonical_origins=build_canonical_origins(host, port))
     app = GatewayApp(config=config, credentials=credentials, router=router, registry=registry,
         profile_auth=profile_auth, policy=policy, ledger=ledger, limits=limits,
-        release_identity=release_identity, base_url=f"http://{host}:{port}", mounts=("/owner",))
+        release_identity=release_identity, base_url=f"http://{format_authority_host(host)}:{port}", mounts=("/owner",))
     return app, config, credentials, router
 
 
@@ -126,13 +126,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"refusing to start: '{args.host}' is not an address on this host. Set GATEWAY_BIND to an address this machine owns.", file=sys.stderr)
         return 2
     app, _, _, _ = build_application(Path(args.data_dir), args.host, args.port)
+    authority = format_authority_host(args.host)
     if args.print_url:
-        print(f"console: http://{args.host}:{args.port}/owner/\nAPI:     http://{args.host}:{args.port}/v1/\nrelease: http://{args.host}:{args.port}/version")
+        print(f"console: http://{authority}:{args.port}/owner/\nAPI:     http://{authority}:{args.port}/v1/\nrelease: http://{authority}:{args.port}/version")
         return 0
     server = Server(args.host, args.port, app.handle)
     server.start_background()
     identity = release_identity()
-    print(f"personal-llm-gateway listening on http://{args.host}:{args.port}/owner/ (trusted LAN)", flush=True)
+    print(f"personal-llm-gateway listening on http://{authority}:{args.port}/owner/ (trusted LAN)", flush=True)
     print(f"release: source={identity['source_revision']} tree={identity['source_tree']} image={identity['image_revision']}", flush=True)
     if identity["source_revision"] == "unknown" or identity["image_revision"] == "unknown":
         # Say so plainly: a deployment that cannot identify itself cannot

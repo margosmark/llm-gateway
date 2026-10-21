@@ -85,10 +85,12 @@ class ParserTests(unittest.TestCase):
         probe.bind.assert_called_once_with(("fd12:3456::1", 0, 0, 0))
 
     def test_owned_ipv6_ula_uses_startup_path(self) -> None:
+        stdout = io.StringIO()
         with mock.patch("socket.socket") as create_socket, \
                 mock.patch("gateway.cli.build_application", return_value=(None, None, None, None)) as build_app:
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(stdout):
                 self.assertEqual(main(["--host", "fd12:3456::1", "--print-url"]), 0)
+        self.assertIn("http://[fd12:3456::1]:8765/owner/", stdout.getvalue())
         create_socket.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
         create_socket.return_value.__enter__.return_value.bind.assert_called_once_with(
             ("fd12:3456::1", 0, 0, 0)

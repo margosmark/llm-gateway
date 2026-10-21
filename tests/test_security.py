@@ -91,6 +91,12 @@ class HostTests(PolicyTests):
 
 
 class OriginTests(PolicyTests):
+    def test_ipv6_authorities_are_bracketed_for_host_and_origin(self) -> None:
+        hosts = build_allowed_hosts("fd12:3456::1", 8765)
+        origins = build_canonical_origins("fd12:3456::1", 8765)
+        self.assertEqual(hosts, {"[fd12:3456::1]:8765", "[fd12:3456::1]"})
+        self.assertEqual(origins, {"http://[fd12:3456::1]:8765"})
+
     def test_matching_origin_is_accepted(self) -> None:
         request = make_request(method="POST", headers=[("Origin", "http://10.10.11.109:8765")])
         check_origin(request, self.policy)
