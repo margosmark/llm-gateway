@@ -490,6 +490,366 @@ when every provider is in cooldown.
 
 ---
 
+## Tier 4 — the owner's control plane
+
+These are **new capabilities**, not gap fixes. They share one theme: the
+alias today is a routing decision and nothing else, so the owner has no
+lever over what a client actually asks the provider for, and no view of
+what the alias has been doing.
+
+Two rules apply to every item in this tier, because they are the rules
+the rest of the project already lives by:
+
+* **A policy that changes a request is recorded, not silent.** When an
+  owner cap overrides a client value, that is a *degradation* in the sense
+  R19 established for a dropped reasoning effort: it goes into the
+  attribution and the ledger, and it is never invisible.
+* **A policy that cannot be honoured refuses.** "Tools denied" on an alias
+  is an actionable 4xx, not a silently stripped tool list.
+
+### T21 — A request policy per alias — `todo`
+
+**Why.** `Alias` (`config.py:243-312`) carries a primary route, fallbacks,
+a fallback policy and a cooldown. It carries **no parameters**: the client
+dictates `temperature`, `max_output_tokens`, the thinking level and the
+tools, and the owner has no say. For a single-owner appliance that is the
+biggest missing control.
+
+The policy block has two halves:
+
+```yaml
+alias: coding
+defaults:          # applied when the client did not specify
+  temperature: 0.1
+  max_output_tokens: 8000
+  thinking_level: high
+  system: "You are a careful senior engineer."
+caps:              # applied over the client
+  max_output_tokens: 32000
+  thinking_level: medium
+deny:              # refused outright
+  tools: true
+  store: false
+```
+
+**Scope.** A `policy` block on the alias, applied in one place, in this
+order: the client's value, then the owner's default if the client gave
+none, then the owner's cap if it clamps the client's value, then the
+deny rules.
+
+* It applies **before** dialect conversion, so the owner thinks in one
+  vocabulary ("thinking level: high") rather than per-dialect field names.
+* It applies on **every** path that reaches a provider - the API surface,
+  the alias test, and any future caller - so it lives beside the session
+  derivation in the router, not in a handler.
+* A clamped value is recorded as a **degradation**, exactly like a dropped
+  reasoning effort, and only the route that actually served the request
+  records it.
+* A denied capability is refused with an actionable 4xx that names the
+  rule.
+* A forced value (`store: false`) is applied and recorded.
+
+**Depends on.** **T4**, for the canonical thinking vocabulary and its
+per-model levels. Defining an owner-facing "thinking level" before the
+canonical model exists would bake in a second vocabulary.
+
+**Done when.** Every clause above is enforced, tested for both the
+allowed and the refused case, and the ledger shows what was changed and
+why.
+
+### T22 — A budget per alias, enforced locally — `todo`
+
+**Why.** The provider's allowance is **Unknown** for every provider that
+does not publish one, and the gateway calls no undocumented endpoint to
+find out. That is the honest answer - but it is not the *only* answer.
+The gateway can count what it spends, and a local cap does not need the
+provider's permission.
+
+**Scope.** A monthly budget in USD per alias, checked against locally
+computed spend.
+
+* Spend comes from **T2** (the recorded token counters and the published
+  per-token prices). A model with no published price contributes
+  **Unknown**, not zero - and an alias whose spend cannot be computed is
+  reported as uncapped, never as free.
+* The cap is checked **before** the request and the actual cost is
+  recorded **after** it, so the cap is a **soft** one: concurrent requests
+  can overshoot it. The console must say so rather than imply a hard
+  guarantee.
+* Over budget, the alias refuses with an actionable 4xx naming the
+  budget, the spend and the reset time - it does not silently serve a
+  different model, because that would be a fallback the owner did not
+  authorise.
+* A reset window and a timezone-free UTC boundary, shown in the console.
+
+**Depends on.** **T2**, and **T23** for the spend view.
+
+### T23 — Statistics per alias — `todo`
+
+**Why.** The Status page reports **global** totals and the last 25 events
+(`http/app.py:584-586`). With ten aliases, the owner's questions are
+"which one is failing?", "what did `chat` cost this month?" and "is the
+fallback firing?" - and none of them can be answered.
+
+**Scope.** Per alias, per provider and per model: request count, error
+count by error class, fallback rate, latency percentiles, token totals
+and spend, over a selectable window (last hour, day, month). Metadata
+only, on the same rules as the ledger.
+
+**Depends on.** **T2** for tokens and spend. **T7** if the history must
+survive a restart; without it, the windows are in-memory and the console
+must say so.
+
+### T24 — Export the ledger — `todo`
+
+**Why.** The data exists; getting it out of the browser is manual.
+
+**Scope.** A metadata-only export of the ledger - CSV or JSON, bounded in
+rows, with the same fields the console shows and no content. It is a
+read-only surface, it records nothing, and it obeys the same redaction
+table as the log.
+
+**Depends on.** **T7** for anything older than the in-memory ring.
+
+### T25 — A dry run: show the upstream payload without sending it — `todo`
+
+**Why.** Every dialect bug in this project's history - R9, R18, R21, R25 -
+was "the upstream received something I did not expect". The alias test
+(`http/app.py:937-976`) sends a **real** request, costs provider
+allowance, and cannot show what was sent. A preview would have caught
+every one of them on the day they were found.
+
+**Scope.** A read-only endpoint that takes an alias and a request body and
+returns the payload the gateway *would* send: the substituted upstream
+model id, the target dialect, the derived session header, the thinking
+level, the tool list, and the converted shape of the request.
+
+* It **never calls a provider**. That is the whole point, and it is
+  compatible with the rule that provider calls are explicit owner actions
+  - a preview is not a provider call at all.
+* It never records the preview in the ledger and never writes the body to
+  the log. The body is returned to the owner who supplied it.
+* It applies the same policy, capability and degradation rules as a real
+  request, so the preview is **what would actually happen** - including
+  the refusals.
+
+**Done when.** A preview of a request that would be refused says so, and
+a preview of a converted request shows the converted shape.
+
+### T26 — Weighted routes within an alias — `todo`
+
+**Why.** An alias is one primary plus ordered fallbacks. Sometimes the
+right shape is to *split* traffic across two models at the same provider -
+a cheap fast one and a strong one - rather than to treat one as a
+failure fallback.
+
+**Scope.** A route may carry a weight. The alias selects among its
+weighted routes by weight, **sticky per conversation** so a long exchange
+stays on one model (which preserves the provider's cache and the
+reasoning continuity).
+
+* A pool and a fallback are **different concepts** and must not be
+  overloaded onto one field. A pool is a deliberate distribution; a
+  fallback is a failure path.
+* A failure inside the pool is a fallback, and it obeys the existing
+  opt-in rules: the alias must authorise it, the provider must be
+  confirmed, the trigger must be enabled, and it never happens after a
+  stream or a tool-bearing request.
+
+**Care.** This is the feature most likely to be over-engineered for a
+single owner. It should land only if the simpler shapes have been used.
+
+### T27 — Honour a client-supplied request id — `todo`
+
+**Why.** The gateway invents `req_<timestamp>` (`http/app.py:359`). A
+client that already correlates its own requests cannot join the two
+records together.
+
+**Scope.** Accept `X-Request-Id`, validate it - length, character set, no
+control characters - and record it beside the gateway's own id. A client
+value that fails validation is **rejected, not echoed**, because it reaches
+the log line and the ledger.
+
+**Rule.** The gateway's own id stays authoritative. A client id is a
+correlation aid, never an identifier the gateway trusts.
+
+### T28 — Keepalive comments on a long stream — `todo`
+
+**Why.** A stream that produces nothing for a while can be dropped by an
+idle client or an intermediary. The ChatGPT upstream is streaming-only and
+can be slow to produce its first token.
+
+**Scope.** While a response is streaming and nothing has been written for
+N seconds, emit an SSE comment (`: ping`) into the **client-facing**
+stream. A comment is valid in SSE for every dialect, and it carries no
+content.
+
+**Care.** The comment belongs to the gateway's output, never to the
+upstream's frames, and it must not disturb the frame framing that
+`tests/test_sse_framing.py` checks.
+
+### T29 — A concurrency cap per provider — `todo`
+
+**Why.** The server is thread-per-request with no cap
+(`http/core.py:326`). One busy client can saturate a provider account and
+earn a rate limit that the owner then has to wait out.
+
+**Scope.** A bounded number of concurrent in-flight requests per
+provider. When the cap is reached, the request is refused with the
+`rate_limited` error class and a clear message.
+
+**Note.** This is a **local** protection, and it must be described as
+such. It is not a guarantee the provider made, and the console must not
+imply it is. It is the provider-side counterpart to T10's per-client
+cap.
+
+### T30 — Groups of aliases — `todo`
+
+**Why.** An owner with a dozen aliases wants to publish or disable a
+family of them together - "all the coding aliases", "everything that
+touches the cheap model".
+
+**Scope.** A tag on each alias and a bulk publish/disable over a tag. A
+group is a **convenience layer only**: it changes no route, no policy and
+no limit, and each alias keeps its own configuration.
+
+**Care.** A group must never imply a shared fallback chain or a shared
+budget. Those stay per alias, because a shared fallback would quietly
+merge two privacy decisions.
+
+### T31 — One provider health view — `todo`
+
+**Why.** The facts already exist and are scattered: `ProviderState` holds
+`state`, `last_test_at`, `last_error` and `catalog_observed_at`
+(`config.py:196-201`), and `CooldownState.snapshot()` holds the cooldowns.
+There is no single place that answers "which provider is healthy right
+now?".
+
+**Scope.** One view: per provider, the connection state, the last test and
+its outcome, the last error, when the catalogue was last observed, the
+model count, the cooldown countdown, and the recent success and failure
+rate from the ledger.
+
+**Depends on.** **T23** for the rates; the rest is available now.
+
+### T32 — A durable circuit breaker, remembered across restarts — `todo`
+
+**Why.** The gateway already has a cooldown, and it is the right idea in
+the wrong shape. `CooldownState` (`core/routing.py:100-145`) is
+**in-memory only**, keyed by **provider**, with a **flat** duration taken
+from the alias's `cooldown_seconds`. So:
+
+* A **restart during an outage** wipes the memory and the gateway
+  immediately hammers the exhausted provider again. That is exactly the
+  moment a cooldown is worth most.
+* An **exhausted allowance** and a **single 520 from an edge** get the
+  same five minutes. For a monthly allowance, five minutes is worthless;
+  for one transient error, five minutes is too aggressive.
+* Every failure sets the **same** duration, so repeated failures do not
+  back off further, and a success does not reset anything.
+* When the cooldown expires, **everything returns at once**, with no
+  probe to find out whether the provider recovered.
+* The key is the **provider**, so one route's failure benches every model
+  at that provider - and two aliases with different `cooldown_seconds`
+  fight over the same key, because the map is shared by the whole router.
+* The provider's own **`Retry-After` is discarded**: the adapter does not
+  keep the response headers, so the one number the provider gives us
+  about how long to wait never reaches the router.
+
+**Scope.** Replace the flat timer with a **circuit breaker per route**
+(`provider` + `model`), persisted in the state volume.
+
+* **It is a local retry policy, never evidence that the provider reset.**
+  That wording is already in the code and must survive.
+* **Distinct classes get distinct treatment.** `exhausted` is a sticky
+  condition - the allowance is gone - so it opens for a long time. A
+  `transient` error is a blip, so it opens briefly and only after
+  consecutive failures. `rate_limited` is its own case.
+* **Escalating backoff.** Consecutive failures lengthen the open window;
+  a success closes the circuit and resets the counter.
+* **Half-open.** When the window ends, exactly **one** request is let
+  through to test recovery. Success closes the circuit; failure reopens it
+  for longer.
+* **It survives a restart**, so a gateway that comes back up during an
+  outage stays out of the way. The stored state is metadata only -
+  provider, model, error class, timestamps - never content.
+* **It has a maximum age**, so the store cannot grow without bound, and
+  an entry that is older than its maximum is simply forgotten.
+* The route is still **recorded as skipped, with its reason**, so a
+  cooldown can never look like a silent failover (the rule R5 established).
+* When the circuit is open, the alias's **existing fallback policy**
+  decides what happens next. Provider-wide behaviour then emerges on its
+  own: an exhausted account fails every route at that provider, and each
+  one opens its own circuit.
+
+**Done when.** The circuit state survives a restart, the classes get
+different windows, the backoff escalates, one probe is let through, and
+every skip is recorded with its reason.
+
+### T33 — Honour the provider's `Retry-After` — `done`
+
+**Landed.** The header is read at the single choke point where an
+upstream response becomes an error, carried on the `AdapterError`, and
+used as the cooldown's window.
+
+**Why.** When a provider rate-limits a request, it usually says how long
+to wait. The adapter does not keep the response headers
+(`adapters/http_client.py`), so the number is thrown away and the gateway
+guesses.
+
+**Scope.** Carry `Retry-After` (both the seconds and the HTTP-date form)
+on the `AdapterError`, and use it as the circuit's window when it is
+present and sane.
+
+**Rules.** It is a **hint from the provider**, so it is bounded: a
+hostile or mistaken value must not bench a route for a week. A value that
+is absent, unparseable or absurd falls back to the configured policy, and
+the circuit records which of the two it used.
+
+**Resolution.** `parse_retry_after` reads both forms - the seconds form
+and the HTTP-date form - and returns nothing for a value that is
+unparseable, negative or already in the past. A value longer than
+`MAX_RETRY_AFTER_SECONDS` (3600) is **clamped**, not taken literally,
+because waiting too long is the safer error. The header is read at
+`error_from_response`, the one place where an upstream response becomes
+an `AdapterError`, and both adapters pass their response headers to it.
+
+The window is the **longer** of the local policy and the provider's ask:
+the gateway never retries earlier than either asks for. The cooldown
+records which of the two it used, and the skip says so - *"provider is in
+a local cooldown for 3600s (the provider asked us to wait 3600s)"*.
+
+**Evidence:** `tests/test_retry_after.py` - both header forms; unusable
+values; the clamp; the longer-window rule in all three directions; the
+skip reason; the cooldown details; and a real 429 with a real header
+driven through the OpenCode Go adapter.
+
+### T34 — Decide whether a response cache may exist at all — `blocked`
+
+**Why.** "Cache a request" can also mean *cache the response*, so that an
+identical request is served without calling the provider. That is a
+different feature, and it collides with two decisions this project has
+already made.
+
+* **It stores prompts and completions.** The product's promise is that it
+  does not store prompts, responses or response content. A disk cache
+  breaks that outright; a memory cache still puts the content in RAM and
+  in swap.
+* **It leaks between callers.** LAN API invocation is anonymous by
+  design - any peer may invoke any published alias. A shared cache would
+  serve one caller's answer to another. Keying it per client would need
+  the client identity the product deliberately does not authenticate.
+* **It is wrong for most requests.** A cached answer for a request with
+  temperature, tools or reasoning is stale by construction.
+
+**This is a decision for the owner, not a feature to assume.** If it is
+wanted, it must be explicitly opt-in, per client, off by default, and
+bounded - and the README's storage promise must change to match. The
+failure-state cache in T32 has none of these problems, because it stores
+no content.
+
+---
+
 ## Summary
 
 | ID | Item | Tier | Status |
@@ -514,6 +874,20 @@ when every provider is in cooldown.
 | T18 | Reuse upstream connections to the providers | perf | todo |
 | T19 | Stop deep-copying the configuration on every read | perf | todo |
 | T20 | Separate the connect timeout from the read timeout | perf | todo |
+| T21 | A request policy per alias | 4 | todo |
+| T22 | A budget per alias, enforced locally | 4 | todo |
+| T23 | Statistics per alias | 4 | todo |
+| T24 | Export the ledger | 4 | todo |
+| T25 | A dry run: show the upstream payload without sending it | 4 | todo |
+| T26 | Weighted routes within an alias | 4 | todo |
+| T27 | Honour a client-supplied request id | 4 | todo |
+| T28 | Keepalive comments on a long stream | 4 | todo |
+| T29 | A concurrency cap per provider | 4 | todo |
+| T30 | Groups of aliases | 4 | todo |
+| T31 | One provider health view | 4 | todo |
+| T32 | A durable circuit breaker, remembered across restarts | 4 | todo |
+| T33 | Honour the provider's `Retry-After` | 4 | **done** |
+| T34 | Decide whether a response cache may exist at all | 4 | blocked |
 
 ## Suggested order
 
@@ -533,4 +907,17 @@ when every provider is in cooldown.
 9. **T10, T11, T12** — robustness and presentation.
 10. **T18, T19, T20** — network and CPU efficiency, once the latency
     defect is gone.
-11. **T13–T15** — breadth, once the core is complete.
+11. **T25** — the dry run. It is the cheapest of the new capabilities and
+    the best tool against this project's actual bug class: it would have
+    caught R9, R18, R21 and R25 on the day they were found.
+12. **T4, then T21** — the canonical thinking vocabulary first, then the
+    owner's per-alias thinking controls, so there is only ever one
+    vocabulary.
+13. **T2, then T22 and T23** — the numbers first, then the budget and
+    the per-alias statistics that act on them.
+14. **T13–T15** — breadth, once the core is complete.
+15. **T26–T31** — the remaining control-plane items, in the order the
+    owner finds them useful.
+16. **T32, T33** — the failure-state cache. It is metadata only, it
+    survives a restart, and it stops the gateway from hammering a provider
+    it already knows is exhausted. T33 is the small half.

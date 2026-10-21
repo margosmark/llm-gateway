@@ -928,12 +928,52 @@ headers without the body, and that each streamed frame is a single write.
 
 **Planned as** `docs/TODO.md` item **T17**.
 
+### R29 — The provider's `Retry-After` was discarded — **closed**
+**Severity: medium policy-effectiveness defect.** *(closed)*
+
+When a provider rate-limits a request, it usually says how long to wait.
+The gateway threw that number away: `error_from_response` never received
+the upstream response headers (`src/gateway/adapters/base.py`), and the
+adapter did not keep them either. The cooldown therefore always used the
+alias's flat `cooldown_seconds` - five minutes by default - whatever the
+provider had asked for.
+
+The consequence is the wrong behaviour in both directions. A provider
+that says *"come back in an hour"* is called again after five minutes,
+so the gateway spends the owner's allowance on requests the provider has
+already refused. And a provider that says *"come back in ten seconds"* is
+still benched for five.
+
+**Resolution.** `parse_retry_after` reads both forms of the header - the
+seconds form and the HTTP-date form - and returns nothing for a value
+that is unparseable, negative or already in the past. A value longer than
+`MAX_RETRY_AFTER_SECONDS` (an hour) is **clamped**, not taken literally,
+because waiting too long is the safer error. The header is read at
+`error_from_response`, the one place where an upstream response becomes
+an `AdapterError`, and both adapters pass their response headers to it.
+
+The window is the **longer** of the local policy and the provider's ask,
+so the gateway never retries earlier than either asks for. The cooldown
+records which of the two it used, and the skip reason says so:
+*"provider is in a local cooldown for 3600s (the provider asked us to
+wait 3600s)"*.
+
+The cooldown remains what it always was - a **local retry policy, never
+evidence that the provider reset**.
+
+**Evidence:** `tests/test_retry_after.py` - both header forms; unusable
+values; the clamp; the longer-window rule in all three directions; the
+skip reason; the cooldown details; and a real 429 carrying a real header
+driven through the OpenCode Go adapter.
+
+**Planned as** `docs/TODO.md` item **T33**.
+
 ## Recommended order
 
-Findings R0-R24 are closed or superseded. **R25, R26 and R27 are open**;
-all three are planned in `docs/TODO.md` (T4, T2 and T16). R28 is closed.
-The register is kept so the next agent can see what was already paid for
-in time.
+Findings R0-R24, R28 and R29 are closed or superseded. **R25, R26 and R27
+are open**; all three are planned in `docs/TODO.md` (T4, T2 and T16). The
+register is kept so the next agent can see what was already paid for in
+time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or
@@ -950,7 +990,6 @@ in time.
    or cost recorded) and **R27** (a manual entry discarding published
    capability metadata). The agreed order is `docs/TODO.md` T1, T4, T2, T3,
    T16.
-
 ## Trusted LAN admin-mode candidate update
 
 The approved single-listener change resolves the former R0 first-passphrase

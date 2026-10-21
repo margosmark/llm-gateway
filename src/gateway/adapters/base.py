@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Iterable, Iterator, Protocol
 
 from gateway.config import (
@@ -87,6 +89,66 @@ CLASS_MESSAGES = {
 
 RETRYABLE_CLASSES = frozenset({ERROR_TRANSIENT, ERROR_RATE_LIMITED})
 
+#: The longest window a provider's ``Retry-After`` may ask for.
+#:
+#: The provider is the only party that knows how long its own allowance
+#: takes to recover, so its answer is worth honouring - but it is still a
+#: value from the network, and a hostile or mistaken one must not bench a
+#: route for a week. Anything longer is clamped to this.
+MAX_RETRY_AFTER_SECONDS = 3600
+
+
+def parse_retry_after(value: Any, now: datetime | None = None) -> int | None:
+    """Read a provider's ``Retry-After`` as a number of seconds.
+
+    The header has two forms: a number of seconds, and an HTTP date. Both
+    are accepted. Anything unusable - unparseable, negative, already in
+    the past - yields ``None``, which means "the provider did not say, so
+    use the local policy".
+
+    A value longer than :data:`MAX_RETRY_AFTER_SECONDS` is clamped rather
+    than discarded, because waiting too long is safer than waiting too
+    little.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    # The seconds form.
+    if text.isdigit():
+        seconds = int(text)
+        return min(seconds, MAX_RETRY_AFTER_SECONDS)
+
+    # The HTTP-date form.
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    seconds = int((when - reference).total_seconds())
+    if seconds <= 0:
+        # The window has already passed. There is nothing to wait for.
+        return None
+    return min(seconds, MAX_RETRY_AFTER_SECONDS)
+
+
+def retry_after_from_headers(headers: dict[str, str] | None) -> int | None:
+    """Read ``Retry-After`` out of an upstream response's headers."""
+    if not isinstance(headers, dict):
+        return None
+    for key, value in headers.items():
+        if isinstance(key, str) and key.lower() == "retry-after":
+            return parse_retry_after(value)
+    return None
+
 
 class AdapterError(Exception):
     """A provider failure, classified into exactly one error class."""
@@ -98,11 +160,16 @@ class AdapterError(Exception):
         provider_id: str | None = None,
         status: int | None = None,
         upstream_code: str | None = None,
+        retry_after: int | None = None,
     ) -> None:
         self.error_class = error_class
         self.provider_id = provider_id
         self.status = status
         self.upstream_code = upstream_code
+        #: How long the provider asked the gateway to wait, in seconds. It
+        #: is a hint from the provider about its own recovery, not evidence
+        #: that the provider has recovered.
+        self.retry_after = retry_after
         self.message = message or CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
         super().__init__(self.message)
 
@@ -118,6 +185,7 @@ class AdapterError(Exception):
             "status": self.status,
             "upstream_code": self.upstream_code,
             "retryable": self.retryable,
+            "retry_after": self.retry_after,
         }
 
 
@@ -257,11 +325,16 @@ def error_from_response(
     provider_id: str,
     payload: Any = None,
     operation: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> AdapterError:
     """Build a classified, safe error from an upstream response.
 
     *operation* names what was being attempted, so a failure says which
     upstream call it was rather than only how it was classified.
+
+    *headers* carries the upstream response headers, so the provider's own
+    ``Retry-After`` reaches the router. It is the only party that knows
+    how long its own allowance takes to recover.
     """
     code = _extract_upstream_code(payload)
     error_class = classify_status(status, payload, code)
@@ -280,6 +353,7 @@ def error_from_response(
         provider_id=provider_id,
         status=status,
         upstream_code=code,
+        retry_after=retry_after_from_headers(headers),
     )
 
 

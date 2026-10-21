@@ -178,6 +178,24 @@ confirmed allowance exhaustion.
 The router only decides a fallback before it returns an upstream response. It
 does not retry a stream after the caller has begun receiving bytes.
 
+### Cooldowns
+
+A route that fails in a way the owner has enabled a trigger for is put
+into a **local cooldown**: the provider is skipped for a while, and the
+skip is recorded with its reason, so a cooldown can never look like a
+silent failover.
+
+A cooldown is a **local retry policy, never evidence that the provider
+reset**. There are no background probes and no health checks.
+
+The window is the **longer** of two answers: the alias's own
+`cooldown_seconds`, and the provider's `Retry-After` when it sends one.
+The provider is the only party that knows how long its own allowance takes
+to recover, so its answer is honoured - but it is a value from the
+network, so it is bounded to an hour, and a value that is unparseable,
+negative or already in the past is ignored in favour of the local policy.
+The cooldown records which of the two it used, and the skip says so.
+
 ## Release identity
 
 `GET /version` returns exactly four keys: `service`, `source_revision`,

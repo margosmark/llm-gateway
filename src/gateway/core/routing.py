@@ -105,12 +105,15 @@ class CooldownState:
     """
 
     _until: dict[str, float] = field(default_factory=dict)
+    #: Why each cooldown was set, so a skip can say so.
+    _reasons: dict[str, str] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def set(self, provider_id: str, seconds: int) -> float:
+    def set(self, provider_id: str, seconds: int, reason: str | None = None) -> float:
         until = time.monotonic() + max(0, seconds)
         with self._lock:
             self._until[provider_id] = until
+            self._reasons[provider_id] = reason or ""
         return until
 
     def active(self, provider_id: str) -> bool:
@@ -125,17 +128,34 @@ class CooldownState:
             return 0
         return max(0, int(until - time.monotonic()))
 
+    def reason(self, provider_id: str) -> str:
+        """Why the cooldown was set, if it was set for a stated reason."""
+        with self._lock:
+            return self._reasons.get(provider_id, "")
+
     def clear(self, provider_id: str | None = None) -> None:
         with self._lock:
             if provider_id is None:
                 self._until.clear()
+                self._reasons.clear()
             else:
                 self._until.pop(provider_id, None)
+                self._reasons.pop(provider_id, None)
 
     def snapshot(self) -> dict[str, int]:
         with self._lock:
             now = time.monotonic()
             return {key: max(0, int(value - now)) for key, value in self._until.items() if value > now}
+
+    def details(self) -> dict[str, dict[str, object]]:
+        """The remaining time and the reason for each cooldown."""
+        with self._lock:
+            now = time.monotonic()
+            return {
+                key: {"remaining_seconds": max(0, int(value - now)), "reason": self._reasons.get(key, "")}
+                for key, value in self._until.items()
+                if value > now
+            }
 
 
 @dataclass
@@ -280,7 +300,11 @@ class Router:
                 candidates.append(candidate)
                 continue
             if self._cooldown.active(route.provider):
-                candidate.excluded_reason = f"provider is in a local cooldown for {self._cooldown.remaining(route.provider)}s"
+                reason = self._cooldown.reason(route.provider)
+                suffix = f" ({reason})" if reason else ""
+                candidate.excluded_reason = (
+                    f"provider is in a local cooldown for {self._cooldown.remaining(route.provider)}s{suffix}"
+                )
                 candidates.append(candidate)
                 continue
 
@@ -648,14 +672,32 @@ class Router:
         )
 
     def _maybe_cooldown(self, alias: Alias, candidate: Candidate, error: AdapterError) -> None:
-        """Apply the local cooldown policy after a qualifying failure."""
+        """Apply the local cooldown policy after a qualifying failure.
+
+        The provider's own ``Retry-After`` is honoured when it asks for
+        **longer** than the local policy. Waiting too little is the worse
+        error, so the window is the longer of the two - and the reason is
+        recorded, so the skip says which one it was.
+        """
         trigger = TRIGGER_FOR_ERROR.get(error.error_class)
         if trigger is None:
             return
         if trigger not in alias.fallback_triggers:
             return
-        if alias.cooldown_seconds > 0:
-            self._cooldown.set(candidate.route.provider, alias.cooldown_seconds)
+        policy = alias.cooldown_seconds
+        asked = error.retry_after
+        if policy > 0:
+            seconds = policy
+            reason = f"the local cooldown policy for this alias is {policy}s"
+        elif asked:
+            seconds = asked
+            reason = f"the provider asked us to wait {asked}s"
+        else:
+            return
+        if asked and asked > seconds:
+            seconds = asked
+            reason = f"the provider asked us to wait {asked}s"
+        self._cooldown.set(candidate.route.provider, seconds, reason)
 
     # --- helpers for the console -----------------------------------------
 
