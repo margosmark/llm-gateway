@@ -65,7 +65,24 @@ error echo. Provider calls must not follow redirects.
 
 ## Container and release verification
 
-Build the candidate with the exact source identity intended for release:
+**One command builds, deploys, publishes the identity and verifies it:**
+
+```sh
+python3 scripts/release.py --build --image personal-llm-gateway:candidate
+```
+
+It reads the revision and the tree from the checkout, stamps them into the
+image, starts the Compose deployment, writes the image digest into the state
+volume, and then verifies from outside the container that `/version` reports
+exactly that identity, that the running container's image is that image, and
+that the process listens only on the configured address.
+
+**Do not deploy with a bare `docker compose up -d --build`.** Compose passes
+`SOURCE_REVISION` through from the environment, so without it the image is
+built with `unknown` and `/version` cannot say what is running. The gateway
+warns about this at startup, and the release step is the fix.
+
+To build and gate without deploying:
 
 ```sh
 SOURCE_REVISION="$(git rev-parse HEAD)"
@@ -95,6 +112,28 @@ curl -sS http://<private-ip>:<port>/v1/models
 
 Do not bind `0.0.0.0`, `::`, or a public address. Do not add router/firewall
 rules, a public reverse proxy, or a provider login as part of a test.
+
+`tests/test_compose_deployment.py` exercises the real Compose deployment on
+its own project and volume: first boot, a configuration write that survives
+a restart, the non-root runtime, the exact listener, the absence of the
+retired port, and the release identity. It is skipped when Docker is absent.
+
+## Probing an upstream
+
+The unit suite cannot tell you the upstream's request or response *shape*,
+and that shape is where every defect in this project has been. When a
+contract is unclear, probe the real endpoint:
+
+* **from inside the container**, so the egress path matches production and
+  the stored credential is used;
+* printing **only status codes and field names** - never a token, a device
+  code, a prompt or a completion;
+* with **no credential of your own in the command line**.
+
+`docs/PROVIDER_CONTRACTS.md` gives the procedure and the contracts that were
+established this way. A probe from the host can give a different answer from
+the same request - the same request answered 200 from one path and 520 from
+another.
 
 ## Review standard
 

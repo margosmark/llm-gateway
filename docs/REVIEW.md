@@ -28,13 +28,18 @@ runtime-verified here.
   atomically persisted; provider credential files are separate and intended to
   be owner-only.
 * Browser controls are layered: canonical Host, forwarded-header rejection,
-  origin validation for browser mutations, owner sessions, and CSRF.
-* Setup is a separate listener and credential enrollment is rejected on the
-  owner console. It is owner-session/CSRF protected whether the operator
-  binds it privately to LAN (default) or loopback.
+  and origin validation for browser mutations. There is no owner session and
+  no CSRF bootstrap, by product decision.
+* There is one listener. The owner console, the configuration API and the
+  OpenAI-compatible API share it, and any peer that can reach it is an
+  administrator by product decision.
 * Cross-provider fallback is opt-in and has hard stops for tools and unsafe
   classes. The test suite covers most of those safety decisions.
-* `/version` has a deliberately fixed, metadata-only schema.
+* A capability and a preference are treated differently: dialect, streaming
+  and tools are hard requirements, while a reasoning effort is dropped for a
+  route that cannot honour it - and the substitution is recorded.
+* `/version` has a deliberately fixed, metadata-only schema, and a
+  deployment that cannot identify itself warns about it at startup.
 
 These are code/test observations, not a claim that a provider account or a
 container deployment has been exercised.
@@ -582,7 +587,127 @@ warning.
 * `ARCHITECTURE.md` and `DEVELOPMENT.md` establish the verified runtime map,
   security/data boundaries, and an exact-image/Compose verification standard.
 
+### R18 — The SSE frames were not terminated — **closed**
+**Severity: release blocker for every streaming client.** *(closed; found by
+live testing against a real client)*
+
+The upstream reader consumed the blank line that terminates an SSE frame and
+did not include it in the frame it yielded, so every **passthroughed** stream
+reached the client as single-newline terminated lines with no frame separator
+at all. A lenient reader still sees the lines, so this looked fine to `curl`
+and in the console. A client that parses SSE strictly reads the whole stream
+as one event, finds no `finish_reason`, and reports *"provider returned an
+empty stream with no finish_reason"*.
+
+This affected every same-dialect passthrough - in practice every OpenCode Go
+streaming response. Converted streams were unaffected, because the converter
+re-frames what it emits, which is why ChatGPT streaming worked and OpenCode
+Go streaming never did.
+
+**Resolution.** Each yielded frame is a complete frame: its data lines plus
+the blank line that ends it, whether the frame ended at a blank line or at
+the end of the stream.
+
+**Evidence:** `tests/test_sse_framing.py` parses the output the way a
+strict client does, and asserts the terminator is present in the raw bytes.
+
+### R19 — A reasoning effort excluded the route — **closed**
+**Severity: high correctness/availability risk.** *(closed)*
+
+The capability check treated an unsupported `reasoning_effort` as a hard
+requirement and **excluded** the route. Most OpenCode Go models publish no
+reasoning levels at all - 2 of 37 - so every one of them was excluded from
+any request that asked for one, and a configured fallback was effectively
+dead for exactly the kind of request a coding agent sends. The route was
+skipped before the fallback policy was ever consulted, and the request failed
+with "no eligible route".
+
+**Resolution.** A capability and a preference are now different things.
+Dialect, streaming and function tools remain hard requirements. A
+`reasoning_effort` is a preference: the route stays eligible, the effort is
+dropped *for that route*, and the substitution is recorded. Only the route
+that actually served the request records it.
+
+**Evidence:** `tests/test_degraded_route.py`.
+
+### R20 — The ChatGPT / Codex upstream is streaming only — **closed**
+**Severity: release blocker for the ChatGPT path.** *(closed; found by
+probing the live endpoint)*
+
+The ChatGPT / Codex backend refuses a Responses request that does not set
+`stream: true`, and it expects the same request fields OpenAI's own Codex
+client sends. The adapter honoured the *client's* stream flag, so a
+non-streaming client sent `stream: false` and the backend answered 400.
+
+Probed directly, one field set at a time:
+
+```text
+stream=false, bare            -> 400
+stream=true,  bare            -> 400
+stream=false, codex fields    -> 400
+stream=true,  codex fields    -> 200
+```
+
+**Resolution.** The adapter always asks the upstream to stream, and sends the
+fields the Codex client sends: `tool_choice`, `parallel_tool_calls`,
+`store: false` and `include`. A client that asked for a single, non-streamed
+completion is served by consuming the upstream stream and presenting the
+result as one object.
+
+**Evidence:** `tests/test_streaming_only_upstream.py`, and the four API
+permutations verified live.
+
+### R21 — The Codex model catalogue has its own shape — **closed**
+**Severity: release blocker for the ChatGPT onboarding flow.** *(closed)*
+
+The Codex catalogue is a list under `models`, and a model is identified by
+its **`slug`**, not by an `id`. The parser looked for `id`, found none, and
+silently reported an empty catalogue - "Catalog refreshed: 0 models" - with
+no error and nothing to act on. The catalogue also carries the reasoning
+levels a model supports, its context window, its visibility, and whether the
+account can use it through the API at all.
+
+**Resolution.** The parser reads the slug and carries the published
+metadata. A model with `supported_in_api: false` is not offered. An
+OpenAI-shaped `{"data": [{"id": ...}]}` catalogue is still accepted.
+
+**Evidence:** `tests/test_adapter_contract.py`, with a fixture in the real
+Codex catalogue shape.
+
+### R22 — The model list request needs the client version — **closed**
+**Severity: release blocker for the ChatGPT onboarding flow.** *(closed)*
+
+The Codex client appends `?client_version=<whole semver>` to the model-list
+URL, and the backend expects it. The adapter called `/models` bare and the
+backend answered `400 invalid_request_error`.
+
+**Resolution.** The gateway appends its own version - honestly identifying
+itself rather than impersonating the Codex client - and the value is
+validated to be a whole semantic version.
+
+**Evidence:** `tests/test_adapter_contract.py`.
+
+### R23 — The release identity could be unknown without anyone noticing — **closed**
+**Severity: medium release-traceability risk.** *(closed)*
+
+A deployment reported `unknown` for all three release fields and nothing
+said so. The image had been built without the source revision and tree, so
+the identity baked in as `unknown`, and the identity was never written to
+the state volume either.
+
+**Resolution.** `scripts/release.py --build` builds from the checkout and
+stamps the revision and the tree, then publishes the image digest into the
+state volume and verifies it. The gateway warns at startup when its release
+identity is unknown, because a deployment that cannot identify itself
+cannot be audited - and because it is easy not to notice.
+
+**Evidence:** `scripts/release.py --build`, and the startup warning in
+`gateway/cli.py`.
+
 ## Recommended order
+
+Every finding above is closed or superseded. The register is kept so the next
+agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or
