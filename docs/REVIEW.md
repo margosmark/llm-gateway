@@ -733,10 +733,116 @@ class body declares the same annotated field name twice.
 the current source and names the exact `(file, line, class, field)` when a
 duplicate is reintroduced.
 
+### R25 — A thinking control was silently dropped on a converted request — **open**
+**Severity: high contract-correctness risk.** *(open)*
+
+`convert_request` forwards a same-dialect payload unchanged, but a
+**converted** request is rebuilt from the normalised form, and the
+normalised form carries only OpenAI's flat `reasoning_effort` string
+(`src/gateway/bridge/requests.py:265`). Two shapes therefore vanish on the
+converted path:
+
+* `reasoning: {"effort": "high"}` - the newer Chat Completions spelling.
+  `_without_disabled_reasoning` reads this exact field for the *disabled*
+  case (`requests.py:58`), so the two code paths disagree about one field.
+* `thinking: {"type": "enabled", "budget_tokens": 32000}` - Anthropic's
+  thinking control, which the gateway does not understand at all.
+
+Verified against the current code:
+
+```text
+chat->chat  (same dialect) : thinking survives
+chat->responses (converted) : thinking is absent from the payload
+chat->responses (converted) : reasoning is absent from the payload
+```
+
+This breaks the bridge's own stated contract: *"Nothing is silently
+dropped. If the target dialect cannot express the request, the request is
+refused."* (`requests.py:7`). A client that asks for a thinking level gets
+a request that succeeded, at a level the owner did not choose, with no
+substitution recorded and no error raised.
+
+**Required fix:** one canonical thinking-level model, parsed from every
+inbound spelling and rendered per dialect; a level the target dialect
+cannot express is refused, and a level the model does not publish is
+dropped *with the substitution recorded*, under the R19 preference rule.
+
+**Planned as** `docs/TODO.md` item **T4**.
+
+### R26 — The published per-token prices are never read, and no request records its usage — **open**
+**Severity: medium observability gap.** *(open)*
+
+Three finished pieces are not connected:
+
+* the bridge already normalises usage on both paths
+  (`src/gateway/bridge/streams.py:174-190`, `bridge/buffered.py:103-127`);
+* `RequestEvent` already has a `token_counters` field
+  (`src/gateway/observability.py:70`) that is **never populated** - it
+  appears in the declaration and its serialiser and nowhere else;
+* the catalogue already publishes `price_input_per_m`,
+  `price_output_per_m` and `price_cached_read_per_m` for 29 of its 37
+  models (`data/go_catalog.json`), and **no code under `src/` reads any of
+  them**. Only `monthly_limit_usd` is used, and only for display.
+
+So the gateway knows the token counts and the prices and reports neither.
+This is the one gap in the project's central honest limitation: the
+provider's allowance is Unknown, and a local spend figure computed from
+counts and published prices is metadata the observability rules already
+permit.
+
+**Required fix:** populate `token_counters` on the buffered and the
+streamed path, compute the cost with the price's source and observation
+date, and aggregate it on the Status page. A model with no published price
+reports Unknown, never zero and never "unlimited".
+
+**Planned as** `docs/TODO.md` item **T2**.
+
+### R27 — Entering a model manually silently discarded its published capability metadata — **open**
+**Severity: medium correctness/honesty risk.** *(open)*
+
+The `manual` model action replaces the whole `ModelEntry` rather than
+merging into it (`src/gateway/http/app.py:835-850`). The replacement
+carries over `enabled`, `dialect` and `retention_class`, and rebuilds
+everything else from defaults. The provider-published fields are therefore
+**discarded**: `context_window`, `context_limit`, `reasoning_efforts`,
+`monthly_limit_usd`, `limits_source`, `limits_observed_at`, and the
+`supports_*` flags.
+
+Verified against the current code, on a discovered `gpt-6-luna`:
+
+```text
+context_window      : 272000  -> None
+context_limit       : 258400  -> None
+reasoning_efforts   : [none,low,medium,high,xhigh,max] -> []
+```
+
+So the alias's context limit silently becomes **Unknown** instead of
+258,400, and a reasoning request is dropped as a degradation instead of
+being honoured - and nothing is shown to the owner, because the action
+returns `{"ok": true}`.
+
+This matters more than an ordinary bug because it is a **documented,
+supported workflow**: the README's troubleshooting table tells the owner to
+"enter it manually and set the dialect" when a model shows an empty
+dialect. The natural fix for a missing dialect therefore destroys the
+context limit and the reasoning levels of the very model it was applied
+to. It is the same failure class the bridge has already been ruled on for
+(R25, R26): a value is silently dropped and the record does not say so.
+
+**Required fix:** the manual action must merge, not replace - it changes
+only the fields the owner actually supplied, and preserves published
+metadata it has no opinion about. A manual entry that cannot supply a
+published fact keeps the published one; it must not silently blank it. Add
+a test that a manual dialect edit preserves the context limit, the
+reasoning levels and the capability flags.
+
+**Planned as** `docs/TODO.md` item **T16**.
+
 ## Recommended order
 
-Every finding above is closed or superseded. The register is kept so the next
-agent can see what was already paid for in time.
+Findings R0-R24 are closed or superseded. **R25, R26 and R27 are open**;
+all three are planned in `docs/TODO.md` (T4, T2 and T16). The register is
+kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or
@@ -749,6 +855,10 @@ agent can see what was already paid for in time.
 6. Tighten **R4** and **R12**, then make observability truthful and complete in
    **R5**.
 7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6** and **R14** with targeted tests and runbook changes. R15 is superseded by removal of the setup surface.
+8. Fix **R25** (a silently dropped thinking control), **R26** (no usage
+   or cost recorded) and **R27** (a manual entry discarding published
+   capability metadata). The agreed order is `docs/TODO.md` T1, T4, T2, T3,
+   T16.
 
 ## Trusted LAN admin-mode candidate update
 
