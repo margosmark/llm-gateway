@@ -38,8 +38,18 @@ never breaks your client's configuration.
 | API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/responses`, plus native Jev `GET /v1/systemone/models` and `POST /v1/systemone` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
 | Request preview | `POST /owner/api/preview` | Trusted LAN | Shows the converted upstream request without calling a provider; Chat Completions body format |
+| Prometheus metrics | `http://10.10.11.109:8765/metrics` | Trusted LAN | Metadata-only operational metrics |
 
-Trusted LAN admin mode: any device that can reach this address can configure
+`GET /metrics` exposes Prometheus text-format metrics derived from the retained
+request metadata ledger and local cooldown state: request and error counts,
+request-latency histogram, fallback counts, and remaining cooldown seconds by
+provider route. It contains no prompt or response content and no credentials.
+No token-total series are exposed; those are intentionally absent while T2 is
+blocked. The endpoint uses the same single-listener trusted-LAN policy as the
+owner console and API: any device able to reach the configured private address
+can access it. It is not a public monitoring endpoint.
+
+Trusted LAN admin mode: any device that can reach this address can configure.
 and use the gateway, including replacing provider credentials. There is no
 owner password, login/session bootstrap, separate setup listener, or
 per-device administrative boundary. Use this only on a LAN you trust.
