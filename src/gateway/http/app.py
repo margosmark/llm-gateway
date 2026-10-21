@@ -65,6 +65,7 @@ from gateway.http.core import Request, Response, Router as HttpRouter, StreamRes
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
 from gateway.logging import RequestLogger
+from gateway.ledger_export import DEFAULT_EXPORT_ROWS, MAX_EXPORT_ROWS, export_records, render_csv, render_json
 from gateway.routes import validate_alias_routes, validate_phase_routing
 from gateway.provider_concurrency import CappedAdapterRegistry, ProviderConcurrency
 from gateway.observability import (
@@ -386,6 +387,7 @@ class GatewayApp:
             r.add(["GET"], prefix + "/style.css", self.handle_static_css)
             r.add(["GET"], prefix + "/api/status", self.handle_public_status)
             r.add(["GET"], prefix + "/api/state", self.handle_state)
+            r.add(["GET"], prefix + "/api/ledger/export", self.handle_ledger_export)
             r.add(["GET"], prefix + "/api/backup/export", self.handle_backup_export)
             r.add(["POST"], prefix + "/api/backup/import", self.handle_backup_import)
 
@@ -825,6 +827,26 @@ class GatewayApp:
 
 
     # --- state -----------------------------------------------------------
+
+    def handle_ledger_export(self, request: Request) -> Response:
+        """Export recent ledger metadata; this read-only route records no event."""
+        raw_limit = request.query_one("limit")
+        try:
+            limit = int(raw_limit) if raw_limit is not None else DEFAULT_EXPORT_ROWS
+        except ValueError:
+            return json_response({"error": {"message": "limit must be an integer", "type": "invalid_export_limit"}}, 400)
+        if limit < 1 or limit > MAX_EXPORT_ROWS:
+            return json_response({"error": {"message": f"limit must be between 1 and {MAX_EXPORT_ROWS}", "type": "invalid_export_limit"}}, 400)
+        events = self.ledger.recent(limit=limit) if self.ledger is not None else []
+        # Validate format even when the ledger is unavailable.
+        format_name = request.query_one("format", "csv")
+        if format_name not in ("csv", "json"):
+            return json_response({"error": {"message": "format must be csv or json", "type": "invalid_export_format"}}, 400)
+        records = export_records(events)
+        body = render_csv(records) if format_name == "csv" else render_json(records)
+        content_type = "text/csv; charset=utf-8" if format_name == "csv" else "application/json; charset=utf-8"
+        filename = "ledger.csv" if format_name == "csv" else "ledger.json"
+        return Response(200, [("Content-Type", content_type), ("Content-Disposition", f'attachment; filename="{filename}"'), ("Cache-Control", "no-store")], body)
 
     def handle_public_status(self, request: Request) -> Response:
         """Safe, unauthenticated status.

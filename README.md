@@ -460,6 +460,11 @@ rate overall and per alias, provider and model, the reasons behind it, and a
 daily series of requests, tokens, fallbacks and errors. Days are reported
 with their own status, so a day with no recorded rows is a gap rather than
 zero, and a rate with no requests behind it is unknown rather than `0.0`.
+Export the recent ledger from the owner console's read-only
+`/owner/api/ledger/export` endpoint; it returns CSV by default or JSON with
+`?format=json`, bounded to 1,000 rows (default 500). Only the six metadata
+columns shown in the ledger table are included, with the same redaction
+rules as the log.
 
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and

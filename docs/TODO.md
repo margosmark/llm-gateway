@@ -822,7 +822,7 @@ only, on the same rules as the ledger.
 survive a restart; without it, the windows are in-memory and the console
 must say so.
 
-### T24 — Export the ledger — `todo`
+### T24 — Export the ledger — `done`
 
 **Why.** The data exists; getting it out of the browser is manual.
 
