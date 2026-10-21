@@ -73,13 +73,75 @@ audit or billing system.
 6. The adapter makes the provider request. The returned provider/model is
    attributed to the route result. A stream is forwarded incrementally.
 
+### The upstream conversation identifier
+
+Some upstreams require a conversation identifier. OpenCode Go refuses a
+request without `x-opencode-session`, and most OpenAI-compatible clients
+send no such header, so the gateway cannot pass one through.
+
+`gateway.session` derives it server-side: stable for the same client and
+alias, different between clients, reduced to a safe bounded alphabet when
+the client supplies a hint, namespaced by provider in the router, and scoped
+to the process so a restart ends the session. The derivation lives in the
+**router**, not in a handler, so every path that reaches a provider carries
+one - the API surface, the alias test, and any future caller.
+
+### Hard requirements and preferences
+
+The eligibility check separates two kinds of mismatch:
+
+* a **hard requirement** - wire dialect, streaming, function tools. A route
+  that cannot satisfy it is excluded, because dropping a tool would change
+  the API contract.
+* a **preference** - `reasoning_effort`. A model that cannot produce the
+  requested depth of reasoning can still answer, so the route stays
+  eligible, the effort is dropped *for that route*, and the substitution is
+  recorded in the attribution and the ledger. It is never silent, and only
+  the route that actually served the request records it.
+
+Most OpenCode Go models publish no reasoning levels, so treating the effort
+as a hard requirement excluded every one of them.
+
+### A streaming-only upstream
+
+The ChatGPT / Codex backend refuses a Responses request that does not set
+`stream: true`. A client that asked for a single, non-streamed completion is
+therefore served by consuming the upstream stream and presenting the result as
+one object.
+
+`gateway.bridge.aggregate` does that: a Responses stream aggregates into the
+final Responses object - the terminal `response.completed` event carries the
+whole thing - and a Chat Completions stream accumulates into one object. The
+result is then converted into the caller's dialect as usual.
+
+### Frame framing
+
+An SSE frame is its data lines **plus** the blank line that ends it. The
+upstream reader yields complete frames, and every emitted frame is
+re-terminated. A stream without the terminator is read by a strict client as
+one event with no finish reason.
+
+### Reported limits
+
+A route's context limit is the **smallest applicable constraint**: the
+provider's working window (not the ceiling it publishes for a config
+override), less the share it reserves for its own system prompt, tool
+overhead and output. At the alias level it is the smallest limit among the
+routes that could serve the request, and **Unknown** if any eligible route's
+limit is not published - a bound that cannot be verified is not a bound.
+
+The limit is reported, not enforced. The gateway has no tokenizer, so it does
+not count a prompt's tokens; the provider is the authority.
+
 ## Provider seam
 
 The routing core knows aliases, error classes, model capabilities, and fallback
 policy. Provider-specific behaviour lives in `gateway.adapters`.
 
 * **ChatGPT / Codex** uses the device-code flow and the Responses dialect.
-  See `CHATGPT_CODEX_CONTRACT.md` for the exact documented/assumed boundary.
+  Its upstream is **streaming only** and expects the same request fields
+  OpenAI's own client sends. See `CHATGPT_CODEX_CONTRACT.md` and
+  `PROVIDER_CONTRACTS.md` for the exact contract.
 * **OpenCode Go** discovers model IDs from its explicit catalogue endpoint.
   The checked-in `data/go_catalog.json` supplies the dated, published mapping
   from model ID to wire dialect. An undocumented dialect is refused rather
@@ -112,7 +174,12 @@ a generic environment or configuration inspector.
 ## Verification boundaries
 
 The unit suite uses fakes and fixtures; it does not authenticate with a
-provider or require credentials. A complete release verification still needs
-an exact-image gate and a Compose/runtime proof, especially for the writable
-state-volume ownership and listener boundaries. See `DEVELOPMENT.md` and the
-open findings in `REVIEW.md`.
+provider or require credentials. It is not a substitute for probing the real
+upstream, because the upstream's request and response *shape* is where the
+defects have been. See `PROVIDER_CONTRACTS.md` for the contracts that were
+established by probing, and for how to probe safely.
+
+A complete release verification still needs an exact-image gate and a
+Compose/runtime proof, especially for the writable state-volume ownership and
+listener boundaries. See `DEVELOPMENT.md` and the open findings in
+`REVIEW.md`.

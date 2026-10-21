@@ -310,6 +310,25 @@ ownership and production `/version` identity still require explicit proof.
 
 ---
 
+## Provider notes
+
+Both upstreams have quirks that are not obvious from their documentation.
+They are recorded in full in [`docs/PROVIDER_CONTRACTS.md`](docs/PROVIDER_CONTRACTS.md),
+with the traps that cost the most time:
+
+* **OpenCode Go requires an `x-opencode-session` header** and refuses a
+  request without it. The gateway derives one server-side, because ordinary
+  OpenAI-compatible clients send none.
+* **The ChatGPT / Codex upstream is streaming only** and expects the same
+  request fields OpenAI's own client sends, including a client version. A
+  client that wants a single, non-streamed object is served by consuming the
+  upstream stream.
+* **The Codex model catalogue has its own shape** — a list under `models`,
+  with each model identified by its `slug`, not an `id`.
+* **SSE frames must be terminated.** A frame is its data lines plus the
+  blank line that ends it; a stream without it is read by a strict client as
+  one event with no finish reason.
+
 ## Known limitations
 
 These are real, and the console reports them honestly rather than hiding
@@ -346,6 +365,16 @@ them.
 * **The bridge is verified against a recorded corpus**, not yet against live
   provider captures. The corpus and its round-trip runner are in
   `tests/fixtures/bridge_corpus.json`.
+* **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
+  a web dashboard, but no machine-readable allowance API for a personal
+  plan, and the gateway calls no undocumented endpoint. Published estimates
+  are shown with their source and date.
+* **OpenCode Go publishes no context windows**, so an alias with an
+  OpenCode Go route reports an unknown context limit. That is the honest
+  answer: the Go service's own limit is what matters, and it does not
+  publish it.
+* **The device-code path is a beta path.** OpenAI documents it; OpenAI does
+  not endorse this gateway's use of it.
 
 ---
 

@@ -10,8 +10,26 @@ in the browser.
 
 ### 1.1 Build the candidate
 
+**The short way** - build, deploy, publish the identity and verify it, in
+one command:
+
 ```sh
 cd /home/marslan/Projects/llmgtwy
+python3 scripts/release.py --build --image personal-llm-gateway:candidate
+```
+
+It reads the revision and the tree from the checkout, stamps them into the
+image, starts the deployment, writes the image digest into the state volume,
+and verifies `/version` reports exactly that identity.
+
+**Do not deploy with a bare `docker compose up -d --build`.** Compose passes
+`SOURCE_REVISION` through from the environment, so without it the image is
+built with `unknown` and `/version` cannot say what is running. The gateway
+warns about this at startup.
+
+To build and gate without deploying:
+
+```sh
 export GATEWAY_BIND=10.10.11.109
 export SOURCE_REVISION="$(git rev-parse HEAD)"
 export SOURCE_TREE="$(git rev-parse HEAD^{tree})"
@@ -173,6 +191,10 @@ revoked by a rollback; the gateway will refresh or reject them on its own.
 | Limits show *Unknown* | The provider publishes no machine-readable allowance for that plan | That is the truthful answer. Check the provider's own console |
 | A request failed with *no eligible route* | Every route was excluded | The error names each excluded route and why |
 | The published catalogue is empty | No alias is published yet | Publish one in Models & Routes |
+| `/version` reports `unknown` | The deployment was not released properly | Deploy with `scripts/release.py --build`; it publishes the identity. The gateway also warns about this at startup |
+| A client reports *an empty stream with no finish reason* | The stream was not framed correctly | Update to a build that emits terminated SSE frames; check the raw bytes for `\n\n` between frames |
+| A fallback did not run | The alias has not authorised it, or the trigger is off | The alias needs **both** the trigger and the confirmation of the fallback provider. The record says which was missing |
+| A fallback did not run and the record says *skipped* | The primary was in a local cooldown | The cooldown is local policy, not evidence the provider reset. It expires on its own |
 
 ---
 

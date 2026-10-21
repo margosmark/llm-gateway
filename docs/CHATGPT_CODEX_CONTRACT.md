@@ -1,25 +1,26 @@
-# ChatGPT / Codex adapter contract
+# The ChatGPT / Codex contract
 
-The normative contract for the ChatGPT/Codex adapter, as implemented. It is
-written so the behaviour can be checked against the cited sources without
-re-reading the web.
+The normative contract for the ChatGPT/Codex adapter, as implemented. It
+says where each fact came from, so a future agent can tell an observed fact
+from an inference.
 
 **Sources**
 
-* Device-code sign-in: <https://learn.chatgpt.com/docs/auth> — officially
-  documented, and labelled **beta**.
-* The gateway forwarding target:
-  <https://learn.chatgpt.com/docs/enterprise/sign-in-with-chatgpt-through-a-gateway>.
-* Gateway compatibility requirements:
-  <https://learn.chatgpt.com/docs/enterprise/gateway-compatibility>.
-* The request contract: OpenAI's own Codex client, `codex-rs/login/`
-  (<https://github.com/openai/codex>), which is the reference implementation
-  of the documented flow.
+* `https://learn.chatgpt.com/docs/auth` — the device-code sign-in flow.
+* `https://learn.chatgpt.com/docs/enterprise/sign-in-with-chatgpt-through-a-gateway`
+  — the forwarding target and its headers.
+* `https://learn.chatgpt.com/docs/enterprise/gateway-compatibility` — the
+  Responses requirements a gateway must preserve.
+* OpenAI's own client, `github.com/openai/codex`:
+  `codex-rs/login/src/device_code_auth.rs` (the device flow),
+  `codex-rs/codex-api/src/endpoint/models.rs` (the model list),
+  `codex-rs/codex-api/src/common.rs` (the request and response shapes),
+  `codex-rs/codex-api/src/endpoint/responses.rs` (the responses endpoint).
+* Probing the live endpoints, from inside the container, printing only
+  status codes and field names.
 
-**Not documented by OpenAI:** that a third-party gateway may serve a
-consumer ChatGPT subscription to arbitrary LAN clients. The mechanism below
-is implemented from provider-integration behaviour. It is not an OpenAI
-endorsement, and the console says so.
+The cross-provider view, and the traps, are in
+[`PROVIDER_CONTRACTS.md`](PROVIDER_CONTRACTS.md).
 
 ---
 
@@ -27,7 +28,7 @@ endorsement, and the console says so.
 
 ### 1.1 Request a user code
 
-```
+```text
 POST https://auth.openai.com/api/accounts/deviceauth/usercode
 Content-Type: application/json
 
@@ -37,12 +38,12 @@ Content-Type: application/json
 Response:
 
 ```json
-{"device_auth_id": "...", "user_code": "ABCD-EFGH", "interval": 5}
+{"device_auth_id": "...", "user_code": "7ZIV-3RO67", "interval": "5"}
 ```
 
-* `client_id` is the public OAuth client id used by OpenAI's own Codex
-  client for device-code sign-in. It is an identifier, not a secret.
-* `interval` is the polling interval in seconds.
+* `client_id` is the **public** OAuth client id used by OpenAI's own Codex
+  client for device-code sign-in. It is an identifier, not a secret, and it
+  is overridable.
 * A `404` means device-code sign-in is **not enabled** for the account or
   workspace. The setup UI states the prerequisite before the flow starts.
 
@@ -61,18 +62,14 @@ The code is shown once, as part of the explicit "Connect ChatGPT" action. It
 is never logged, never written to the ledger, and never returned by a later
 read.
 
-The start response also carries an **opaque poll handle** — a random value
-the gateway minted. The provider's own `device_auth_id` never leaves the
-process: the browser is given the handle, and the gateway uses it to find
-the pending record again. The pending record lives in memory only and
-expires with the code.
+**The browser never holds the provider's `device_auth_id`.** The start
+action returns an **opaque poll handle** that the gateway minted, and the
+pending record is keyed by that handle. The provider's own identifier never
+leaves the process.
 
 ### 1.3 Poll for approval
 
-The console polls the gateway with the opaque handle, and the gateway polls
-the provider with its own `device_auth_id`:
-
-```
+```text
 POST https://auth.openai.com/api/accounts/deviceauth/token
 Content-Type: application/json
 
@@ -85,14 +82,12 @@ Content-Type: application/json
 | `403`, `404` | Not yet. Keep polling, sleeping `interval` seconds. |
 | anything else | The attempt failed. Report it and stop. |
 
-The console polls at the interval the provider asked for. The poll response
-never repeats the one-time code.
-
-Maximum wait: **15 minutes**.
+Maximum wait: **15 minutes**. The console polls at the provider's interval
+and keeps polling until the state is terminal.
 
 ### 1.4 Exchange the authorization code
 
-```
+```text
 POST https://auth.openai.com/oauth/token
 Content-Type: application/x-www-form-urlencoded
 
@@ -103,16 +98,15 @@ grant_type=authorization_code
 &code_verifier=<code_verifier>
 ```
 
-Response: `{"id_token": "...", "access_token": "...", "refresh_token": "..."}`.
+Response: `{"id_token", "access_token", "refresh_token"}`.
 
 The `chatgpt_account_id` claim of the `id_token` is read and stored, because
 the upstream expects it to be forwarded.
 
 ### 1.5 Refresh
 
-```
+```text
 POST https://auth.openai.com/oauth/token
-Content-Type: application/x-www-form-urlencoded
 
 grant_type=refresh_token
 &client_id=app_EMoamEEZ73f0CkXaXp7hrann
@@ -129,76 +123,167 @@ session revocation is the account owner's action**, and the console says so.
 
 ---
 
-## 2. Inference
+## 2. The model catalogue
 
-### 2.1 The upstream
-
-```
-https://chatgpt.com/backend-api/codex/models
-https://chatgpt.com/backend-api/codex/responses
-```
-
-The OpenAI gateway documentation states that a gateway's Codex-compatible
-base URL must proxy `/models` and `/responses` to this base.
-
-### 2.2 The headers
-
-```
+```text
+GET https://chatgpt.com/backend-api/codex/models?client_version=<semver>
 Authorization: Bearer <access_token>
 ChatGPT-Account-ID: <chatgpt_account_id>     # when known
-Content-Type: application/json
-Accept: text/event-stream                     # for a streaming request
-User-Agent: personal-llm-gateway/2.0
 ```
 
-The account id is forwarded unchanged. No gateway credential is added, and
-none is ever forwarded upstream.
+* **`client_version` is required.** The reference client appends it
+  (`append_client_version_query` in `codex-rs/codex-api/src/endpoint/models.rs`)
+  and the backend expects it. Without it the backend answers
+  `400 invalid_request_error`. The gateway sends its own version — honestly
+  identifying itself rather than impersonating the Codex client — and the
+  value is validated to be a whole semantic version.
 
-### 2.3 The dialect
+* **The catalogue has its own shape.** It is a list under `models`, and a
+  model is identified by its **`slug`**, not by an `id`:
 
-**Responses API only.** OpenAI's own compatibility requirements state that
-`wire_api = "chat"` and a Chat Completions-only endpoint are not supported.
-The gateway therefore converts a Chat Completions request into a Responses
-request before calling this upstream — see `src/gateway/bridge/`.
+  ```json
+  {"models": [{
+     "slug": "gpt-6-luna",
+     "display_name": "GPT-6 Luna",
+     "supported_in_api": true,
+     "visibility": "list",
+     "context_window": 272000,
+     "max_context_window": 872000,
+     "effective_context_window_percent": 95,
+     "supported_reasoning_levels": [{"effort": "high", "description": "..."}]
+  }]}
+  ```
 
-### 2.4 Streaming
+  A parser that looks for `id` finds nothing and silently reports an empty
+  catalogue. A model with `supported_in_api: false` is not offered, because
+  the gateway would only fail on it later.
 
-The upstream is streamed incrementally, never buffered:
-
-* SSE frames are forwarded as they arrive;
-* the terminal `response.completed` event is preserved;
-* error and failure events are forwarded, so a failed response is
-  distinguishable from a stalled connection.
+* **Context windows.** `context_window` is the working window;
+  `max_context_window` is the ceiling for a *config override*, not a
+  competing limit; `effective_context_window_percent` is the share usable
+  for input after the provider reserves headroom. The effective limit is
+  `min(context_window, max_context_window) × percent / 100` — 258,400 for
+  `gpt-6-luna`. See `ARCHITECTURE.md` for the alias-level rule.
 
 ---
 
-## 3. What the adapter never does
+## 3. Inference
 
-* It never re-displays the device code, the access token, the refresh token,
+### 3.1 The upstream
+
+```text
+POST https://chatgpt.com/backend-api/codex/responses
+```
+
+### 3.2 The headers
+
+```text
+Authorization: Bearer <access_token>
+ChatGPT-Account-ID: <chatgpt_account_id>     # when known
+Content-Type: application/json
+Accept: text/event-stream
+User-Agent: personal-llm-gateway/2.0
+```
+
+No gateway credential is added, and none is ever forwarded upstream.
+
+### 3.3 The request
+
+The upstream is **streaming only**, and it expects the same fields the
+reference client sends:
+
+```json
+{
+  "model": "gpt-6-luna",
+  "input": [...],
+  "stream": true,
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "store": false,
+  "include": ["reasoning.encrypted_content"]
+}
+```
+
+* `stream` is always `true` upstream. The backend refuses anything else.
+* `store: false` means the provider is never asked to retain the response.
+* A caller may override `tool_choice` and `parallel_tool_calls`; the
+  gateway sets `stream` itself, because it has to.
+
+The request's `model` is the **upstream model id** of the chosen route.
+An alias never reaches the provider.
+
+### 3.4 The response stream
+
+Events observed from the backend:
+
+```text
+response.created            response.output_text.delta
+response.in_progress        response.metadata
+response.output_item.added  response.output_text.done
+response.content_part.added response.content_part.done
+response.output_item.done   response.completed
+```
+
+The terminal `response.completed` event carries the **complete final
+object**, including `output` and `usage`. That is what makes aggregation
+simple.
+
+### 3.5 A single object for a non-streaming client
+
+Because the upstream only streams, a client that asks for one object is
+served by consuming the stream and presenting the result as one object.
+`gateway.bridge.aggregate` takes the final object from
+`response.completed`, and the result is then converted into the caller's
+dialect.
+
+---
+
+## 4. What the adapter never does
+
+* It never re-displays the device code, the access token, the refresh token
   or the id token after they are stored.
 * It never calls an undocumented endpoint. In particular it does **not**
-  probe for usage or quota state: there is no official machine-readable
-  allowance API for a personal subscription, so the console reports
+  probe for usage or quota: there is no official machine-readable allowance
+  API for a personal ChatGPT plan, so the console reports those limits as
   **Unknown** and links the official dashboard.
 * It never guesses. A model with no documented dialect, and a request with a
   capability the target cannot express, are refused with an actionable
   message.
+* It never sends the device auth id to the browser, and it never follows a
+  redirect upstream.
 
 ---
 
-## 4. Conformance checklist
+## 5. Conformance checklist
 
-Each line is a test.
+Each line is a test in `tests/`.
 
-| # | Requirement | Where |
+| # | Requirement | Test |
 |---|---|---|
-| 1 | The user-code request uses the documented URL and body | `tests/test_adapters.py` |
-| 2 | The verification URL is the official one | `tests/test_adapters.py` |
-| 3 | `403`/`404` while polling means "not yet", not failure | `tests/test_adapters.py` |
-| 4 | The token exchange uses the documented form and redirect URI | `tests/test_adapters.py` |
-| 5 | The stored credential is never re-displayed | `tests/test_credentials.py`, `tests/test_end_to_end.py` |
-| 6 | The inference upstream is the documented base | `tests/test_adapters.py` |
-| 7 | The account id is forwarded when known | `tests/test_adapters.py` |
-| 8 | Disconnect removes only the local credential | `tests/test_adapters.py` |
-| 9 | A device-code failure is classified, not guessed | `tests/test_adapters.py` |
-| 10 | The error message never echoes the upstream body | `tests/test_adapters.py` |
+| 1 | The user-code request uses the documented URL and body | `test_adapters.py` |
+| 2 | The verification URL is the official one | `test_device_flow.py` |
+| 3 | `403`/`404` while polling means "not yet" | `test_adapters.py` |
+| 4 | The token exchange uses the documented form and redirect URI | `test_adapters.py` |
+| 5 | The stored credential is never re-displayed | `test_credentials.py`, `test_end_to_end.py` |
+| 6 | The inference upstream is the documented base | `test_adapters.py` |
+| 7 | The model list carries the client version | `test_adapter_contract.py` |
+| 8 | The catalogue's `slug` shape is parsed | `test_adapter_contract.py` |
+| 9 | The upstream is always asked to stream | `test_streaming_only_upstream.py` |
+| 10 | The Codex request fields are sent | `test_streaming_only_upstream.py` |
+| 11 | A non-streaming client gets one object | `test_streaming_only_upstream.py` |
+| 12 | A failed authorisation is reported, not guessed | `test_device_flow.py` |
+| 13 | The upstream body is never echoed | `test_adapters.py` |
+
+---
+
+## 6. What is not documented by OpenAI
+
+* No supported third-party proxying path for a consumer ChatGPT
+  subscription. The device-code path is documented as a **beta**; this
+  gateway's use of it is not endorsed by OpenAI, and the console says so.
+* No machine-readable usage, quota or reset API for a personal plan.
+  Published per-plan estimates exist; actual remaining allowance is
+  **Unknown** to the gateway.
+* No published per-model context window for the public API that matches the
+  Codex backend's own profile. The gateway reports the backend's numbers,
+  which are what that upstream will actually accept.
