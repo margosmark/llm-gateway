@@ -432,6 +432,10 @@ PY
 * **Never** sign in to a provider account on the owner's behalf. The owner
   completes the device-code flow in their own browser.
 
+### Alias budgets
+
+Set an optional monthly USD budget while editing an alias. It is a local soft cap: the gateway checks recorded spend before routing, so concurrent in-flight requests may exceed it. Spend uses only successful ledger events with token counters and published per-token prices. If any spend in the month is unpriced or the ledger history is incomplete, the console reports the alias uncapped with Unknown spend; it never treats unknown as free. A refusal returns HTTP 429 with the configured amount, known spend, and the UTC month-boundary reset timestamp.
+
 ---
 
 ## 8. Recovering a held provider

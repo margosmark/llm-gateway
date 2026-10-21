@@ -304,5 +304,34 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class AliasBudgetTests(unittest.TestCase):
+    def test_unknown_spend_is_not_free_or_capped(self):
+        from datetime import datetime, timezone
+        from gateway.budget import budget_status, over_budget
+        now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+        events = [{"requested_alias": "a", "timestamp": "2026-10-02T00:00:00Z", "status": 200,
+                   "serving_provider": "opencode_go", "serving_model": "unknown-model",
+                   "token_counters": {"prompt_tokens": 10, "completion_tokens": 2}}]
+        status = budget_status(events, "a", 1.0, now)
+        self.assertIsNone(status["spend_usd"])
+        self.assertFalse(status["capped"])
+        self.assertIsNone(over_budget(events, "a", 1.0, now))
+
+    def test_known_excess_refuses_at_utc_month_boundary(self):
+        from datetime import datetime, timezone
+        from gateway.budget import budget_status, over_budget
+        now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+        # An explicit reported zero cached counter keeps the spend known under
+        # the catalogue's cached-token completeness rule; an absent one is
+        # Unknown and must never refuse (covered above).
+        events = [{"requested_alias": "a", "timestamp": "2026-10-02T00:00:00Z", "status": 200,
+                   "serving_provider": "opencode_go", "serving_model": "gpt-6-luna",
+                   "token_counters": {"prompt_tokens": 1_000_000, "completion_tokens": 0, "cached_read_tokens": 0}}]
+        self.assertEqual(budget_status(events, "a", .01, now)["reset_at"], "2026-11-01T00:00:00Z")
+        refusal = over_budget(events, "a", .01, now)
+        self.assertIsNotNone(refusal)
+        self.assertAlmostEqual(refusal["spend_usd"], 0.1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 import time
@@ -23,6 +24,7 @@ from gateway.bridge.anthropic import aggregate_stream_any, convert_buffered_byte
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import sse_done
 from gateway.backup import export_config, import_config, snapshot_interval_seconds
+from gateway.budget import budget_status, over_budget
 from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
     PROBE_TIMEOUT_SECONDS,
@@ -718,6 +720,15 @@ class GatewayApp:
                 status=403,
             )
 
+        if self.ledger and alias.budget is not None:
+            refusal = over_budget(self.ledger.recent(limit=10_000), alias.name, alias.budget, history_complete=self.ledger.evicted == 0)
+            if refusal is not None:
+                raise RoutingError(
+                    f"monthly budget ${alias.budget:.2f} reached; recorded spend is ${refusal['spend_usd']:.2f}; resets at {refusal['reset_at']} UTC",
+                    code="budget_exceeded",
+                    status=429,
+                )
+
         stream = bool(payload.get("stream"))
         request_id = new_request_id()
         session_hint = self._session_hint(request)
@@ -932,6 +943,7 @@ class GatewayApp:
                 route_limits.append((ref.label(), entry.context_limit if entry else None))
             alias_payload = alias.to_dict()
             alias_payload["context_limit"] = alias_context_limit(route_limits)
+            alias_payload["budget_status"] = budget_status(self.ledger.recent(limit=10_000) if self.ledger else [], alias.name, alias.budget, history_complete=bool(self.ledger and self.ledger.evicted == 0))
             aliases.append(alias_payload)
 
         profiles = []
@@ -1384,6 +1396,9 @@ class GatewayApp:
                 if c in ("auth", "policy", "malformed")
             ]
             cooldown = payload.get("cooldown_seconds")
+            budget = payload.get("budget")
+            if budget is not None and (not isinstance(budget, (int, float)) or isinstance(budget, bool) or not math.isfinite(budget) or not 0 < budget <= 1_000_000):
+                return json_response({"error": {"message": "budget must be a finite USD amount greater than 0 and at most 1000000, or null", "type": "invalid_budget"}}, 400)
             with self.config.mutate() as config:
                 existing = config.aliases.get(alias_name)
                 config.aliases[alias_name] = _alias_from_payload(
@@ -1398,6 +1413,7 @@ class GatewayApp:
                     enabled=bool(payload.get("enabled", existing.enabled if existing else False)),
                     phase_routing=phase_routing,
                 )
+                config.aliases[alias_name].budget = budget
             return json_response({"ok": True})
 
         if action == "publish":
