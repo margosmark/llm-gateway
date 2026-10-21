@@ -755,6 +755,54 @@ def _alias():
     )
 
 
+class AliasGroupHttpTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.harness = GatewayHarness()
+        self.addCleanup(self.harness.close)
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"] = _alias()
+            config.aliases["coding"].tag = "team"
+            config.aliases["coding"].enabled = False
+            config.aliases["coding"].fallbacks = [RouteRef("opencode_go", "private-model")]
+            config.aliases["coding"].fallback_authorized = True
+            config.aliases["writing"] = _alias()
+            config.aliases["writing"].name = "writing"
+            config.aliases["writing"].enabled = False
+            config.aliases["writing"].tag = "team"
+            config.aliases["other"] = _alias()
+            config.aliases["other"].name = "other"
+            config.aliases["other"].enabled = False
+            config.aliases["other"].tag = "solo"
+
+    def test_group_publish_and_disable_only_toggle_tag_members(self) -> None:
+        before = self.harness.config.snapshot().aliases
+        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "team"})
+        self.assertEqual(status, 200)
+        self.assertEqual(result["aliases"], ["coding", "writing"])
+        published = self.harness.config.snapshot().aliases
+        self.assertTrue(published["coding"].enabled)
+        self.assertTrue(published["writing"].enabled)
+        self.assertFalse(published["other"].enabled)
+        self.assertEqual(published["coding"].fallbacks, before["coding"].fallbacks)
+        self.assertEqual(published["coding"].fallback_authorized, before["coding"].fallback_authorized)
+        self.assertEqual(published["coding"].tag, "team")
+        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "disable", "tag": "team"})
+        self.assertEqual(status, 200)
+        self.assertFalse(self.harness.config.snapshot().aliases["coding"].enabled)
+        self.assertFalse(self.harness.config.snapshot().aliases["writing"].enabled)
+        self.assertFalse(self.harness.config.snapshot().aliases["other"].enabled)
+
+    def test_group_refusal_does_not_partially_publish(self) -> None:
+        with self.harness.config.mutate() as config:
+            config.aliases["writing"].primary = None
+        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "team"})
+        self.assertEqual(status, 400)
+        self.assertFalse(self.harness.config.snapshot().aliases["coding"].enabled)
+        self.assertFalse(self.harness.config.snapshot().aliases["writing"].enabled)
+        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "../team"})
+        self.assertEqual(status, 400)
+
+
 class FallbackTests(unittest.TestCase):
     """The fallback rules, which are the easiest thing to get wrong."""
 

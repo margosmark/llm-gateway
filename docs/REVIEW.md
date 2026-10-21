@@ -1608,6 +1608,15 @@ PYTHONPATH=src python3 -m gateway --help                  OK
 git diff --check                                          clean
 ```
 
+### R45 — Alias tags and bulk group publication — **closed**
+
+*(carried from the T30 orphan branch, where this finding was numbered R32;
+renumbered on integration because main's register already uses R32–R44)*
+
+**Resolution.** `Alias` has an optional persisted tag. The owner console exposes group publish/disable, implemented as an atomic enabled-flag update over aliases matching a validated tag. The operation does not modify route configuration, fallback authorization or any per-alias policy, and refuses a group publish if any member has no primary.
+
+**Evidence:** `tests/test_alias_groups.py` exercises published-state changes, preservation of each alias's route and policy, invalid/empty tags, incomplete group refusal, and legacy/tag round-trips. `AliasGroupHttpTests` in `tests/test_end_to_end.py` drives the HTTP action and asserts only members are affected and that refusal is atomic.
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are

@@ -1213,6 +1213,7 @@
     if (editingAlias && !editing) editingAlias = null;
 
     var nameInput = el("input", { placeholder: "coding", value: editing ? editing.name : "", disabled: !!editing });
+    var tagInput = el("input", { placeholder: "coding", value: editing ? (editing.tag || "") : "" });
     var primaryProvider = el("select", {});
     var primaryModel = el("select", {});
     var fallbacks = [];
@@ -1377,6 +1378,7 @@
 
     card.appendChild(el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "Alias name" }), nameInput]),
+      el("label", {}, [el("span", { text: "Group tag (optional)" }), tagInput]),
       el("label", {}, [el("span", { text: "Primary provider" }), primaryProvider]),
       el("label", {}, [el("span", { text: "Primary model" }), primaryModel])
     ]));
@@ -1470,6 +1472,7 @@
               body: {
                 action: "save",
                 name: nameInput.value,
+                tag: tagInput.value,
                 primary: { provider: primaryProvider.value, model: primaryModel.value },
                 fallbacks: fallbacks.map(function (row) {
                   return { provider: row.provider.value, model: row.model.value };
@@ -1505,7 +1508,7 @@
         ]),
         el("div", {
           class: "small",
-          text: "Primary: " + (alias.primary ? providerLabel(alias.primary.provider) + " → " + alias.primary.model : "none")
+          text: "Group: " + (alias.tag || "none") + " · Primary: " + (alias.primary ? providerLabel(alias.primary.provider) + " → " + alias.primary.model : "none")
         }),
         el("div", {
           class: "small muted",
@@ -1563,6 +1566,23 @@
       existing.appendChild(card2);
     });
     card.appendChild(el("h3", { text: "Existing aliases" }));
+    var groupTags = Array.from(new Set(state.aliases.map(function (alias) { return alias.tag; }).filter(Boolean))).sort();
+    groupTags.forEach(function (tag) {
+      var groupAliases = state.aliases.filter(function (alias) { return alias.tag === tag; });
+      existing.appendChild(el("div", { class: "route" }, [
+        el("div", { class: "head" }, [el("strong", { text: "Group: " + tag }), el("span", { class: "small muted", text: groupAliases.length + " aliases" })]),
+        el("div", { class: "actions" }, [
+          el("button", { type: "button", text: "Publish group", disabled: !state.can_mutate || groupAliases.some(function (alias) { return !alias.primary; }), onclick: function () {
+            run(api(BASE + "/api/alias-group", { method: "POST", body: { action: "publish", tag: tag } }))
+              .then(function () { return refresh(); }).catch(function () {});
+          } }),
+          el("button", { type: "button", text: "Disable group", disabled: !state.can_mutate, onclick: function () {
+            run(api(BASE + "/api/alias-group", { method: "POST", body: { action: "disable", tag: tag } }))
+              .then(function () { return refresh(); }).catch(function () {});
+          } })
+        ])
+      ]));
+    });
     if (!state.aliases.length) {
       existing.appendChild(emptyState(
         "No aliases or routes yet",

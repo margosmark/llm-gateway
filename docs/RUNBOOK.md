@@ -96,6 +96,8 @@ address beyond a LAN you trust.
 
 Everything else happens in the browser.
 
+For related aliases, assign the same optional tag in Models & Routes, then use Publish group or Disable group. This only toggles publication for each alias; routes, fallback chains, authorization and per-alias policy remain independent. Publishing refuses the whole group when any member lacks a primary route.
+
 | Task | Where |
 |---|---|
 | Connect a provider | Owner console → Providers |

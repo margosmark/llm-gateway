@@ -67,7 +67,7 @@ from gateway.fallback_reasons import fallback_reason_class
 from gateway.http import messages as messages_surface
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
-from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
+from gateway.identifiers import ValidationError, validate_alias_name, validate_identifier, validate_profile_id
 from gateway.logging import RequestLogger
 from gateway.ledger_export import DEFAULT_EXPORT_ROWS, MAX_EXPORT_ROWS, export_records, render_csv, render_json
 from gateway.routes import validate_alias_routes, validate_phase_routing
@@ -399,6 +399,7 @@ class GatewayApp:
             r.add(["POST"], prefix + "/api/provider", self.handle_provider_action)
             r.add(["POST"], prefix + "/api/model", self.handle_model_action)
             r.add(["POST"], prefix + "/api/alias", self.handle_alias_action)
+            r.add(["POST"], prefix + "/api/alias-group", self.handle_alias_group_action)
             r.add(["POST"], prefix + "/api/profile", self.handle_profile_action)
             r.add(["POST"], prefix + "/api/settings", self.handle_settings_action)
 
@@ -1397,6 +1398,29 @@ class GatewayApp:
                 )
         return json_response({"ok": True})
 
+    # --- alias groups ---------------------------------------------------
+
+    def handle_alias_group_action(self, request: Request) -> Response:
+        denied = self._require_mutation(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = request.json() or {}
+        except ValueError:
+            payload = {}
+        from gateway.alias_groups import set_group_enabled
+
+        action = payload.get("action")
+        if action not in ("publish", "disable"):
+            return json_response({"error": {"message": "action must be publish or disable", "type": "invalid_group_action"}}, 400)
+        names: list[str] = []
+        try:
+            with self.config.mutate() as config:
+                names = set_group_enabled(config, payload.get("tag"), action == "publish")
+            return json_response({"ok": True, "tag": payload.get("tag"), "enabled": action == "publish", "aliases": names})
+        except ValidationError as exc:
+            return json_response({"error": {"message": exc.message, "type": "invalid_alias_group", "field": exc.field}}, 400)
+
     # --- alias actions ---------------------------------------------------
 
     def handle_alias_action(self, request: Request) -> Response:
@@ -1426,6 +1450,13 @@ class GatewayApp:
                     {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}},
                     400,
                 )
+            raw_tag = payload.get("tag", "")
+            try:
+                tag = validate_identifier(raw_tag, "alias tag") if raw_tag else ""
+            except ValidationError as exc:
+                return json_response(
+                    {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}}, 400
+                )
             triggers = [t for t in payload.get("fallback_triggers") or [] if t in FALLBACK_TRIGGERS]
             confirmed = [p for p in payload.get("fallback_confirmed_providers") or [] if isinstance(p, str)]
             safe_classes = [
@@ -1449,6 +1480,7 @@ class GatewayApp:
                     cooldown if isinstance(cooldown, int) else 300,
                     enabled=bool(payload.get("enabled", existing.enabled if existing else False)),
                     phase_routing=phase_routing,
+                    tag=tag,
                 )
                 config.aliases[alias_name].budget = budget
             return json_response({"ok": True})
@@ -1729,6 +1761,7 @@ def _alias_from_payload(
     cooldown: int,
     enabled: bool,
     phase_routing=None,
+    tag: str = "",
 ):
     from gateway.config import Alias
 
@@ -1743,6 +1776,7 @@ def _alias_from_payload(
         fallback_error_classes=safe_classes,
         cooldown_seconds=cooldown,
         phase_routing=phase_routing,
+        tag=tag,
     )
 
 

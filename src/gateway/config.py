@@ -454,6 +454,8 @@ class Alias:
     phase_routing: PhaseRouting | None = None
     #: An optional local monthly budget in USD for this alias. None = unbudgeted.
     budget: float | None = None
+    #: Optional group tag; aliases sharing a tag render as one console group.
+    tag: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -468,6 +470,7 @@ class Alias:
             "cooldown_seconds": self.cooldown_seconds,
             "phase_routing": self.phase_routing.to_dict() if self.phase_routing else None,
             "budget": self.budget,
+            "tag": self.tag,
         }
 
     @classmethod
@@ -491,6 +494,7 @@ class Alias:
         cooldown = data.get("cooldown_seconds")
         phase_routing = PhaseRouting.from_dict(data.get("phase_routing"))
         budget = data.get("budget")
+        tag = data.get("tag", "")
         return cls(
             name=name,
             enabled=bool(data.get("enabled", False)),
@@ -503,6 +507,7 @@ class Alias:
             cooldown_seconds=cooldown if isinstance(cooldown, int) and cooldown >= 0 else 300,
             phase_routing=phase_routing,
             budget=budget if isinstance(budget, (int, float)) and not isinstance(budget, bool) and math.isfinite(budget) and 0 < budget <= 1_000_000 else None,
+            tag=tag if isinstance(tag, str) else "",
         )
 
     def all_routes(self) -> list[RouteRef]:
