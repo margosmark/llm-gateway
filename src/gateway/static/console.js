@@ -131,6 +131,7 @@
   }
 
   function providerLabel(providerId) {
+    if (providerId === "anthropic") return "Anthropic";
     if (providerId === "chatgpt_codex") return "ChatGPT / Codex";
     if (providerId === "opencode_go") return "OpenCode Go";
     return providerId;
