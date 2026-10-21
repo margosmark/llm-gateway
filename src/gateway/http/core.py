@@ -329,6 +329,10 @@ class _ThreadingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     request_queue_size = 64
 
 
+class _ThreadingIPv6Server(_ThreadingServer):
+    address_family = socket.AF_INET6
+
+
 class Server:
     """Threaded HTTP server bound to an explicit address."""
 
@@ -344,7 +348,8 @@ class Server:
         self._httpd.serve_forever(poll_interval=0.2)
 
     def start_background(self) -> None:
-        self._httpd = _ThreadingServer((self.host, self.port), _RequestHandler)
+        server_class = _ThreadingIPv6Server if ":" in self.host else _ThreadingServer
+        self._httpd = server_class((self.host, self.port), _RequestHandler)
         self._httpd.application = self._handler  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._httpd.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
         self._thread.start()

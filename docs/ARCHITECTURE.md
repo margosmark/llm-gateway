@@ -15,7 +15,9 @@ The gateway starts one standard-library HTTP server from `gateway.cli`:
 The owner console, credential forms, provider actions, and client API share the
 same listener. `cli.py` refuses wildcard and unsupported binds. Supported classes are
 RFC1918 IPv4, IPv6 unique-local (`fc00::/7`), and loopback, subject to the
-address being assigned locally; public (including RFC 5737 TEST-NET),
+address being assigned locally. The HTTP server selects an IPv4 or IPv6
+listener by address family; IPv6 authorities are bracketed for URLs, `Host`,
+and `Origin`. Public (including RFC 5737 TEST-NET),
 multicast, link-local, and unspecified addresses are refused. No setup
 listener or setup-port setting exists. Forwarded headers are rejected rather
 than trusted.

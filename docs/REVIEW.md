@@ -761,5 +761,11 @@ Evidence: `tests/test_cli.py` — `test_public_addresses_are_refused` covers all
 three TEST-NET examples and forbidden address classes;
 `test_test_net_addresses_are_refused_before_startup` verifies `main()` refuses
 all three before application construction; `test_owned_ipv6_ula_uses_startup_path`
-verifies ULA is accepted by startup validation when locally owned. Focused
-CLI suite: 14 tests passed.
+verifies ULA is accepted by startup validation when locally owned. The HTTP
+server now selects AF_INET6 for colon-containing addresses, and security
+policy formats IPv6 URL/Host/Origin authorities with brackets. Regression
+evidence: `test_ipv6_loopback_server_serves_canonical_mutation` traverses a real
+IPv6 listener and successful same-origin mutation; `test_ipv6_authorities_are_bracketed_for_host_and_origin`
+checks allowed Host and Origin forms. `test_ipv6_ula_listener_binds_when_host_owns_address`
+is skipped when the test machine does not own the ULA. Focused suites pass;
+full suite: 340 passed, 3 skipped.
