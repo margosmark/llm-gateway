@@ -121,6 +121,15 @@ def main(argv: list[str] | None = None) -> int:
     identity = release_identity()
     print(f"personal-llm-gateway listening on http://{args.host}:{args.port}/owner/ (trusted LAN)", flush=True)
     print(f"release: source={identity['source_revision']} tree={identity['source_tree']} image={identity['image_revision']}", flush=True)
+    if identity["source_revision"] == "unknown" or identity["image_revision"] == "unknown":
+        # Say so plainly: a deployment that cannot identify itself cannot
+        # be audited, and it is easy not to notice.
+        print(
+            "warning: the release identity is unknown, so this deployment cannot say what it "
+            "is. Deploy with scripts/release.py, which stamps the source revision and the "
+            "image digest into the state volume.",
+            flush=True,
+        )
     stop = threading.Event()
     def handle_signal(signum, frame):
         stop.set()
