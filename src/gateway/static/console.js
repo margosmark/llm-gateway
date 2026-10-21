@@ -305,6 +305,28 @@
     });
     frag.appendChild(el("section", {}, [providers]));
 
+    var healthCard = el("div", { class: "card" }, [el("h2", { text: "Provider health" })]);
+    (state.provider_health || []).forEach(function (health) {
+      healthCard.appendChild(el("div", { class: "route" }, [
+        el("div", { class: "head" }, [
+          el("strong", { text: providerLabel(health.provider_id) }),
+          statePill(health.connection_state || "unknown")
+        ]),
+        el("div", { class: "small", text: "Last test: " + (health.last_test_outcome || "unknown") +
+          " · catalogue: " + when(health.catalog_observed_at) +
+          " · models: " + (health.model_count === undefined ? "Unknown" : health.model_count) +
+          " · cooldown: " + (health.cooldown_remaining_seconds || 0) + "s" }),
+        el("div", { class: "small muted", text: "Recent outcomes: " + (health.recent_success_rate === null || health.recent_success_rate === undefined ? "Unknown" : Math.round(health.recent_success_rate * 100) + "% success") +
+          " / " + (health.recent_failure_rate === null || health.recent_failure_rate === undefined ? "Unknown" : Math.round(health.recent_failure_rate * 100) + "% failure") +
+          " (" + (health.recent_requests || 0) + " requests)" }),
+        health.last_error ? el("div", { class: "small muted", text: "Last error: " + health.last_error }) : null
+      ]));
+    });
+    if (!state.provider_health || !state.provider_health.length) {
+      healthCard.appendChild(el("p", { class: "muted", text: "Provider health is Unknown until providers are configured." }));
+    }
+    frag.appendChild(el("section", {}, [healthCard]));
+
     var totals = state.totals || {};
     var ledger = state.ledger || [];
     var ledgerCard = el("div", { class: "card" }, [

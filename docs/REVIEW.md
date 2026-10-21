@@ -1630,6 +1630,20 @@ is kept so the next agent can see what was already paid for in time.
 7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6** and **R14** with targeted tests and runbook changes. R15 is superseded by removal of the setup surface.
 8. Complete **R36**'s explicit post-deployment route replacement.
    R25 and R27 are closed by R35 and R27's own resolutions.
+
+## Provider health view (T31)
+
+The owner Status view now combines each provider's observed connection state,
+last test outcome/time/error, catalogue observation time, configured model
+count, active cooldown countdown, and recent success/failure rates from the
+bounded metadata ledger. Rates count only requests actually served by that
+provider; absent samples remain Unknown. This is a local metadata summary, not
+a provider probe or claim of external health.
+
+Evidence: `src/gateway/provider_health.py`; `tests/test_provider_health.py`
+(asserts populated and missing-observation outcomes); and
+`tests/test_end_to_end.py::ConsoleApiTests.test_state_reports_usage_costs_and_durability`
+(asserts the integrated state payload).
 ## Trusted LAN admin-mode candidate update
 
 The approved single-listener change resolves the former R0 first-passphrase
