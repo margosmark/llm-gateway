@@ -779,7 +779,9 @@ canonical model exists would bake in a second vocabulary.
 allowed and the refused case, and the ledger shows what was changed and
 why.
 
-### T22 — A budget per alias, enforced locally — `todo`
+### T22 — A budget per alias, enforced locally — `done`
+
+**Landed.** Optional monthly USD alias cap; known spend uses successful ledger token counters and the published catalogue prices. Unknown/incomplete totals are explicitly uncapped. The API checks before routing and returns actionable HTTP 429; the console shows spend, soft-cap caveat and UTC reset boundary. See `gateway/budget.py`, `tests/test_costs.py`, and `tests/test_end_to_end.py`.
 
 **Why.** The provider's allowance is **Unknown** for every provider that
 does not publish one, and the gateway calls no undocumented endpoint to
@@ -1171,7 +1173,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T19 | Stop deep-copying the configuration on every read | perf | todo |
 | T20 | Separate the connect timeout from the read timeout | perf | todo |
 | T21 | A request policy per alias | 4 | todo |
-| T22 | A budget per alias, enforced locally | 4 | todo |
+| T22 | A budget per alias, enforced locally | 4 | **done** |
 | T23 | Statistics per alias | 4 | todo |
 | T24 | Export the ledger | 4 | todo |
 | T25 | A dry run: show the upstream payload without sending it | 4 | todo |

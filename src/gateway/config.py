@@ -14,6 +14,7 @@ and it gives the owner a way to tell that a change landed.
 
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -451,6 +452,8 @@ class Alias:
     cooldown_seconds: int = 300
     #: An optional, opt-in phase-routing policy. Disabled by default.
     phase_routing: PhaseRouting | None = None
+    #: An optional local monthly budget in USD for this alias. None = unbudgeted.
+    budget: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -464,6 +467,7 @@ class Alias:
             "fallback_error_classes": list(self.fallback_error_classes),
             "cooldown_seconds": self.cooldown_seconds,
             "phase_routing": self.phase_routing.to_dict() if self.phase_routing else None,
+            "budget": self.budget,
         }
 
     @classmethod
@@ -486,6 +490,7 @@ class Alias:
         safe_classes = [c for c in data.get("fallback_error_classes") or [] if c in OWNER_OVERRIDABLE_CLASSES]
         cooldown = data.get("cooldown_seconds")
         phase_routing = PhaseRouting.from_dict(data.get("phase_routing"))
+        budget = data.get("budget")
         return cls(
             name=name,
             enabled=bool(data.get("enabled", False)),
@@ -497,6 +502,7 @@ class Alias:
             fallback_error_classes=safe_classes,
             cooldown_seconds=cooldown if isinstance(cooldown, int) and cooldown >= 0 else 300,
             phase_routing=phase_routing,
+            budget=budget if isinstance(budget, (int, float)) and not isinstance(budget, bool) and math.isfinite(budget) and 0 < budget <= 1_000_000 else None,
         )
 
     def all_routes(self) -> list[RouteRef]:

@@ -509,3 +509,8 @@ A complete release verification still needs an exact-image gate and a
 Compose/runtime proof, especially for the writable state-volume ownership and
 listener boundaries. See `DEVELOPMENT.md` and the open findings in
 `REVIEW.md`.
+
+
+### Local alias budgets
+
+Alias budgets are optional monthly USD caps. `gateway.budget` derives spend from metadata-only successful request ledger events and `gateway.costs.calculate_cost`, using published catalogue prices only. Any unpriced/missing usage or incomplete ledger history makes the total Unknown and disables enforcement (never interpreted as zero). The API checks before routing and records actual token usage after completion; concurrent requests may overshoot. The UTC reset is the first instant of the next calendar month.

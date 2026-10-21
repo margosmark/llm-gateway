@@ -1280,6 +1280,7 @@
     renderConfirmProviders();
 
     var cooldown = el("input", { type: "number", value: String(editing ? editing.cooldown_seconds : 300), min: "0" });
+    var budget = el("input", { type: "number", value: editing && editing.budget != null ? String(editing.budget) : "", min: "0.01", step: "0.01", placeholder: "No cap" });
 
     var phasePolicy = editing && editing.phase_routing;
     var phaseEnabled = el("input", { type: "checkbox" });
@@ -1403,6 +1404,7 @@
     card.appendChild(confirmProviders);
     card.appendChild(el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "Local cooldown (seconds)" }), cooldown]),
+      el("label", {}, [el("span", { text: "Monthly budget (USD; soft cap)" }), budget]),
       el("div", { class: "narrow" }, [
         el("button", {
           class: "primary", type: "button", text: editing ? "Save changes" : "Save alias",
@@ -1454,6 +1456,7 @@
                 fallback_authorized: authorizeBox.checked,
                 fallback_confirmed_providers: confirmed,
                 cooldown_seconds: parseInt(cooldown.value, 10) || 0,
+                budget: budget.value === "" ? null : Number(budget.value),
                 enabled: editing ? editing.enabled : false,
                 phase_routing: phaseRouting
               }
@@ -1494,7 +1497,10 @@
             ? alias.fallbacks.map(function (f) { return providerLabel(f.provider) + " → " + f.model; }).join(", ")
             : "none") +
             " · triggers: " + (alias.fallback_triggers.join(", ") || "none") +
-            " · cooldown: " + alias.cooldown_seconds + "s"
+            " · cooldown: " + alias.cooldown_seconds + "s" +
+            " · budget: " + (alias.budget_status && alias.budget_status.capped
+              ? money(alias.budget_status.spend_usd) + " / " + money(alias.budget) + " this month (soft; resets " + alias.budget_status.reset_at + ")"
+              : alias.budget == null ? "uncapped" : "budget uncapped: spend Unknown (soft; resets " + (alias.budget_status ? alias.budget_status.reset_at : "UTC month boundary") + ")")
         }),
         el("div", { class: "actions" }, [
           el("button", {

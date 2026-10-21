@@ -475,6 +475,8 @@ the gateway (bounded to the recent 10,000 in-memory records, with
 asynchronously persisted history restored on restart); unavailable usage,
 latency or prices remain Unknown.
 
+Aliases may also have a local monthly USD budget. It is a **soft cap** checked before each request; requests already in flight may overshoot. Spend is computed from recorded successful-request token counters and published per-token prices. If any monthly spend cannot be priced or the ledger history is incomplete, spend is **Unknown** and the alias is reported uncapped rather than free. The console shows the UTC month boundary when the budget resets.
+
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
 never as unlimited. The **Usage and limits** card shows only enforceable

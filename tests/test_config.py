@@ -87,6 +87,7 @@ class AliasTests(unittest.TestCase):
             fallback_triggers=["exhausted"],
             fallback_authorized=True,
             cooldown_seconds=600,
+            budget=12.5,
         )
         restored = Alias.from_dict(alias.to_dict())
         assert restored is not None
@@ -96,6 +97,7 @@ class AliasTests(unittest.TestCase):
         self.assertEqual(restored.fallbacks[1].model, "mimo-v2.6-flash")
         self.assertTrue(restored.fallback_authorized)
         self.assertEqual(restored.cooldown_seconds, 600)
+        self.assertEqual(restored.budget, 12.5)
 
     def test_all_routes_lists_primary_first(self) -> None:
         alias = Alias(
