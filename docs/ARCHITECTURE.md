@@ -10,7 +10,7 @@ The gateway starts one standard-library HTTP server from `gateway.cli`:
 
 | Listener | Default bind | Mounts | Purpose |
 |---|---|---|---|
-| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version` | direct owner console/configuration and anonymous OpenAI-compatible API |
+| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version`, `/metrics` | direct owner console/configuration, anonymous OpenAI-compatible API, and metadata-only Prometheus exposition |
 
 The owner console, credential forms, provider actions, and client API share the
 same listener. `cli.py` refuses wildcard and unsupported binds. Supported classes are
