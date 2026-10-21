@@ -915,6 +915,9 @@ class ConsoleApiTests(unittest.TestCase):
         self.assertEqual(set(payload["usage_costs"]) - {"window_hours", "coverage"}, {"alias", "provider", "model"})
         self.assertIn("enabled", payload["ledger_durability"])
         self.assertFalse(payload["ledger_durability"]["billing_system"])
+        self.assertEqual(set(payload["request_statistics"]), {"hour", "day", "month"})
+        self.assertEqual(payload["request_statistics"]["day"]["window_hours"], 24)
+        self.assertEqual(set(payload["request_statistics"]["day"]) - {"window", "window_hours"}, {"alias", "provider", "model"})
 
     def test_state_reports_the_zero_state(self) -> None:
         status, payload, _ = self.harness.request("GET", "/owner/api/state")

@@ -135,6 +135,14 @@ The owner console can export recent ledger rows as CSV or JSON through a
 read-only endpoint; exports are bounded to 1,000 rows, allow-list only the
 six ledger-table fields, and pass values through the same redaction rules
 as the request log. The endpoint does not create a ledger record.
+observation date; a missing price remains Unknown.
+
+Request statistics can be viewed over the last hour, day or 30 days, grouped
+by requested alias and serving provider/model. They include errors by class,
+fallback rate, recorded latency percentiles, token totals and published-price
+estimates. The aggregate is metadata-only, computed over the recent ledger
+view (up to 10,000 records), not a lifetime accounting source; missing values
+stay Unknown. This estimate is not a provider bill.
 
 The open circuits are the exception: they are written to
 `circuits.json` in the state directory, because a gateway that restarts

@@ -22,6 +22,7 @@
   // day from the durable daily rollup. Kept across redraws so switching
   // sections does not silently reset the owner's choice.
   var usageDay = "live";
+  var statisticsWindow = "day";
 
   // --- tiny helpers -----------------------------------------------------
 
@@ -407,6 +408,46 @@
     }
     frag.appendChild(el("section", {}, [costsCard]));
     frag.appendChild(el("section", {}, [renderFallbackCard(analytics)]));
+
+
+    var statisticWindows = state.request_statistics || {};
+    var statistics = statisticWindows[statisticsWindow] || { alias: {}, provider: {}, model: {} };
+    var statisticsCard = el("div", { class: "card" }, [
+      el("h2", { text: "Request statistics" }),
+      el("p", { class: "small muted", text: "Metadata only · retained ledger history, up to 30 days. Percentiles use recorded latencies; token and cost values are Unknown when unavailable." }),
+      el("label", { class: "small", text: "Window " }, [el("select", { "aria-label": "Statistics window", onchange: function (event) { statisticsWindow = event.target.value; draw(); } }, [
+        el("option", { value: "hour", selected: statisticsWindow === "hour" }, ["Last hour"]),
+        el("option", { value: "day", selected: statisticsWindow === "day" }, ["Last day"]),
+        el("option", { value: "month", selected: statisticsWindow === "month" }, ["Last month"])
+      ])])
+    ]);
+    [["Alias", statistics.alias], ["Provider", statistics.provider], ["Model", statistics.model]].forEach(function (group) {
+      var keys = Object.keys(group[1] || {}).sort();
+      if (!keys.length) return;
+      statisticsCard.appendChild(el("h3", { text: group[0] }));
+      var statsTable = el("table", {}, [el("thead", {}, [el("tr", {}, [
+        el("th", { text: group[0] }), el("th", { text: "Requests / errors" }), el("th", { text: "Error classes" }),
+        el("th", { text: "Fallback rate" }), el("th", { text: "Latency p50 / p95 / p99 ms" }),
+        el("th", { text: "Tokens in / out" }), el("th", { text: "Estimated USD" })
+      ])])]);
+      var statsBody = el("tbody");
+      keys.forEach(function (key) {
+        var row = group[1][key];
+        var latency = row.latency_ms || {};
+        var percentile = function (value) { return value == null ? "Unknown" : value; };
+        statsBody.appendChild(el("tr", {}, [
+          el("td", { text: key }), el("td", { text: row.requests + " / " + row.errors }),
+          el("td", { class: "small", text: Object.keys(row.error_classes || {}).sort().map(function (name) { return name + ": " + row.error_classes[name]; }).join(", ") || "—" }),
+          el("td", { text: (Number(row.fallback_rate || 0) * 100).toFixed(1) + "% (" + row.fallbacks + ")" }),
+          el("td", { text: percentile(latency.p50) + " / " + percentile(latency.p95) + " / " + percentile(latency.p99) }),
+          el("td", { text: row.input_tokens == null || row.output_tokens == null ? "Unknown" : row.input_tokens + " / " + row.output_tokens }),
+          el("td", { text: row.estimated_cost_usd == null ? "Unknown" : "$" + Number(row.estimated_cost_usd).toFixed(6) })
+        ]));
+      });
+      statsTable.appendChild(statsBody);
+      statisticsCard.appendChild(statsTable);
+    });
+    frag.appendChild(el("section", {}, [statisticsCard]));
 
     var limitsCard = el("div", { class: "card" }, [
       el("h2", { text: "Usage and limits" }),
