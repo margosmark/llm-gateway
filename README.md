@@ -37,11 +37,18 @@ never breaks your client's configuration.
 | Owner console and configuration | `http://10.10.11.109:8765/owner/` | Trusted LAN | Full configuration, credential enrollment, provider actions, and status; no login |
 | API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/responses`, plus native Jev `GET /v1/systemone/models` and `POST /v1/systemone` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
+| Request preview | `POST /owner/api/preview` | Trusted LAN | Shows the converted upstream request without calling a provider; Chat Completions body format |
 
 Trusted LAN admin mode: any device that can reach this address can configure
 and use the gateway, including replacing provider credentials. There is no
 owner password, login/session bootstrap, separate setup listener, or
 per-device administrative boundary. Use this only on a LAN you trust.
+
+The owner API also provides a read-only `POST /owner/api/preview` endpoint.
+It returns the request shape for the first currently eligible route without
+calling a provider or adding a ledger event. Provider-error fallback cannot be
+predicted without a call and is reported as unevaluated. The preview body is
+returned only to the LAN caller that submitted it; it is not logged or retained.
 
 The gateway binds an explicit RFC1918 IPv4, IPv6 unique-local (`fc00::/7`),
 or loopback address owned by the host. IPv6 literals are supported by the

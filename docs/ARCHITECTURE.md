@@ -170,6 +170,17 @@ the rest of the state.
    listener. Provider tests and catalogue refreshes are explicit actions; no
    page load or ordinary configuration save calls a provider.
 
+### Read-only request preview
+
+`POST /owner/api/preview` accepts an OpenAI Chat Completions request body and
+uses the same profile/alias authorization, route eligibility, request bridge,
+model substitution, reasoning degradation, and derived session rules as
+inference. It returns the primary currently eligible route's upstream payload
+and metadata without invoking an adapter. It does not create ledger events;
+normal metadata-only access logging records the endpoint path/status, never the
+body. Since provider failures cannot be predicted without a provider call,
+fallbacks after an upstream error are explicitly not evaluated.
+
 ### Client inference
 
 1. A LAN client calls `GET /v1/models`, `GET /v1/alias-catalog`,
