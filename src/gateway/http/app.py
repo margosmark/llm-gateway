@@ -70,6 +70,7 @@ from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded
 from gateway.identifiers import ValidationError, validate_alias_name, validate_identifier, validate_profile_id
 from gateway.logging import RequestLogger
 from gateway.ledger_export import DEFAULT_EXPORT_ROWS, MAX_EXPORT_ROWS, export_records, render_csv, render_json
+from gateway.metrics import render_metrics
 from gateway.routes import validate_alias_routes, validate_phase_routing
 from gateway.provider_concurrency import CappedAdapterRegistry, ProviderConcurrency
 from gateway.observability import (
@@ -371,6 +372,7 @@ class GatewayApp:
         r = self._routes
         r.add(["GET"], "/version", self.handle_version)
         r.add(["GET"], "/health", self.handle_health)
+        r.add(["GET"], "/metrics", self.handle_metrics)
         r.add(["GET"], "/favicon.ico", self.handle_favicon)
 
         r.add(["GET"], "/v1/models", self.handle_models)
@@ -534,6 +536,11 @@ class GatewayApp:
 
     def handle_health(self, request: Request) -> Response:
         return json_response({"status": "ok"})
+
+    def handle_metrics(self, request: Request) -> Response:
+        cooldowns = self.router.cooldown.snapshot() if hasattr(self.router, "cooldown") else {}
+        body = render_metrics(self.ledger, cooldowns).encode("utf-8")
+        return Response(200, [("Content-Type", "text/plain; version=0.0.4; charset=utf-8"), ("Cache-Control", "no-store")], body)
 
     def handle_favicon(self, request: Request) -> Response:
         """No icon, but no 404 noise in the browser console either."""
