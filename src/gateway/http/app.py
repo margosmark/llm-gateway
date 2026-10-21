@@ -22,6 +22,7 @@ from gateway.bridge.aggregate import aggregate_stream
 from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_chat
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import convert_stream, sse_done
+from gateway.costs import aggregate_usage, annotate_events, response_token_counters, stream_token_counters
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
@@ -469,6 +470,8 @@ class GatewayApp:
         # name the alias and the provider that served it.
         request.context["attribution"] = routed.attribution.to_dict()
         request.context["streamed"] = stream
+        request.context["request_id"] = request_id
+        request.context["serving_model"] = routed.attribution.serving_model
 
         if not stream:
             upstream_dialect = routed.request.dialect or dialect
@@ -488,6 +491,8 @@ class GatewayApp:
             # request.
             if upstream_dialect != dialect and body:
                 body = _convert_buffered(body, upstream_dialect, dialect)
+            if self.ledger:
+                self.ledger.amend(request_id, token_counters=response_token_counters(body, dialect))
             return Response(
                 routed.response.status,
                 [("Content-Type", routed.response.content_type or "application/json")],
@@ -498,13 +503,17 @@ class GatewayApp:
         upstream_stream = routed.response.stream or iter(())
 
         def frames():
-            if upstream_dialect == dialect:
-                yield from upstream_stream
-                return
-            for frame in convert_stream(upstream_stream, upstream_dialect, dialect, routed.request.model):
+            observed: dict[str, int] = {}
+            converted = upstream_stream if upstream_dialect == dialect else convert_stream(
+                upstream_stream, upstream_dialect, dialect, routed.request.model
+            )
+            for frame in converted:
+                observed.update(stream_token_counters([frame], dialect) or {})
                 yield frame
-            if dialect == DIALECT_OPENAI_CHAT:
+            if dialect != upstream_dialect and dialect == DIALECT_OPENAI_CHAT:
                 yield sse_done()
+            if self.ledger:
+                self.ledger.amend(request_id, token_counters=observed or None)
 
         return StreamResponse(
             frames(),
@@ -666,8 +675,9 @@ class GatewayApp:
                 "profiles": profiles,
                 "published_models": [alias.name for alias in sorted(config.published_aliases(), key=lambda a: a.name)],
                 "limits": self.limits.all(),
-                "ledger": self.ledger.recent(limit=25) if self.ledger else [],
+                "ledger": annotate_events(self.ledger.recent(limit=25)) if self.ledger else [],
                 "totals": self.ledger.totals() if self.ledger else {},
+                "usage_costs": aggregate_usage(self.ledger.recent(limit=10_000), window_hours=24) if self.ledger else {"window_hours": 24, "alias": {}, "provider": {}, "model": {}},
                 "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),

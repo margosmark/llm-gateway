@@ -130,6 +130,7 @@ reads only `choice` and `confidence` and never forwards or stores the rest.
 | Catalogue endpoint | `GET https://opencode.ai/inference/go/v1/models` — answers **without** authentication |
 | Live catalogue | 37 model ids (observed 2026-10-19) |
 | Published table | 29 of them, with limits, prices and endpoints |
+| Price provenance | `data/go_catalog.json` preserves the published source URL and observation date; local estimates use these values only and remain Unknown when price fields are absent |
 | Undocumented ids | 8 — `glm-5.1`, `grok-4.6`, `omen-alpha`, `kimi-k2.6`, `minimax-m2.5`, `minimax-m2.7`, `qwen3.6-plus`, `qwen3.7-max` |
 | Base for inference | `https://opencode.ai/inference/go` |
 
