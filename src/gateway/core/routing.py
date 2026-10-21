@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterator
 
 from gateway.adapters.base import Adapter, AdapterError, CLASS_MESSAGES, ProviderRequest, ProviderResponse
@@ -58,6 +58,7 @@ from gateway.core.capabilities import (
 )
 from gateway.observability import RequestEvent, utc_now_iso
 from gateway.session import derive_session
+from gateway.core.weighted_pool import select_weighted
 
 #: Maps an error class onto the fallback trigger it satisfies. A route the
 #: upstream no longer serves satisfies the "upstream unavailable" trigger:
@@ -330,7 +331,7 @@ class Router:
                 code="alias_disabled",
                 status=404,
             )
-        if alias.primary is None:
+        if alias.primary is None and not alias.weighted_routes:
             raise RoutingError(
                 f"alias '{alias_name}' has no primary route",
                 code="alias_incomplete",
@@ -506,6 +507,14 @@ class Router:
         policy that maps that phase to a route.
         """
         alias = self.resolve_alias(alias_name)
+        conversation = derive_session(profile_id, alias_name, client_ip, session_hint)
+        if alias.weighted_routes:
+            pool_routes = [item.route for item in alias.weighted_routes]
+            selected, pool_fallbacks = select_weighted(
+                pool_routes, [item.weight for item in alias.weighted_routes], conversation, alias_name
+            )
+            alias = replace(alias, primary=selected, weighted_routes=[], fallbacks=pool_fallbacks + alias.fallbacks)
+
 
         needs_tools = bool(payload.get("tools"))
         needs_image_input = payload_has_image_input(payload, source_dialect)

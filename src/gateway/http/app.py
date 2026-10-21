@@ -48,7 +48,7 @@ from gateway.http.core import Request, Response, Router as HttpRouter, StreamRes
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
 from gateway.logging import RequestLogger
-from gateway.routes import validate_alias_routes, validate_phase_routing
+from gateway.routes import validate_alias_routes, validate_phase_routing, validate_weighted_routes
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -987,9 +987,17 @@ class GatewayApp:
             # opens, so a bad alias is refused rather than published.
             try:
                 alias_name = validate_alias_name(payload.get("name"))
-                primary, fallbacks = validate_alias_routes(
-                    self.config, self.registry, payload.get("primary"), payload.get("fallbacks") or []
-                )
+                weighted_routes = validate_weighted_routes(
+                    self.config, self.registry, payload.get("weighted_routes")
+                ) if payload.get("weighted_routes") else []
+                if weighted_routes and (payload.get("primary") or payload.get("fallbacks")):
+                    raise ValidationError("a weighted pool cannot be combined with primary/fallback routes", "weighted_routes")
+                if weighted_routes:
+                    primary, fallbacks = None, []
+                else:
+                    primary, fallbacks = validate_alias_routes(
+                        self.config, self.registry, payload.get("primary"), payload.get("fallbacks") or []
+                    )
                 phase_routing = validate_phase_routing(
                     self.config, self.registry, payload.get("phase_routing")
                 )
@@ -1017,6 +1025,7 @@ class GatewayApp:
                     safe_classes,
                     cooldown if isinstance(cooldown, int) else 300,
                     enabled=bool(payload.get("enabled", existing.enabled if existing else False)),
+                    weighted_routes=weighted_routes,
                     phase_routing=phase_routing,
                 )
             return json_response({"ok": True})
@@ -1028,14 +1037,21 @@ class GatewayApp:
                 alias = config.aliases.get(name)
                 if alias is None:
                     return json_response({"error": {"message": "unknown alias", "type": "unknown_alias"}}, 404)
-                if alias.primary is None:
+                if alias.primary is None and not alias.weighted_routes:
                     return json_response(
-                        {"error": {"message": "the alias has no primary route", "type": "alias_incomplete"}}, 409
+                        {"error": {"message": "the alias has no primary route or weighted pool", "type": "alias_incomplete"}}, 409
                     )
                 try:
-                    validate_alias_routes(
-                        self.config, self.registry, alias.primary.to_dict(), [r.to_dict() for r in alias.fallbacks]
-                    )
+                    if alias.weighted_routes:
+                        validate_weighted_routes(
+                            self.config, self.registry,
+                            [{"provider": item.route.provider, "model": item.route.model, "weight": item.weight}
+                             for item in alias.weighted_routes],
+                        )
+                    else:
+                        validate_alias_routes(
+                            self.config, self.registry, alias.primary.to_dict(), [r.to_dict() for r in alias.fallbacks]
+                        )
                 except ValidationError as exc:
                     return json_response(
                         {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}}, 400
@@ -1284,11 +1300,13 @@ def _alias_from_payload(
     safe_classes: list[str],
     cooldown: int,
     enabled: bool,
+    weighted_routes=None,
     phase_routing=None,
 ):
-    from gateway.config import Alias
+    from gateway.config import Alias, WeightedRoute
 
     return Alias(
+        weighted_routes=[WeightedRoute(route=ref, weight=weight) for ref, weight in (weighted_routes or [])],
         name=name,
         enabled=enabled,
         primary=primary,

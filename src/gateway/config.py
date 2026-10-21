@@ -399,8 +399,29 @@ class PhaseRouting:
 
 
 @dataclass
+class WeightedRoute:
+    """A route in an alias's deliberate traffic-distribution pool."""
+
+    route: RouteRef
+    weight: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"route": self.route.to_dict(), "weight": self.weight}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "WeightedRoute | None":
+        if not isinstance(data, dict):
+            return None
+        route = RouteRef.from_dict(data.get("route"))
+        weight = data.get("weight")
+        if route is None or isinstance(weight, bool) or not isinstance(weight, int) or weight <= 0:
+            return None
+        return cls(route=route, weight=weight)
+
+
+@dataclass
 class Alias:
-    """A friendly name that resolves to a primary route and ordered fallbacks."""
+    """A friendly name that resolves to a primary/pool and ordered fallbacks."""
 
     name: str
     enabled: bool = False
@@ -419,12 +440,14 @@ class Alias:
     cooldown_seconds: int = 300
     #: An optional, opt-in phase-routing policy. Disabled by default.
     phase_routing: PhaseRouting | None = None
+    weighted_routes: list[WeightedRoute] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "enabled": self.enabled,
             "primary": self.primary.to_dict() if self.primary else None,
+            "weighted_routes": [route.to_dict() for route in self.weighted_routes],
             "fallbacks": [ref.to_dict() for ref in self.fallbacks],
             "fallback_triggers": list(self.fallback_triggers),
             "fallback_authorized": self.fallback_authorized,
@@ -442,6 +465,11 @@ class Alias:
         if not isinstance(name, str) or not name:
             return None
         primary = RouteRef.from_dict(data.get("primary"))
+        raw_weighted_routes = data.get("weighted_routes")
+        weighted_routes = [
+            route for item in raw_weighted_routes
+            if (route := WeightedRoute.from_dict(item)) is not None
+        ] if isinstance(raw_weighted_routes, list) else []
         fallbacks: list[RouteRef] = []
         raw_fallbacks = data.get("fallbacks")
         if isinstance(raw_fallbacks, list):
@@ -457,6 +485,7 @@ class Alias:
         return cls(
             name=name,
             enabled=bool(data.get("enabled", False)),
+            weighted_routes=weighted_routes,
             primary=primary,
             fallbacks=fallbacks,
             fallback_triggers=triggers,
@@ -469,7 +498,9 @@ class Alias:
 
     def all_routes(self) -> list[RouteRef]:
         routes: list[RouteRef] = []
-        if self.primary is not None:
+        if self.weighted_routes:
+            routes.extend(item.route for item in self.weighted_routes)
+        elif self.primary is not None:
             routes.append(self.primary)
         routes.extend(self.fallbacks)
         if self.phase_routing is not None:
@@ -616,7 +647,7 @@ class GatewayConfig:
 
     def published_aliases(self) -> list[Alias]:
         """Aliases that appear in ``/v1/models``."""
-        return [alias for alias in self.aliases.values() if alias.enabled and alias.primary is not None]
+        return [alias for alias in self.aliases.values() if alias.enabled and (alias.primary is not None or alias.weighted_routes)]
 
 
 class ConfigStore:
