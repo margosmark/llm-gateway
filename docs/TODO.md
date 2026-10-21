@@ -935,7 +935,7 @@ such. It is not a guarantee the provider made, and the console must not
 imply it is. It is the provider-side counterpart to T10's per-client
 cap.
 
-### T30 — Groups of aliases — `todo`
+### T30 — Groups of aliases — `done`
 
 **Why.** An owner with a dozen aliases wants to publish or disable a
 family of them together - "all the coding aliases", "everything that
@@ -1189,7 +1189,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T27 | Honour a client-supplied request id | 4 | todo |
 | T28 | Keepalive comments on a long stream | 4 | todo |
 | T29 | A concurrency cap per provider | 4 | todo |
-| T30 | Groups of aliases | 4 | todo |
+| T30 | Groups of aliases | 4 | **done** |
 | T31 | One provider health view | 4 | todo |
 | T32 | A durable circuit breaker, remembered across restarts | 4 | **done** |
 | T33 | Honour the provider's `Retry-After` | 4 | **done** |

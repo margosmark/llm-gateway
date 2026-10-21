@@ -198,6 +198,10 @@ Optional fallbacks
   OpenCode Go → mimo-v2.6-flash
 ```
 
+### Alias groups
+
+Aliases can share an optional tag in the console. Publish or disable a whole tag from the alias list; this toggles only each member's enabled state. Routes, fallback chains, authorization and any per-alias policy remain independent. A group with an alias missing its primary route is refused as a whole.
+
 ### Fallback is opt-in twice
 
 Cross-provider fallback sends a prompt to a *different* provider, and

@@ -513,6 +513,10 @@ the image revision is read from `release.json` in the data directory when a
 release step has written a digest-shaped value. The endpoint must never become
 a generic environment or configuration inspector.
 
+## Alias groups
+
+Aliases may carry an optional validated tag for owner convenience. The owner can publish or disable all aliases with a tag in one configuration transaction. Group operations change only each alias's enabled flag; routes, fallback authorization and chains, and any per-alias policy or budget remain independent. Publishing a group refuses the whole operation if any member lacks a primary route.
+
 ## Verification boundaries
 
 The unit suite uses fakes and fixtures; it does not authenticate with a
