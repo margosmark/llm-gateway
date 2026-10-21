@@ -415,6 +415,13 @@ and invoke every published route.
 
 ---
 
+## Local concurrency protection
+
+Inference calls are capped at four in-flight requests per provider, per gateway
+process. This local cap rejects excess requests with `rate_limited` and does
+not represent a provider guarantee or published provider limit. Streaming
+requests hold their slot until their response stream completes.
+
 ## Sensitive data and observability
 
 * It does **not** store prompts, responses, or response content.
