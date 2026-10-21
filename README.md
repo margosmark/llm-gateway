@@ -334,27 +334,22 @@ with the traps that cost the most time:
 These are real, and the console reports them honestly rather than hiding
 them.
 
-* **Models on a non-OpenAI dialect cannot be served.** OpenCode Go serves
-  some models over Anthropic Messages or Google v1beta. The gateway does not
-  translate those dialects, so such a route is refused with a clear reason
-  and its dialect is shown as Unknown. It is not guessed.
+* **Some catalogued models cannot be served.** OpenCode Go serves models over
+  Anthropic Messages and Google v1beta, but the router currently supports
+  conversion only between Responses and Chat Completions. Those routes are
+  refused rather than guessed; Anthropic support and a native `/v1/messages`
+  surface remain planned (T5), while Google v1beta support is blocked pending
+  a product decision (T6). See `docs/TODO.md`.
 * **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
-  a web dashboard, but no machine-readable API for a personal subscription.
-  The gateway does not call undocumented endpoints, so actual remaining
-  allowance and reset times are Unknown. Published estimates are shown with
-  their source and date.
-* **ChatGPT/Codex onboarding is not ready for use yet.** The current UI cannot
-  complete device-code polling, and ChatGPT catalogue refresh does not satisfy
-  the common model-metadata contract. These release blockers are R1 and R8 in
-  `docs/REVIEW.md`.
-* **Cross-dialect buffered replies are not ready for use yet.** A request can
-  be converted to an upstream dialect while its non-streaming response is
-  returned unchanged. This is R9 in `docs/REVIEW.md`; use only matching
-  dialects until it is fixed.
-* **The device-code flow is a beta path** implemented from provider
-  integration behaviour, not from a published third-party contract. OpenAI
-  does not endorse this gateway.
-* **No TLS.** The gateway is HTTP-only and bearer tokens and request content
+  a web dashboard, but no machine-readable allowance API for a personal
+  subscription. The gateway does not call undocumented endpoints, so actual
+  remaining allowance and reset times are Unknown. Published estimates are
+  shown with their source and date.
+* **The device-code integration is beta and not endorsed by OpenAI.** The
+  console completes polling, but the gateway integration is not an OpenAI-
+  endorsed product. OpenAI documents device authorization; the gateway's
+  implementation and support remain its own responsibility.
+* **No TLS.** The gateway is HTTP-only; bearer tokens and request content
   require a trusted LAN. Do not place it behind a TLS terminator or proxy
   until an explicit proxy-trust/forwarded-header design is implemented; the
   current server rejects forwarded headers.
@@ -365,16 +360,33 @@ them.
 * **The bridge is verified against a recorded corpus**, not yet against live
   provider captures. The corpus and its round-trip runner are in
   `tests/fixtures/bridge_corpus.json`.
-* **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
-  a web dashboard, but no machine-readable allowance API for a personal
-  plan, and the gateway calls no undocumented endpoint. Published estimates
-  are shown with their source and date.
 * **OpenCode Go publishes no context windows**, so an alias with an
   OpenCode Go route reports an unknown context limit. That is the honest
   answer: the Go service's own limit is what matters, and it does not
   publish it.
-* **The device-code path is a beta path.** OpenAI documents it; OpenAI does
-  not endorse this gateway's use of it.
+* **Thinking controls are not yet normalised across dialects.** Some thinking
+  and reasoning fields are silently dropped on converted requests (R25 in
+  `docs/REVIEW.md`); use only supported request fields until that is fixed.
+* **Local usage and cost are not yet reported.** The gateway does not populate
+  request token counts or calculate cost from published model prices (R26 in
+  `docs/REVIEW.md`). Provider allowance remains Unknown; this is not a billing
+  or allowance estimate.
+* **Manually editing a discovered model can discard published metadata.** The
+  current manual-entry action replaces fields such as context limits and
+  capabilities (R27 in `docs/REVIEW.md`). Avoid manual edits to discovered
+  models until this is fixed.
+* **No `/v1/messages` endpoint.** Anthropic-shaped clients cannot call the
+  gateway natively; this surface is planned as T5 in `docs/TODO.md`.
+
+R1, R8 and R9 are closed in `docs/REVIEW.md`: device-code polling completes,
+ChatGPT model refresh follows the shared adapter contract, and buffered
+cross-dialect responses are converted. These are covered by
+`tests/test_device_flow.py`, `tests/test_adapter_contract.py`, and
+`tests/test_buffered_bridge.py` respectively.
+
+The LAN-only HTTP trust model, absence of a machine-readable provider
+allowance API, and unpublished OpenCode Go context windows remain genuine
+limitations; none imply provider-account or live-deployment verification.
 
 ---
 
