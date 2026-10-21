@@ -299,7 +299,7 @@
     var ledgerCard = el("div", { class: "card" }, [
       el("h2", { text: "Recent request outcomes" }),
       el("p", { class: "small muted", text: "Metadata only. Prompts, responses, tokens and secrets are never stored." }),
-      el("p", { class: "small muted", text: "Kept in memory only, in a bounded ring of the most recent 10,000 requests. It is not written to disk and is lost when the gateway restarts." }),
+      el("p", { class: "small muted", text: (state.ledger_durability && state.ledger_durability.enabled ? "Recent outcomes are retained on the state volume for up to 30 days, with bounded rotation; the in-memory ring is the hot view. Persistence is asynchronous and may lag briefly. This metadata ledger is not a billing system." : "Durable ledger storage is not enabled; only the bounded in-memory ring is available and is lost when the gateway restarts. This metadata ledger is not a billing system.") }),
       el("div", { class: "row" }, [
         statBox("Requests", totals.requests || 0),
         statBox("Errors", totals.errors || 0),

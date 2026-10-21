@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 import threading
+from pathlib import Path
+from .ledger_persistence import LedgerPersistence
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -106,37 +108,87 @@ class RequestEvent:
 
 
 class RequestLedger:
-    """Bounded in-memory ring of request outcomes."""
+    """Bounded hot ring with asynchronous metadata-only durable storage."""
 
-    def __init__(self, capacity: int = DEFAULT_LEDGER_CAPACITY) -> None:
+    def __init__(self, capacity: int = DEFAULT_LEDGER_CAPACITY, persistence_path: Path | None = None) -> None:
         self._events: deque[RequestEvent] = deque(maxlen=capacity)
         self._lock = threading.Lock()
         self._evicted = 0
+        self._persistence = LedgerPersistence(persistence_path) if persistence_path else None
         self._totals = {"requests": 0, "errors": 0, "fallbacks": 0, "rate_limited": 0, "exhausted": 0}
+        if self._persistence:
+            for row in self._persistence.load(capacity):
+                try:
+                    self._events.append(RequestEvent(**row))
+                except TypeError:
+                    continue
+            for event in self._events:
+                self._count(event)
+
+    def _count(self, event: RequestEvent) -> None:
+        self._totals["requests"] += 1
+        if event.error_class:
+            self._totals["errors"] += 1
+        if event.error_class == "rate_limited":
+            self._totals["rate_limited"] += 1
+        if event.error_class == "exhausted":
+            self._totals["exhausted"] += 1
+        if event.fallback_used:
+            self._totals["fallbacks"] += 1
 
     def record(self, event: RequestEvent) -> None:
         with self._lock:
             if len(self._events) == self._events.maxlen:
                 self._evicted += 1
             self._events.append(event)
-            self._totals["requests"] += 1
-            if event.error_class:
-                self._totals["errors"] += 1
-            if event.error_class == "rate_limited":
-                self._totals["rate_limited"] += 1
-            if event.error_class == "exhausted":
-                self._totals["exhausted"] += 1
-            if event.fallback_used:
-                self._totals["fallbacks"] += 1
+            self._count(event)
+        if self._persistence:
+            self._persistence.submit(event.to_dict())
 
-    def recent(self, limit: int = 50) -> list[dict[str, Any]]:
+    def amend(self, request_id: str, **fields: Any) -> bool:
+        """Amend safe outcome metadata in memory and durable history, if present."""
+        from .ledger_persistence import AMENDABLE
+        if not fields or not set(fields).issubset(AMENDABLE):
+            raise ValueError("only status, error_class, token_counters, latency_ms may be amended")
+        if "status" in fields and fields["status"] is not None and (not isinstance(fields["status"], int) or not 100 <= fields["status"] <= 599):
+            raise ValueError("status must be an HTTP status code or None")
+        if "latency_ms" in fields and fields["latency_ms"] is not None and (not isinstance(fields["latency_ms"], int) or fields["latency_ms"] < 0):
+            raise ValueError("latency_ms must be a non-negative integer or None")
+        if "token_counters" in fields and fields["token_counters"] is not None:
+            counters = fields["token_counters"]
+            if not isinstance(counters, dict) or any(not isinstance(k, str) or not isinstance(v, int) or v < 0 for k, v in counters.items()):
+                raise ValueError("token_counters must contain non-negative integer metadata")
         with self._lock:
-            items = list(self._events)[-limit:]
-        return [event.to_dict() for event in reversed(items)]
+            event = next((item for item in self._events if item.request_id == request_id), None)
+            if event is None:
+                return False
+            before = event.error_class
+            event.status = fields.get("status", event.status)
+            event.error_class = fields.get("error_class", event.error_class)
+            event.token_counters = fields.get("token_counters", event.token_counters)
+            event.latency_ms = fields.get("latency_ms", event.latency_ms)
+            if before != event.error_class:
+                self._totals["errors"] += int(bool(event.error_class)) - int(bool(before))
+                self._totals["rate_limited"] += int(event.error_class == "rate_limited") - int(before == "rate_limited")
+                self._totals["exhausted"] += int(event.error_class == "exhausted") - int(before == "exhausted")
+            row = event.to_dict()
+        if self._persistence:
+            self._persistence.submit(row)
+        return True
 
-    def totals(self) -> dict[str, int]:
-        with self._lock:
-            return dict(self._totals)
+    def durability(self) -> dict[str, Any]:
+        return {"enabled": self._persistence is not None, "retention_days": 30, "billing_system": False}
+
+    def flush(self, timeout: float = 5.0) -> bool:
+        return self._persistence.flush(timeout) if self._persistence else True
+
+    def close(self, timeout: float = 5.0) -> None:
+        if self._persistence:
+            self._persistence.close(timeout)
+
+    @property
+    def persistence_enabled(self) -> bool:
+        return self._persistence is not None
 
     @property
     def evicted(self) -> int:
@@ -149,6 +201,15 @@ class RequestLedger:
             self._evicted = 0
             for key in self._totals:
                 self._totals[key] = 0
+
+    def recent(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            items = list(self._events)[-limit:]
+        return [event.to_dict() for event in reversed(items)]
+
+    def totals(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._totals)
 
 
 @dataclass
