@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import socket
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -15,7 +16,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from gateway.cli import _is_private_or_loopback, _is_wildcard, build_application, build_parser, main
+from gateway.cli import _address_is_local, _is_private_or_loopback, _is_wildcard, build_application, build_parser, main
 
 
 class BindRuleTests(unittest.TestCase):
@@ -76,12 +77,22 @@ class ParserTests(unittest.TestCase):
             self.assertIn("not a private or loopback address", error.getvalue())
             build_app.assert_not_called()
 
+    def test_address_is_local_uses_ipv6_probe_for_ula(self) -> None:
+        with mock.patch("socket.socket") as create_socket:
+            probe = create_socket.return_value.__enter__.return_value
+            self.assertTrue(_address_is_local("fd12:3456::1"))
+        create_socket.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
+        probe.bind.assert_called_once_with(("fd12:3456::1", 0, 0, 0))
+
     def test_owned_ipv6_ula_uses_startup_path(self) -> None:
-        with mock.patch("gateway.cli._address_is_local", return_value=True) as local_check, \
+        with mock.patch("socket.socket") as create_socket, \
                 mock.patch("gateway.cli.build_application", return_value=(None, None, None, None)) as build_app:
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--host", "fd12:3456::1", "--print-url"]), 0)
-        local_check.assert_called_once_with("fd12:3456::1")
+        create_socket.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
+        create_socket.return_value.__enter__.return_value.bind.assert_called_once_with(
+            ("fd12:3456::1", 0, 0, 0)
+        )
         build_app.assert_called_once()
         self.assertEqual(build_app.call_args.args[1], "fd12:3456::1")
 
