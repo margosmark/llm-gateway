@@ -131,6 +131,11 @@ interpreted. A rate with no requests behind it is `null`, never `0.0`. The
 console renders this as a fallback card and a day selector on the usage
 table; both state plainly that the data is metadata only.
 
+The owner console can export recent ledger rows as CSV or JSON through a
+read-only endpoint; exports are bounded to 1,000 rows, allow-list only the
+six ledger-table fields, and pass values through the same redaction rules
+as the request log. The endpoint does not create a ledger record.
+
 The open circuits are the exception: they are written to
 `circuits.json` in the state directory, because a gateway that restarts
 during a provider outage must not call that provider again. The file holds
