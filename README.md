@@ -435,7 +435,10 @@ requests hold their slot until their response stream completes.
 
 Status, analytics and exports are metadata only. A request ledger records
 which alias was asked for, which provider and model actually served it, how
-long it took and how it ended — never what it said. Token counters come from
+long it took and how it ended — never what it said. Provider health combines
+connection/test/catalogue metadata, model counts, local cooldowns and recent
+served-request success/failure rates; it performs no provider calls, and rates
+remain Unknown without observed requests. Token counters come from
 reported provider usage; local cost estimates use published prices only and
 are not provider bills. The Status page aggregates usage for the last 24 hours
 and displays the price source and observation date, and it can show any

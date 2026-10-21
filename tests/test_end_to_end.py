@@ -938,6 +938,17 @@ class ConsoleApiTests(unittest.TestCase):
         self.assertEqual(set(payload["request_statistics"]), {"hour", "day", "month"})
         self.assertEqual(payload["request_statistics"]["day"]["window_hours"], 24)
         self.assertEqual(set(payload["request_statistics"]["day"]) - {"window", "window_hours"}, {"alias", "provider", "model"})
+        health = payload["provider_health"]
+        # One health row per configured provider, sorted by id — the exact
+        # provider set is whatever this build registers (main has grown one).
+        self.assertEqual(
+            [row["provider_id"] for row in health],
+            sorted(provider["provider_id"] for provider in payload["providers"]),
+        )
+        self.assertEqual(health[0]["connection_state"], "connected")
+        self.assertEqual(health[0]["model_count"], 1)
+        self.assertIsNone(health[0]["recent_success_rate"])
+        self.assertEqual(health[0]["recent_requests"], 0)
 
     def test_state_reports_the_zero_state(self) -> None:
         status, payload, _ = self.harness.request("GET", "/owner/api/state")

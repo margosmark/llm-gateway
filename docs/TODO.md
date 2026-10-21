@@ -941,7 +941,7 @@ no limit, and each alias keeps its own configuration.
 budget. Those stay per alias, because a shared fallback would quietly
 merge two privacy decisions.
 
-### T31 — One provider health view — `todo`
+### T31 — One provider health view — `done`
 
 **Why.** The facts already exist and are scattered: `ProviderState` holds
 `state`, `last_test_at`, `last_error` and `catalog_observed_at`

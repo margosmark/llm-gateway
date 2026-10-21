@@ -88,7 +88,12 @@ request identifier, no prompt, no response, and no cost estimate (prices are
 applied at read time); it is written 0600 and is not a billing record.
 
 The Status view reports whether persistence is enabled and the declared
-30-day retention window. Local usage aggregates cover the last 24 hours and
+30-day retention window. Its provider health summary combines configured
+connection/test/catalogue metadata, model counts, current local cooldowns,
+and success/failure rates from the recent metadata ledger. Rates are based on
+requests actually served by each provider; no observations remain Unknown.
+The summary performs no provider calls and does not infer external health or
+entitlement. Local usage aggregates cover the last 24 hours and
 are computed from token counters and published prices, with source and
 observation date. Each alias/provider/model row exposes a **known subtotal**
 (`known_amount_usd` / `amount_usd`) plus explicit unknown coverage:
