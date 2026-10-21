@@ -664,15 +664,16 @@ class ConfigStore:
         self._path = path
         self._lock = threading.RLock()
         self._config = GatewayConfig.from_dict(read_json(path, {}))
+        self._snapshot = GatewayConfig.from_dict(self._config.to_dict())
 
     @property
     def path(self) -> Path:
         return self._path
 
     def snapshot(self) -> GatewayConfig:
-        """Return the current configuration. Makes no provider calls."""
+        """Return the current immutable-by-convention configuration view."""
         with self._lock:
-            return GatewayConfig.from_dict(self._config.to_dict())
+            return self._snapshot
 
     def mutate(self) -> "_ConfigTransaction":
         """Open a transaction. The revision is bumped and persisted on exit."""
@@ -680,17 +681,21 @@ class ConfigStore:
 
     def replace(self, config: GatewayConfig) -> None:
         with self._lock:
-            self._config = config
-            self._persist()
+            replacement = GatewayConfig.from_dict(config.to_dict())
+            self._persist(replacement)
+            self._config = replacement
+            self._snapshot = GatewayConfig.from_dict(replacement.to_dict())
 
     def replace_validated(self, config: GatewayConfig) -> None:
         """Persist a prevalidated replacement before publishing it in memory."""
         with self._lock:
-            atomic_write_json(self._path, config.to_dict(), mode=0o600)
-            self._config = GatewayConfig.from_dict(config.to_dict())
+            replacement = GatewayConfig.from_dict(config.to_dict())
+            self._persist(replacement)
+            self._config = replacement
+            self._snapshot = GatewayConfig.from_dict(replacement.to_dict())
 
-    def _persist(self) -> None:
-        atomic_write_json(self._path, self._config.to_dict(), mode=0o600)
+    def _persist(self, config: GatewayConfig | None = None) -> None:
+        atomic_write_json(self._path, (config or self._config).to_dict(), mode=0o600)
 
 
 class _ConfigTransaction:
@@ -709,8 +714,9 @@ class _ConfigTransaction:
         try:
             if exc_type is None and self._config is not None:
                 self._config.revision = self._store._config.revision + 1
+                self._store._persist(self._config)
                 self._store._config = self._config
-                self._store._persist()
+                self._store._snapshot = GatewayConfig.from_dict(self._config.to_dict())
         finally:
             self._store._lock.release()
         return False
