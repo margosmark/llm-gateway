@@ -21,7 +21,7 @@ from pathlib import Path
 
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
-from gateway.config import ConfigStore, ProviderState
+from gateway.config import Alias, ConfigStore, ModelEntry, ProviderState, RouteRef
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
@@ -61,6 +61,22 @@ def _chromium() -> str | None:
     return None
 
 
+class StubAdapter:
+    """A minimal provider, so route validation can check a route."""
+
+    provider_id = "opencode_go"
+    kind = "opencode_go"
+
+    def list_models(self) -> list:
+        return []
+
+    def test_connection(self):
+        return None
+
+    def invoke(self, request):
+        raise NotImplementedError
+
+
 class BrowserConsoleTests(unittest.TestCase):
     def test_the_console_opens_directly_and_shows_the_trusted_lan_notice(self) -> None:
         node = shutil.which("node")
@@ -74,6 +90,9 @@ class BrowserConsoleTests(unittest.TestCase):
             config = ConfigStore(data_dir / "config.json")
             credentials = CredentialStore(data_dir)
             registry = AdapterRegistry()
+            # Route validation checks that the provider is registered, so
+            # the harness needs one.
+            registry.register(StubAdapter())
             # The real startup registers both providers, so the console has
             # provider cards before anything is connected. The harness must
             # do the same, or the console renders empty.
@@ -82,6 +101,31 @@ class BrowserConsoleTests(unittest.TestCase):
                     snapshot.providers[provider_id] = ProviderState(
                         provider_id=provider_id, kind=provider_id
                     )
+                # An alias with a fallback, so the console has a chain the
+                # edit flow can shorten.
+                snapshot.providers["opencode_go"].models = {
+                    "first-fallback": ModelEntry(
+                        model_id="first-fallback", enabled=True, dialect="openai_chat"
+                    ),
+                    "second-fallback": ModelEntry(
+                        model_id="second-fallback", enabled=True, dialect="openai_chat"
+                    ),
+                    "third-fallback": ModelEntry(
+                        model_id="third-fallback", enabled=True, dialect="openai_chat"
+                    ),
+                }
+                snapshot.aliases["chain"] = Alias(
+                    name="chain",
+                    enabled=True,
+                    primary=RouteRef("opencode_go", "first-fallback"),
+                    fallbacks=[
+                        RouteRef("opencode_go", "second-fallback"),
+                        RouteRef("opencode_go", "third-fallback"),
+                    ],
+                    fallback_triggers=["upstream_unavailable"],
+                    fallback_authorized=True,
+                    fallback_confirmed_providers=["opencode_go"],
+                )
             router = Router(config, registry, ledger=RequestLedger())
             port = _free_port()
             policy = SecurityPolicy(

@@ -59,6 +59,11 @@ ERROR_TRANSIENT = "transient"
 ERROR_AUTH = "auth"
 ERROR_POLICY = "policy"
 ERROR_MALFORMED = "malformed"
+#: The upstream no longer serves this model on this route. It is an
+#: availability fact about the route, not a policy failure and not a
+#: temporary condition: retrying the same route will not help, but another
+#: route may still serve the request.
+ERROR_ROUTE_GONE = "route_gone"
 ERROR_UNKNOWN = "unknown"
 ERROR_CLASSES = (
     ERROR_EXHAUSTED,
@@ -67,6 +72,7 @@ ERROR_CLASSES = (
     ERROR_AUTH,
     ERROR_POLICY,
     ERROR_MALFORMED,
+    ERROR_ROUTE_GONE,
     ERROR_UNKNOWN,
 )
 

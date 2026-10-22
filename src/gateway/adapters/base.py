@@ -28,6 +28,7 @@ from gateway.config import (
     ERROR_MALFORMED,
     ERROR_POLICY,
     ERROR_RATE_LIMITED,
+    ERROR_ROUTE_GONE,
     ERROR_TRANSIENT,
     ERROR_UNKNOWN,
 )
@@ -53,6 +54,20 @@ RATE_LIMIT_CODES = frozenset(
         "requests_rate_limit_exceeded",
         "too_many_requests",
         "slow_down",
+    }
+)
+
+#: Upstream error codes that mean the model is no longer served on this
+#: route. It is not transient and not a policy failure: the route is simply
+#: unavailable, and another route may still serve the request.
+ROUTE_GONE_CODES = frozenset(
+    {
+        "ModelDeprecated",
+        "model_deprecated",
+        "model_not_found",
+        "model_removed",
+        "model_unavailable",
+        "not_found",
     }
 )
 
@@ -84,9 +99,12 @@ CLASS_MESSAGES = {
     ERROR_AUTH: "the provider rejected the stored credential",
     ERROR_POLICY: "the provider refused this request on policy grounds",
     ERROR_MALFORMED: "the provider rejected the request as malformed",
+    ERROR_ROUTE_GONE: "the provider no longer serves this model on this route",
     ERROR_UNKNOWN: "the provider returned a failure that could not be classified",
 }
 
+#: A route that no longer exists will not come back, so it is never retried
+#: on the same route even though it may be served by another one.
 RETRYABLE_CLASSES = frozenset({ERROR_TRANSIENT, ERROR_RATE_LIMITED})
 
 #: The longest window a provider's ``Retry-After`` may ask for.
@@ -297,10 +315,16 @@ def classify_status(status: int, payload: Any = None, upstream_code: str | None 
     if code is not None:
         if code in EXHAUSTION_CODES:
             return ERROR_EXHAUSTED
+        if code in ROUTE_GONE_CODES:
+            return ERROR_ROUTE_GONE
         if code in POLICY_CODES:
             return ERROR_POLICY
         if code in RATE_LIMIT_CODES:
             return ERROR_RATE_LIMITED
+
+    # 410 Gone is unambiguous: the upstream no longer has the resource.
+    if status == 410:
+        return ERROR_ROUTE_GONE
 
     if status == 402:
         # Payment required: the provider states the allowance is not

@@ -38,6 +38,7 @@ from gateway.config import (
     ERROR_MALFORMED,
     ERROR_POLICY,
     ERROR_RATE_LIMITED,
+    ERROR_ROUTE_GONE,
     ERROR_TRANSIENT,
     ERROR_UNKNOWN,
     Alias,
@@ -56,11 +57,16 @@ from gateway.core.capabilities import (
 from gateway.observability import RequestEvent, utc_now_iso
 from gateway.session import derive_session
 
-#: Maps an error class onto the fallback trigger it satisfies.
+#: Maps an error class onto the fallback trigger it satisfies. A route the
+#: upstream no longer serves satisfies the "upstream unavailable" trigger:
+#: the route is unavailable, and the owner has said another may serve the
+#: request. It is not a policy decision, and it is not a temporary
+#: condition, so it does not put the whole provider into cooldown.
 TRIGGER_FOR_ERROR = {
     ERROR_EXHAUSTED: TRIGGER_EXHAUSTED,
     ERROR_RATE_LIMITED: TRIGGER_RATE_LIMITED,
     ERROR_TRANSIENT: TRIGGER_UPSTREAM_UNAVAILABLE,
+    ERROR_ROUTE_GONE: TRIGGER_UPSTREAM_UNAVAILABLE,
 }
 
 #: Error classes that never trigger a fallback unless the owner explicitly

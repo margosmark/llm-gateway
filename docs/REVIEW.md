@@ -1078,6 +1078,53 @@ workflow records the same value.
 reduced to the digest, a bare digest is kept, a local image falls back to
 its ID, and the resolved value is one the gateway's own validator accepts.
 
+### R32 — A deprecated model stopped the fallback chain — **closed**
+**Severity: high availability risk.** *(closed; found in the live ledger)*
+
+OpenCode Go returned **410 Gone** for a model it had deprecated:
+
+```json
+{"type": "error", "error": {"type": "ModelDeprecated",
+ "message": "Model minimax-m3.1-flash-free has been deprecated."}}
+```
+
+`410` was classified `unknown`, and `unknown` never falls back - by design -
+so the chain stopped with a second, perfectly usable fallback sitting unused,
+and the owner got a 502 for every request.
+
+The class is neither transient nor a policy failure. It is an **availability
+fact about the route**: the upstream no longer serves this model there, and
+another route may still serve the request. It is not retried on the same
+route, because a deprecated model will not come back.
+
+**Resolution.** A `route_gone` class now covers `410` and the provider's own
+deprecation codes. It satisfies the "upstream unavailable" trigger, so a
+chain continues when the owner has enabled that trigger. It is never retried
+on the same route. And because the circuit store is scoped per route, the
+deprecation of one model does not bench its provider's other models.
+
+**Evidence:** `tests/test_route_gone.py` - `410` and `ModelDeprecated`
+classify as route gone; the class is not retryable; a gone first fallback
+continues to the second, and the attempt is recorded; and the provider's
+other routes stay usable.
+
+### R33 — Removing a fallback in the console did not remove it — **closed**
+**Severity: medium correctness risk.** *(closed; found by driving the console
+in a browser)*
+
+The Remove control on a fallback row removed the row from the DOM but left
+the entry in the array the save payload is built from, so the fallback was
+silently restored on the next save. The console showed the row gone; the
+saved alias was unchanged.
+
+**Resolution.** The Remove control splices the entry out of the list as well
+as removing the row, so the two stay in step.
+
+**Evidence:** `tests/browser_console_test.js` drives the console in a real
+browser: an alias with two fallbacks is edited, a row is removed, the save
+is applied, and the alias is read back with one fallback and its primary
+untouched. The test fails against the previous behaviour.
+
 ## Recommended order
 
 Findings R0-R24 and R28-R31 are closed or superseded. **R25, R26 and R27
