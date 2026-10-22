@@ -838,17 +838,30 @@ class GatewayApp:
                     provider = _new_provider_state(provider_id, "manual")
                     config.providers[provider_id] = provider
                 existing = provider.models.get(model_id)
+                # A manual entry **merges**. It changes only the fields the
+                # owner actually supplied, and preserves the published
+                # metadata it has no opinion about. Rebuilding the entry
+                # would silently blank a discovered model's context limit,
+                # its reasoning levels and its capability flags - and the
+                # README sends the owner here to fix a missing dialect.
+                if existing is None:
+                    entry = ModelEntry(
+                        model_id=model_id,
+                        enabled=bool(payload.get("enabled", True)),
+                        notes="entered manually",
+                    )
+                else:
+                    entry = existing
+                    if isinstance(payload.get("enabled"), bool):
+                        entry.enabled = payload["enabled"]
                 dialect = payload.get("dialect")
-                provider.models[model_id] = ModelEntry(
-                    model_id=model_id,
-                    enabled=existing.enabled if existing else bool(payload.get("enabled", True)),
-                    dialect=dialect if isinstance(dialect, str) else (existing.dialect if existing else None),
-                    source="manual",
-                    observed_at=utc_now_iso(),
-                    notes="entered manually",
-                    retention_class=existing.retention_class if existing else "unknown",
-                    limits_source="unknown",
-                )
+                if isinstance(dialect, str) and dialect:
+                    entry.dialect = dialect
+                if isinstance(payload.get("notes"), str) and payload["notes"]:
+                    entry.notes = payload["notes"]
+                entry.source = "manual"
+                entry.observed_at = utc_now_iso()
+                provider.models[model_id] = entry
             else:
                 return json_response(
                     {"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400

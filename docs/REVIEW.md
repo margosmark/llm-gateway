@@ -797,8 +797,8 @@ reports Unknown, never zero and never "unlimited".
 
 **Planned as** `docs/TODO.md` item **T2**.
 
-### R27 — Entering a model manually silently discarded its published capability metadata — **open**
-**Severity: medium correctness/honesty risk.** *(open)*
+### R27 — Entering a model manually silently discarded its published capability metadata — **closed**
+**Severity: medium correctness/honesty risk.** *(closed)*
 
 The `manual` model action replaces the whole `ModelEntry` rather than
 merging into it (`src/gateway/http/app.py:835-850`). The replacement
@@ -833,8 +833,26 @@ to. It is the same failure class the bridge has already been ruled on for
 only the fields the owner actually supplied, and preserves published
 metadata it has no opinion about. A manual entry that cannot supply a
 published fact keeps the published one; it must not silently blank it. Add
-a test that a manual dialect edit preserves the context limit, the
-reasoning levels and the capability flags.
+
+**Resolution.** The `manual` action now merges into the existing entry. It
+changes only the fields the owner actually supplied - the dialect, and the
+enabled state and the note when those are supplied - and preserves every
+published fact it has no opinion about: the context window and its effective
+limit, the reasoning levels, the monthly limit and its source and observation
+date, the retention class, and the capability flags. A model that does not
+exist yet is created enabled, with the dialect the owner supplied.
+
+The owner's symptom is gone: a manual dialect edit no longer takes the
+alias's limit from 258,400 to Unknown, and no longer empties the reasoning
+levels so that a reasoning request is dropped as a degradation instead of
+honoured. The console already reported a limit only when it had one, and now
+it has one to report.
+
+**Evidence:** `tests/test_manual_entry_merge.py` - a manual dialect edit
+preserves the context window, the effective limit, the reasoning levels, the
+monthly limit and its source, the retention class, the capability flags and
+the enabled state; an explicit enabled flag is honoured; a new manual model
+is created enabled; and the alias's limit survives the edit.
 
 **Planned as** `docs/TODO.md` item **T16**.
 
