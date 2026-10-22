@@ -118,6 +118,7 @@ class GatewayApp:
         r.add(["GET"], "/favicon.ico", self.handle_favicon)
 
         r.add(["GET"], "/v1/models", self.handle_models)
+        r.add(["GET"], "/v1/alias-catalog", self.handle_alias_catalog)
         r.add(["POST"], "/v1/chat/completions", self.handle_chat_completions)
         r.add(["POST"], "/v1/responses", self.handle_responses)
 
@@ -307,6 +308,39 @@ class GatewayApp:
                 "alias in Models & Routes. Until then this catalogue is empty by design."
             )
         return json_response(payload)
+
+    def handle_alias_catalog(self, request: Request) -> Response:
+        """Published alias metadata for clients that need capabilities.
+
+        Unlike owner state, this contains no provider inventory, ledger,
+        credentials or unpublished routes. It makes no upstream calls.
+        """
+        profile = self._resolve_profile(request)
+        config = self.config.snapshot()
+        aliases = []
+        for alias in sorted(config.published_aliases(), key=lambda item: item.name):
+            if not profile_allows(profile, alias.name):
+                continue
+            routes = []
+            for route in alias.all_routes():
+                provider = config.providers.get(route.provider)
+                entry = provider.models.get(route.model) if provider else None
+                routes.append((route.label(), entry.context_limit if entry else None))
+            primary = alias.primary
+            provider = config.providers.get(primary.provider) if primary else None
+            model = provider.models.get(primary.model) if provider and primary else None
+            aliases.append({
+                "id": alias.name,
+                "context": alias_context_limit(routes),
+                "primary_reasoning_efforts": list(model.reasoning_efforts) if model else [],
+                "supports_function_tools": all(
+                    config.providers.get(route.provider) is not None
+                    and (entry := config.providers[route.provider].models.get(route.model)) is not None
+                    and entry.supports_function_tools
+                    for route in alias.all_routes()
+                ),
+            })
+        return json_response({"object": "list", "data": aliases})
 
     def handle_chat_completions(self, request: Request) -> Any:
         return self._handle_inference(request, DIALECT_OPENAI_CHAT)

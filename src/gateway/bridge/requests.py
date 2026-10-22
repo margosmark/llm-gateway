@@ -62,6 +62,33 @@ def _without_disabled_reasoning(payload: dict[str, Any]) -> dict[str, Any]:
     return forwarded
 
 
+def _chat_reasoning(payload: dict[str, Any]) -> str | None:
+    """Read both Chat Completions spellings without discarding a control."""
+    if "thinking" in payload or "thinkingConfig" in payload:
+        raise ConversionError(
+            "thinking budget controls cannot be expressed by this OpenAI-family route; "
+            "use a supported reasoning effort instead",
+            capability="thinking",
+        )
+    nested = payload.get("reasoning")
+    if nested is not None:
+        if not isinstance(nested, dict) or set(nested) - {"effort", "enabled"}:
+            raise ConversionError("unsupported reasoning controls in Chat Completions", capability="reasoning")
+        if "effort" in nested and not isinstance(nested["effort"], str):
+            raise ConversionError("reasoning.effort must be a string", capability="reasoning")
+    flat = payload.get("reasoning_effort")
+    if flat is not None and not isinstance(flat, str):
+        raise ConversionError("reasoning_effort must be a string", capability="reasoning")
+    effort = nested.get("effort") if isinstance(nested, dict) else None
+    if flat is not None and effort is not None and flat != effort:
+        raise ConversionError("conflicting reasoning effort controls", capability="reasoning")
+    if isinstance(nested, dict) and nested.get("enabled") is False:
+        if (flat or effort) not in (None, "none"):
+            raise ConversionError("reasoning is disabled but an effort was requested", capability="reasoning")
+        return "none"
+    return flat or effort
+
+
 def _chat_content_to_parts(content: Any) -> list[ContentPart]:
     """Convert Chat Completions message content into content parts."""
     if content is None:
@@ -262,7 +289,7 @@ def from_chat_completions(payload: dict[str, Any]) -> NormalisedRequest:
     if max_tokens is None:
         max_tokens = payload.get("max_tokens")
 
-    effort = payload.get("reasoning_effort")
+    effort = _chat_reasoning(payload)
     stop = [str(s) for s in _as_list(payload.get("stop")) if isinstance(s, str)]
 
     extra = {key: payload[key] for key in _CHAT_ONLY if key in payload}
@@ -506,6 +533,21 @@ def to_responses(request: NormalisedRequest) -> dict[str, Any]:
 def convert_request(payload: dict[str, Any], source: str, target: str) -> dict[str, Any]:
     """Convert a request between two dialects."""
     if source == target:
+        # Same dialect: the upstream owns its own dialect, so a control the
+        # gateway does not understand is forwarded rather than dropped or
+        # refused - the provider is the party that defines what it accepts.
+        if source == DIALECT_OPENAI_CHAT:
+            nested = payload.get("reasoning")
+            if (
+                isinstance(nested, dict)
+                and set(nested) == {"effort"}
+                and isinstance(nested.get("effort"), str)
+                and "reasoning_effort" not in payload
+            ):
+                forwarded = dict(payload)
+                forwarded.pop("reasoning", None)
+                forwarded["reasoning_effort"] = nested["effort"]
+                return forwarded
         return _without_disabled_reasoning(payload)
     if source == DIALECT_OPENAI_CHAT and target == DIALECT_OPENAI_RESPONSES:
         return to_responses(from_chat_completions(payload))

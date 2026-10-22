@@ -9,6 +9,8 @@ dependencies:
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m compileall -q src tests
 PYTHONPATH=src python3 -m gateway --help
+node tests/console_dom_test.js        # the console's JavaScript regressions
+node tests/test_opencode_catalog.mjs  # the OpenCode plugin's catalogue validator
 ```
 
 The unit suite must be deterministic: do not require network access, real

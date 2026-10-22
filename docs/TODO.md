@@ -150,7 +150,21 @@ excluded, reason recorded) or is refused at the bridge:
 its exclusion reason, or is explicitly documented as informational-only with
 a cited reason for that choice — and each has a refusal test.
 
-### T4 — Normalised thinking levels — `todo`
+### T4 — Normalised thinking levels — `done`
+
+**Landed.** One normalisation on the converted paths: both Chat Completions
+spellings parse into one canonical level and render per dialect
+(`reasoning_effort` for Chat Completions, `reasoning: {effort}` for
+Responses). A control the target cannot express - an Anthropic thinking
+budget, an unknown reasoning field, or two controls that contradict - is
+**refused**, never discarded. A level the selected model does not publish
+is still dropped for that route with the substitution recorded. A
+same-dialect payload the gateway does not model is forwarded untouched,
+because the provider owns its own dialect. Evidence:
+`tests/test_thinking_controls.py`, and R35 closes R25 in
+[`REVIEW.md`](REVIEW.md). Rendering for the Anthropic and Google dialects
+stays with T5/T6, which are not served yet; until then those conversions
+are refused rather than converted.
 
 **Why.** "Thinking level" is the one control a client is most likely to
 send and the gateway is least able to honour. Today:
@@ -295,6 +309,36 @@ models stay usable; and each has a test.
 **Landed.** A `route_gone` class now covers `410` and the provider's
 deprecation codes. Evidence: `tests/test_route_gone.py`, and R32 is closed
 in [`REVIEW.md`](REVIEW.md).
+
+
+### T36 — The gateway appears in OpenCode's model selector — `done`
+
+**Why.** The gateway published only bare alias names at `/v1/models`. An
+OpenCode client could not list the aliases with their context limit, tool
+support and reasoning levels, and a custom provider had to name every alias
+by hand in its configuration - so an alias created in the console was
+invisible to that client until its configuration was edited again.
+
+**Scope.** `GET /v1/alias-catalog` publishes, per published alias, the
+alias-level context limit (the smallest limit among the routes that could
+serve it, Unknown when any route's is unpublished), the primary route's
+published reasoning levels, and whether every route supports function tools.
+`integrations/opencode/` is an OpenCode V2 provider plugin that reads it,
+registers one provider and refreshes every 60 seconds.
+
+**Rules.** Metadata only: no provider inventory, no ledger, no credential,
+no unpublished route, and no provider call on a read. OpenCode requires a
+number, so an Unknown alias gets the **owner-chosen 200,000-token OpenCode
+working budget**, labelled `(200k client budget; upstream unknown)`. That is
+a client-side budget, not a provider guarantee - the gateway still reports
+Unknown. A failed refresh keeps the last complete inventory rather than
+erasing the owner's selection.
+
+**Landed.** Evidence: `tests/test_opencode_catalog.py`,
+`tests/test_opencode_catalog.mjs`, and R34 in [`REVIEW.md`](REVIEW.md). The
+integration was also exercised against a running gateway: the aliases
+appeared in `/models` with their real limits, and a real request completed
+through the gateway with the fallback chain and attribution recorded.
 
 
 ---
@@ -924,7 +968,7 @@ no content.
 | T1 | Refresh the README's Known Limitations | 1 | **done** |
 | T2 | Local usage and cost accounting | 1 | todo |
 | T3 | Enforce the declared-but-unchecked capabilities | 1 | todo |
-| T4 | Normalised thinking levels | 1 | todo |
+| T4 | Normalised thinking levels | 1 | **done** |
 | T5 | Anthropic Messages dialect and `/v1/messages` | 1 | todo |
 | T6 | Google v1beta dialect | 1 | blocked |
 | T7 | A durable request ledger | 2 | todo |
@@ -936,7 +980,7 @@ no content.
 | T13 | A plain OpenAI API-key provider | 3 | todo |
 | T14 | A native Anthropic API-key provider | 3 | todo |
 | T15 | A local provider | 3 | todo |
-| T16 | A manual model entry must merge, not replace | 1 | todo |
+| T16 | A manual model entry must merge, not replace | 1 | **done** |
 | T17 | Stop the 41ms stall on every small response | perf | **done** |
 | T18 | Reuse upstream connections to the providers | perf | todo |
 | T19 | Stop deep-copying the configuration on every read | perf | todo |
@@ -955,13 +999,14 @@ no content.
 | T32 | A durable circuit breaker, remembered across restarts | 4 | **done** |
 | T33 | Honour the provider's `Retry-After` | 4 | **done** |
 | T34 | Decide whether a response cache may exist at all | 4 | blocked |
+| T36 | The gateway appears in OpenCode's model selector | 1 | **done** |
 
 ## Suggested order
 
 1. **T1** — done. The README's Known Limitations no longer cites closed
    findings.
-2. **T4** — the silent drops (R25, R26) are live defects, and the
-   normalised thinking model is what fixes them properly.
+2. **T4** — done. The silent drops (R25) are fixed; **R26** is the one open
+   finding and belongs to T2.
 3. **T2** — the pieces exist; this is plumbing, and it changes what the
    Status page can honestly claim.
 4. **T3** — small, and it closes a class of opaque upstream failures.

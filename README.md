@@ -34,7 +34,7 @@ never breaks your client's configuration.
 | Surface | Address | Who can reach it | What it does |
 |---|---|---|---|
 | Owner console and configuration | `http://10.10.11.109:8765/owner/` | Trusted LAN | Full configuration, credential enrollment, provider actions, and status; no login |
-| API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses` |
+| API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/responses` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
 
 Trusted LAN admin mode: any device that can reach this address can configure
@@ -177,6 +177,60 @@ routes it excluded and why. It never silently serves a different model.
 
 ---
 
+## Using it from OpenCode
+
+The gateway can appear in OpenCode's own `/models` selector, so an alias
+published in the console shows up as a selectable model without editing any
+OpenCode configuration by hand.
+
+`GET /v1/alias-catalog` publishes, for every published alias, the
+alias-level context limit, the primary route's published reasoning levels,
+and whether every route supports function tools. It is metadata only — no
+provider inventory, no ledger, no credential, no unpublished route — and it
+makes no provider call.
+
+`integrations/opencode/` is an OpenCode V2 provider plugin that reads that
+catalogue, registers one provider (`personal-gateway`) and refreshes every
+60 seconds. Install it in `~/.config/opencode/opencode.jsonc`:
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "/path/to/llm-gateway/integrations/opencode",
+      "options": { "baseURL": "http://10.10.11.109:8765/v1" }
+    }
+  ]
+}
+```
+
+The base URL must be the gateway's own private address with the `/v1`
+prefix; the plugin refuses a public host, an HTTPS host, a path other than
+`/v1`, and a URL carrying credentials or a query. After it loads,
+`/models` lists `personal-gateway/<alias>`, and each reasoning level the
+primary route publishes is offered as a `#variant`.
+
+Two rules the plugin keeps:
+
+* **Unknown context stays honest.** OpenCode requires a number, so an alias
+  whose gateway limit is Unknown (any alias with an OpenCode Go route,
+  because Go publishes no windows) gets the **owner-chosen 200,000-token
+  OpenCode working budget** and is labelled
+  `(200k client budget; upstream unknown)`. That number is a client-side
+  budget for OpenCode's own context management — it is **not** a provider
+  guarantee, and the gateway still reports the limit as Unknown.
+* **A failed read invents nothing.** If the catalogue cannot be read, the
+  plugin warns and lists no gateway aliases; a failed *refresh* keeps the
+  last complete inventory rather than erasing the model you had selected.
+
+The reasoning level is a **preference**, exactly as the gateway treats it:
+if the route that actually serves the request does not publish the level
+you picked, the gateway drops it for that route and records the
+substitution in the request ledger — it is never silent, and it never
+blocks a fallback that could otherwise serve the request.
+
+---
+
 ## Context limits
 
 A provider publishes a **working context window** and a **ceiling for
@@ -290,6 +344,7 @@ src/gateway/
   adapters/         the provider seam
   bridge/           Responses <-> Chat Completions, both directions
   static/           the console
+  ../integrations/opencode/   the OpenCode V2 provider plugin
 data/
   go_catalog.json   the dated OpenCode Go catalogue snapshot
 scripts/
