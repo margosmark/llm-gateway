@@ -64,8 +64,8 @@ the rest of the state.
 
 ### Client inference
 
-1. A LAN client calls `GET /v1/models`, `POST /v1/chat/completions`, or
-   `POST /v1/responses`.
+1. A LAN client calls `GET /v1/models`, `GET /v1/alias-catalog`,
+   `POST /v1/chat/completions`, or `POST /v1/responses`.
 2. `ProfileAuth` resolves every LAN request to a shared anonymous trusted-LAN
    profile. Legacy profile/token metadata does not provide access control.
 3. The request model must name a published alias; any reachable peer may invoke
@@ -153,6 +153,21 @@ limit is not published - a bound that cannot be verified is not a bound.
 
 The limit is reported, not enforced. The gateway has no tokenizer, so it does
 not count a prompt's tokens; the provider is the authority.
+
+### The OpenCode selector catalogue
+
+`GET /v1/alias-catalog` exposes that same alias-level rule to a client that
+needs it before it can offer a model: the context limit (or its Unknown
+reason), the primary route's published reasoning levels, and whether every
+route supports function tools. It carries no provider inventory, no ledger,
+no credential and no unpublished route, and it makes no provider call.
+
+`integrations/opencode/` is an OpenCode V2 provider plugin that reads it and
+publishes the aliases into `/models`. Where the gateway reports Unknown, the
+plugin applies an **owner-chosen 200,000-token client-side budget** and says
+so in the model's display name; that budget is OpenCode's own context
+management input, not a claim about any provider's window, and the gateway's
+answer stays Unknown.
 
 ## Provider seam
 

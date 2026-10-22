@@ -95,6 +95,7 @@ Everything else happens in the browser.
 | Create, edit, or publish an alias | Owner console → Models & Routes (use **Edit** on an existing alias; its name remains fixed while its route policy is changed) |
 | Manage profile metadata | Owner console → Profiles (does not restrict LAN invocation) |
 | Read status and limits | Owner console → Status |
+| Make the aliases appear in OpenCode's `/models` | Install `integrations/opencode/` once (see §3.1) |
 
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Credentials are stored
@@ -112,6 +113,55 @@ curl -s http://10.10.11.109:8765/v1/models
 
 `/version` must report exactly the four keys, and `image_revision` must be
 the digest of the image that is running.
+
+### 3.1 The OpenCode integration
+
+The gateway exposes its published aliases to OpenCode at
+`GET /v1/alias-catalog`. Install the plugin once on every machine that runs
+OpenCode and should see the gateway:
+
+```jsonc
+// ~/.config/opencode/opencode.jsonc
+{
+  "plugins": [
+    {
+      "package": "/path/to/llm-gateway/integrations/opencode",
+      "options": { "baseURL": "http://10.10.11.109:8765/v1" }
+    }
+  ]
+}
+```
+
+Verify it, without spending a provider request:
+
+```sh
+curl -s http://10.10.11.109:8765/v1/alias-catalog
+opencode api get /api/model | grep -c personal-gateway
+```
+
+The first command must list the published aliases with their context
+decision; the second must be greater than zero. An alias that is
+unpublished in the console disappears from the selector on the plugin's
+next refresh (60 seconds), so unpublishing is a real revocation for this
+client - it is not access control for the API itself, which stays
+anonymous.
+
+An alias whose gateway limit is Unknown is shown with the owner-chosen
+**200,000-token OpenCode working budget** and labelled
+`(200k client budget; upstream unknown)`. That is a client-side budget for
+OpenCode's context management, not a provider guarantee; the gateway's own
+answer stays Unknown. Do not "fix" it by writing a context number into the
+gateway's model entries - the provider publishes no window, and a guessed
+number would be reported as fact.
+
+The base URL must be the gateway's private address with the `/v1` prefix.
+The plugin refuses a public host, an HTTPS host, another path, or a URL
+carrying credentials or a query.
+
+If the gateway is unreachable or predates `/v1/alias-catalog`, the plugin
+logs a warning and lists no gateway aliases; it never invents a model, and a
+failed refresh keeps the last complete inventory rather than deselecting the
+model in use.
 
 The console and setup path are not separate surfaces: `/owner/` is served on
 this listener, while `/setup/` is absent. Owner state is readable without a
@@ -197,6 +247,9 @@ if you want the gateway to try every route immediately.
 | Limits show *Unknown* | The provider publishes no machine-readable allowance for that plan | That is the truthful answer. Check the provider's own console |
 | A request failed with *no eligible route* | Every route was excluded | The error names each excluded route and why |
 | The published catalogue is empty | No alias is published yet | Publish one in Models & Routes |
+| OpenCode shows no gateway models | The plugin cannot read `/v1/alias-catalog` - the gateway is unreachable, or it predates the endpoint | `curl` the endpoint; redeploy with `scripts/release.py`; the plugin warns in the OpenCode log and recovers on its own |
+| An OpenCode model says *200k client budget* | The alias has a route whose context limit is not published | That is the owner-chosen client budget, not a provider guarantee. The gateway reports Unknown on purpose |
+| An OpenCode reasoning variant had no effect | The serving route does not publish that level | Expected: the level is dropped **for that route** and the substitution is recorded in the request ledger |
 | `/version` reports `unknown` | The deployment was not released properly | Deploy with `scripts/release.py --build`; it publishes the identity. The gateway also warns about this at startup |
 | A client reports *an empty stream with no finish reason* | The stream was not framed correctly | Update to a build that emits terminated SSE frames; check the raw bytes for `\n\n` between frames |
 | A fallback did not run | The alias has not authorised it, or the trigger is off | The alias needs **both** the trigger and the confirmation of the fallback provider. The record says which was missing |

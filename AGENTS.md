@@ -111,6 +111,9 @@ python3 -m compileall -q src tests
 # the console's own JavaScript regressions
 node tests/console_dom_test.js
 
+# the OpenCode plugin's catalogue validator
+node tests/test_opencode_catalog.mjs
+
 # build and release (one command; stamps the identity and verifies it)
 python3 scripts/release.py --build --image personal-llm-gateway:candidate
 
@@ -175,8 +178,7 @@ covered by a regression test. They are listed in full in
 
 ## The review register
 
-`docs/REVIEW.md` holds every finding, with its evidence. R0–R31 are
-closed or superseded; **R25 and R26 are open** and are planned in
-`docs/TODO.md`. **Add a finding when a defect is found**, and
+`docs/REVIEW.md` holds every finding, with its evidence. R0–R35 are
+closed or superseded; **R26 is open** and is planned in `docs/TODO.md`. **Add a finding when a defect is found**, and
 close it only with a cited fix and a regression test — the register is how
 the next agent avoids repeating the same work.

@@ -733,8 +733,9 @@ class body declares the same annotated field name twice.
 the current source and names the exact `(file, line, class, field)` when a
 duplicate is reintroduced.
 
-### R25 — A thinking control was silently dropped on a converted request — **open**
-**Severity: high contract-correctness risk.** *(open)*
+### R25 — A thinking control was silently dropped on a converted request — **superseded**
+**Severity: high contract-correctness risk.** *(superseded by **R35**, which
+closes it with the normalisation and its regression tests)*
 
 `convert_request` forwards a same-dialect payload unchanged, but a
 **converted** request is rebuilt from the normalised form, and the
@@ -1125,12 +1126,106 @@ browser: an alias with two fallbacks is edited, a row is removed, the save
 is applied, and the alias is read back with one fallback and its primary
 untouched. The test fails against the previous behaviour.
 
+### R34 — An OpenCode client could not discover the gateway's aliases — **closed**
+**Severity: medium usability gap.** *(closed; requested by the owner)*
+
+`GET /v1/models` returned the published alias names and nothing else. An
+OpenAI-compatible client that lists a catalogue before offering a model
+selector - OpenCode being the obvious one - saw only bare strings, with no
+context limit, no tool support and no reasoning levels, and a custom provider
+had to list every alias by hand in its configuration. Every alias created in
+the console afterwards was invisible to that client until its configuration
+was edited again.
+
+**Resolution.** Two pieces.
+
+1. `GET /v1/alias-catalog` publishes, for each published alias, the
+   **alias-level context limit** (already computed as the smallest limit
+   among the routes that could serve it, and `Unknown` when any route's
+   limit is unpublished), the primary route's published reasoning levels,
+   and whether every route supports function tools. It is metadata only -
+   no provider inventory, no ledger, no credential, no unpublished route -
+   and it makes no provider call. It obeys the same anonymous/profile rules
+   as `/v1/models`, and the same Host/Origin/forwarded-header refusals.
+2. `integrations/opencode/` is an OpenCode V2 provider plugin. It reads
+   that catalogue, registers one provider, and refreshes every 60 seconds,
+   so an alias published in the console appears in `/models` and an alias
+   that is unpublished disappears. Its input is validated before it
+   replaces anything, and a failed refresh keeps the last complete
+   inventory rather than erasing the owner's selection.
+
+**Context limits stay honest.** OpenCode requires a *number*. For an alias
+whose limit the gateway reports as Unknown, the plugin applies the
+**owner-chosen 200,000-token OpenCode working budget** and labels the entry
+`(200k client budget; upstream unknown)`. That number is a client-side
+budget, not a provider guarantee: the gateway still reports Unknown, and it
+is still the provider that decides what fits.
+
+**Evidence:** `tests/test_opencode_catalog.py` - published aliases only, an
+unknown limit reported as unknown, the finite case reported exactly,
+no provider call on a page read, no provider inventory in the response, and
+host/forwarded-header refusals. `tests/test_opencode_catalog.mjs` - the
+plugin's own validator: a non-private or non-`/v1` base URL is refused, a
+duplicate or malformed alias is refused, a limit too small to be usable is
+refused, and the 200,000 budget is applied only when the limit is unknown.
+The integration was then exercised against a running gateway: the aliases
+appeared in `opencode api get /api/model` with their real limits, and a real
+request completed through the gateway with the fallback chain and the
+attribution recorded.
+
+### R35 — A thinking control was silently dropped on a converted request — **closed**
+**Severity: high contract-correctness risk.** *(closed; supersedes the
+description of R25)*
+
+A converted request is rebuilt from the normalised form, and the normalised
+form carried only OpenAI's flat `reasoning_effort` string, so two spellings
+vanished on the converted path:
+
+* `reasoning: {"effort": "high"}` - the newer Chat Completions spelling.
+  `_without_disabled_reasoning` read that exact field for the *disabled*
+  case, so the two code paths disagreed about one field.
+* `thinking: {"type": "enabled", "budget_tokens": 32000}` - Anthropic's
+  thinking control, which the gateway did not model at all.
+
+That broke the bridge's own contract: *"Nothing is silently dropped."*
+
+**Resolution.** One normalisation, applied on the converted paths:
+
+* both Chat Completions spellings are parsed into one canonical level -
+  the flat string;
+* the level is rendered per dialect - `reasoning_effort` for Chat
+  Completions, `reasoning: {effort}` for Responses;
+* a control the target dialect cannot express - an Anthropic thinking
+  budget, an unknown reasoning field, or two controls that contradict each
+  other - is **refused** with an actionable message, never discarded;
+* a level the selected model does not publish is still dropped *for that
+  route* with the substitution recorded, under the R19 preference rule,
+  and only the route that actually served the request records it.
+
+On a **same-dialect** request the gateway does not interpret or rewrite a
+control it does not model: it forwards the payload and lets the provider -
+which owns its own dialect - decide. Forwarding is not a drop.
+
+**Evidence:** `tests/test_thinking_controls.py` - a nested Chat Completions
+effort survives onto a Responses request as `reasoning: {effort}`, and onto
+a same-dialect Chat Completions request as `reasoning_effort`; a thinking
+budget, an unknown reasoning field and conflicting controls are each
+refused on the converted path; a same-dialect payload the gateway does not
+model is forwarded unchanged; and an unsupported level on the serving route
+is dropped **and** recorded in the ledger.
+
+**Not in scope here:** rendering a thinking control for the Anthropic
+Messages and Google v1beta dialects. Those dialects are not served yet
+(`docs/TODO.md` T5 and T6); until they are, a request that needs such a
+conversion is refused rather than converted.
+
+**Planned as** `docs/TODO.md` item **T4**.
+
 ## Recommended order
 
-Findings R0-R24 and R28-R31 are closed or superseded. **R25, R26 and R27
-are open**; all three are planned in `docs/TODO.md` (T4, T2 and T16). The
-register is kept so the next agent can see what was already paid for in
-time.
+Findings R0-R27 and R28-R35 are closed or superseded. **R26 is the only
+open finding**; it is planned in `docs/TODO.md` (T2). The register is kept
+so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or
@@ -1143,10 +1238,8 @@ time.
 6. Tighten **R4** and **R12**, then make observability truthful and complete in
    **R5**.
 7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6** and **R14** with targeted tests and runbook changes. R15 is superseded by removal of the setup surface.
-8. Fix **R25** (a silently dropped thinking control), **R26** (no usage
-   or cost recorded) and **R27** (a manual entry discarding published
-   capability metadata). The agreed order is `docs/TODO.md` T1, T4, T2, T3,
-   T16.
+8. Fix **R26** (no usage or cost recorded) — planned as `docs/TODO.md` T2.
+   R25 and R27 are closed by R35 and R27's own resolutions.
 ## Trusted LAN admin-mode candidate update
 
 The approved single-listener change resolves the former R0 first-passphrase
