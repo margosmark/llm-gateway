@@ -238,7 +238,7 @@ path, and the model it would unlock is the one with the weakest privacy
 posture. A passthrough would be enough if it is ever wanted. Revisit after
 T5.
 
-### T16 — A manual model entry must merge, not replace — `todo`
+### T16 — A manual model entry must merge, not replace — `done`
 
 **Why.** The `manual` model action rebuilds the whole `ModelEntry`
 (`http/app.py:835-850`) instead of merging into it, so the
@@ -266,6 +266,13 @@ discovered model.
 **Done when.** A manual dialect edit preserves the context limit, the
 reasoning levels and the capability flags; a test covers it; and the
 console does not report a limit it does not have.
+
+**Landed.** The `manual` action merges into the existing entry and changes
+only what the owner supplied. The published context window, effective limit,
+reasoning levels, monthly limit and its source, retention class and the
+capability flags all survive; a model that does not exist yet is created
+enabled. Evidence: `tests/test_manual_entry_merge.py`, and R27 is closed in
+[`REVIEW.md`](REVIEW.md).
 
 ---
 
