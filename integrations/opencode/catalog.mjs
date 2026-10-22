@@ -29,9 +29,18 @@ export function catalogue(data) {
     }
     ids.add(row.id)
     const context = row.context.known ? row.context.limit : UNKNOWN_CONTEXT_BUDGET
+    // Every effort is the provider's own published data, so it is forwarded
+    // rather than curated: a level the gateway says the primary route
+    // publishes is a level the owner may select. The grammar check is a
+    // safety rail on the way into an OpenCode variant id, not a vocabulary.
     const efforts = Array.isArray(row.primary_reasoning_efforts)
-      ? row.primary_reasoning_efforts.filter((x) => ["low", "medium", "high", "xhigh", "max"].includes(x))
+      ? [...new Set(row.primary_reasoning_efforts)]
       : []
+    for (const effort of efforts) {
+      if (typeof effort !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(effort)) {
+        throw new Error(`invalid reasoning level: ${JSON.stringify(effort)}`)
+      }
+    }
     return {
       id: row.id,
       name: row.context.known ? row.id : `${row.id} (200k client budget; upstream unknown)`,
@@ -39,7 +48,10 @@ export function catalogue(data) {
       input: context - OUTPUT_RESERVE,
       output: OUTPUT_RESERVE,
       tools: row.supports_function_tools === true,
-      efforts: [...new Set(efforts)],
+      efforts,
+      // The OpenCode-side variants. The body uses the Chat Completions
+      // spelling, which the gateway normalises on both paths.
+      variants: efforts.map((effort) => ({ id: effort, body: { reasoning_effort: effort } })),
       publishedContext: row.context.known,
     }
   })

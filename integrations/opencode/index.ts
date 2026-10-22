@@ -29,8 +29,9 @@ export default Plugin.define({
         },
         limit: { context: row.context, input: row.input, output: row.output },
         // OpenCode's semantic reasoning settings vary across protocol drivers.
-        // A variant injects the Chat Completions field our gateway normalises.
-        variants: row.efforts.map((effort) => ({ id: effort, body: { reasoning_effort: effort } })),
+        // The variants come from the validated catalogue, using the Chat
+        // Completions field our gateway normalises.
+        variants: row.variants,
       }))
       await ctx.provider.reload()
     }
