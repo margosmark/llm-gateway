@@ -701,14 +701,26 @@
       if (route) provider.value = route.provider;
       fillModels();
       if (route) model.value = route.model;
+      var entry = { provider: provider, model: model };
       var row = el("div", { class: "row" }, [
         el("label", {}, [el("span", { text: "Provider" }), provider]),
         el("label", {}, [el("span", { text: "Model" }), model]),
         el("div", { class: "narrow" }, [
-          el("button", { type: "button", text: "Remove", onclick: function () { row.remove(); } })
+          el("button", {
+            type: "button",
+            text: "Remove",
+            onclick: function () {
+              // The row and the saved list must stay in step: removing the
+              // row and leaving the entry behind silently restored the
+              // fallback on the next save.
+              var at = fallbacks.indexOf(entry);
+              if (at !== -1) fallbacks.splice(at, 1);
+              row.remove();
+            }
+          })
         ])
       ]);
-      fallbacks.push({ provider: provider, model: model });
+      fallbacks.push(entry);
       fallbackList.appendChild(row);
     }
     if (editing) (editing.fallbacks || []).forEach(addFallbackRow);

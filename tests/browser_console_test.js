@@ -108,6 +108,60 @@ function check(name, condition, detail) {
       check("no page errors at " + viewport.name, errors.length === 0, errors.join("; "));
       await page.close();
     }
+  // --- removing a fallback from an alias -------------------------------
+  if (process.env.GATEWAY_ALLOW_MUTATION === "1") {
+    console.log("removing a fallback from an alias");
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.goto(BASE + "/owner/", { waitUntil: "load" });
+    await page.waitForTimeout(1200);
+    await page.getByRole("button", { name: "Models & Routes" }).click();
+    await page.waitForTimeout(700);
+
+    // Ask for the state through the console's own base path, so the URL
+    // resolves the same way the console's own requests do.
+    const state = async () =>
+      page.evaluate(async () => {
+        const response = await fetch(window.GATEWAY_BASE + "/api/state");
+        const body = await response.json();
+        if (!response.ok || !body.aliases) {
+          throw new Error("state fetch failed: " + response.status + " " + JSON.stringify(body).slice(0, 200));
+        }
+        return body;
+      });
+    let before = (await state()).aliases.filter((a) => a.name === "chain")[0];
+    check("the alias has two fallbacks to begin with", before.fallbacks.length === 2,
+          String(before.fallbacks.length));
+
+    await page.getByRole("button", { name: /^Edit/ }).first().click();
+    await page.waitForTimeout(700);
+    const removes = page.getByRole("button", { name: "Remove" });
+    check("each fallback row has a Remove control", (await removes.count()) === 2, String(await removes.count()));
+    await removes.last().click();
+    await page.waitForTimeout(300);
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.waitForTimeout(1200);
+
+    let after = (await state()).aliases.filter((a) => a.name === "chain")[0];
+    check(
+      "removing a row removes the fallback from the saved alias",
+      after.fallbacks.length === 1,
+      JSON.stringify(after.fallbacks)
+    );
+    // The last row was removed, so the first fallback remains. The primary
+    // is a different route and is untouched.
+    check(
+      "the remaining fallback is the one that was kept",
+      after.fallbacks.length === 1 && after.fallbacks[0].model === "second-fallback",
+      JSON.stringify(after.fallbacks)
+    );
+    check(
+      "the primary is untouched",
+      after.primary && after.primary.model === "first-fallback",
+      JSON.stringify(after.primary)
+    );
+    await page.close();
+  }
+
   } finally {
     await browser.close();
   }

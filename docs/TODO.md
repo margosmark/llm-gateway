@@ -274,6 +274,29 @@ capability flags all survive; a model that does not exist yet is created
 enabled. Evidence: `tests/test_manual_entry_merge.py`, and R27 is closed in
 [`REVIEW.md`](REVIEW.md).
 
+
+### T35 — Continue the fallback chain past a deprecated model — `done`
+
+**Why.** OpenCode Go returned **410 Gone** for a model it had deprecated, and
+`410` classified as `unknown`. `unknown` never falls back - by design - so the
+chain stopped with a second, perfectly usable fallback unused, and every
+request failed with a 502.
+
+The class is neither transient nor a policy failure. It is an **availability
+fact about the route**: the upstream no longer serves this model there, and
+another route may still serve the request. It must not be retried on the same
+route, and it must not bench the provider's other models.
+
+**Done when.** A `410` and the provider's own deprecation code classify as
+route gone; the class satisfies the "upstream unavailable" trigger so the
+chain continues; it is never retried on the same route; the provider's other
+models stay usable; and each has a test.
+
+**Landed.** A `route_gone` class now covers `410` and the provider's
+deprecation codes. Evidence: `tests/test_route_gone.py`, and R32 is closed
+in [`REVIEW.md`](REVIEW.md).
+
+
 ---
 
 ## Tier 2 — operational completeness
