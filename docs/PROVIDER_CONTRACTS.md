@@ -103,6 +103,21 @@ A direct System One request intentionally sends its submitted state and
 questions to OpenCode Console. That content is never stored in gateway configuration,
 logs, or the ledger. Jev is not a hidden completion-router in this release.
 
+### Opt-in phase inference
+
+An alias may enable a **bounded, closed-set** Jev call to infer a request's
+phase (`plan`/`implement`/`validate`) for phase routing. This is off by
+default and only runs when the alias enabled it *and* the request is safe to
+classify (no tools, not a continuation, has text). The gateway sends a single
+`choice` question it owns - never a caller-authored prompt - with a short,
+bounded slice of the request text as `state`. A choice applies only when it
+names a configured phase and meets the alias's `minimum_confidence`;
+otherwise the ordinary route is used. A Jev failure never fails the
+completion. The request content, the question text, and the answer
+distribution are never recorded - only the phase and its source as metadata.
+The `choice` response may carry a `probabilities` distribution; the gateway
+reads only `choice` and `confidence` and never forwards or stores the rest.
+
 ---
 
 ## OpenCode Go

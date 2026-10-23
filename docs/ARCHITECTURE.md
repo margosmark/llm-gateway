@@ -262,6 +262,44 @@ most.
   restart.
 * The stored state is **metadata only**, and it is forgotten after a week.
 
+## Phase routing (opt-in)
+
+An alias may carry an optional, **off-by-default** phase-routing policy. A
+phase is one of a closed set - `plan`, `implement`, `validate`. The policy
+maps each phase to an owner-configured route and may optionally let the
+gateway ask Jev to infer the phase when the caller supplies none.
+
+The precedence is fixed:
+
+1. A **caller-supplied phase** wins. It is read from the gateway-owned
+   request field `metadata.personal_gateway.phase`, validated against the
+   closed vocabulary, and the **entire `personal_gateway` block is stripped**
+   before the request is converted or forwarded - no upstream provider ever
+   sees it. An invalid or unknown value is ignored, not refused, so a stale
+   hint still gets the ordinary route.
+2. Otherwise, **Jev inference** runs only if the alias enabled it *and* the
+   request is safe to classify: no tools, not a continuation, and it carries
+   text. The gateway sends Jev a single bounded, closed-set `choice` question
+   it owns (never caller-authored), using a short, bounded slice of the
+   request text as state.
+3. Otherwise the ordinary primary (or the policy's configured `default_route`)
+   is used.
+
+A Jev choice applies only when it names a **configured phase** and its
+confidence meets the alias's `minimum_confidence`. Anything else - low
+confidence, an unknown choice, a non-choice answer, a Jev error or timeout -
+uses the ordinary route and records why. A Jev failure never fails the
+completion request.
+
+A phase-selected route is the **primary for that phase**, not a fallback: it
+never sets `fallback_used`, and no fallback authorization is required. Phase
+resolution happens before the route loop, so a phase decision never occurs
+after a stream has begun or after a tool may have executed.
+
+The request ledger records the phase and its source (`caller`, `jev`, or
+`default`) as **metadata only** - never the request content, the Jev question
+text, or the answer distribution.
+
 ## Release identity
 
 `GET /version` returns exactly four keys: `service`, `source_revision`,

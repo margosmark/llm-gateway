@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from gateway.config import ConfigStore, RouteRef
+from gateway.config import ConfigStore, PhaseRouting, RouteRef
 from gateway.identifiers import ValidationError, validate_model_id
 
 
@@ -110,3 +110,106 @@ def validate_alias_routes(
         resolved.append(ref)
 
     return primary_ref, resolved
+
+
+def validate_phase_routing(
+    config: ConfigStore,
+    registry,
+    phase_routing: Any,
+) -> PhaseRouting | None:
+    """Validate an alias's optional phase-routing policy.
+
+    Every phase route must name a registered provider and an enabled model,
+    exactly like an alias primary or fallback. The inference model, when
+    inference is enabled, must also be a known enabled model at its provider.
+    Anything invalid is refused rather than persisted.
+    """
+    if phase_routing is None:
+        return None
+    if not isinstance(phase_routing, dict):
+        raise ValidationError("phase_routing must be an object", "phase_routing")
+
+    raw_routes = phase_routing.get("routes")
+    routes: dict = {}
+    if raw_routes is not None:
+        if not isinstance(raw_routes, dict):
+            raise ValidationError("phase routes must be an object", "phase_routing.routes")
+        for phase_key, value in raw_routes.items():
+            if phase_key not in ("plan", "implement", "validate"):
+                raise ValidationError(
+                    f"unknown phase '{phase_key}'; expected plan, implement, or validate",
+                    "phase_routing.routes",
+                )
+            if not isinstance(value, dict):
+                raise ValidationError(f"the '{phase_key}' phase route must be an object", "phase_routing.routes")
+            ref = validate_route(
+                config, registry, value.get("provider"), value.get("model"),
+                f"phase route '{phase_key}'",
+            )
+            effort = value.get("effort")
+            routes[phase_key] = {
+                "phase": phase_key,
+                "route": ref.to_dict(),
+                "effort": effort if isinstance(effort, str) and effort else None,
+            }
+
+    default_route_raw = phase_routing.get("default_route")
+    default_route: RouteRef | None = None
+    if default_route_raw is not None:
+        if not isinstance(default_route_raw, dict):
+            raise ValidationError("the phase default_route must be an object", "phase_routing.default_route")
+        default_route = validate_route(
+            config, registry, default_route_raw.get("provider"), default_route_raw.get("model"),
+            "phase default route",
+        )
+
+    inference_raw = phase_routing.get("inference")
+    inference = None
+    if inference_raw is not None:
+        if not isinstance(inference_raw, dict):
+            raise ValidationError("inference must be an object", "phase_routing.inference")
+        enabled = bool(inference_raw.get("enabled", False))
+        provider = str(inference_raw.get("provider") or "opencode_console")
+        model = inference_raw.get("model")
+        if enabled:
+            if registry.get(provider) is None:
+                raise ValidationError(
+                    f"inference names provider '{provider}', which is not registered",
+                    "phase_routing.inference.provider",
+                )
+            if not isinstance(model, str) or not model:
+                raise ValidationError(
+                    "inference must name a model when enabled",
+                    "phase_routing.inference.model",
+                )
+            snapshot = config.snapshot()
+            prov = snapshot.providers.get(provider)
+            entry = prov.models.get(model) if prov else None
+            if entry is None or not entry.enabled:
+                raise ValidationError(
+                    f"inference model '{model}' is not a known enabled model at '{provider}'",
+                    "phase_routing.inference.model",
+                )
+        confidence = inference_raw.get("minimum_confidence")
+        if confidence is not None and not (
+            isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+            and 0.0 <= float(confidence) <= 1.0
+        ):
+            raise ValidationError(
+                "inference minimum_confidence must be between 0 and 1",
+                "phase_routing.inference.minimum_confidence",
+            )
+        inference = {
+            "enabled": enabled,
+            "provider": provider,
+            "model": model if isinstance(model, str) else "",
+            "minimum_confidence": confidence if confidence is not None else 0.8,
+            "on_uncertain": inference_raw.get("on_uncertain") if inference_raw.get("on_uncertain") in ("default",) else "default",
+        }
+
+    return PhaseRouting.from_dict({
+        "enabled": bool(phase_routing.get("enabled", False)),
+        "routes": routes,
+        "default_route": default_route.to_dict() if default_route else None,
+        "inference": inference,
+    })
