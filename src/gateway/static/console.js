@@ -860,7 +860,10 @@
             var confirmed = Array.prototype.slice.call(confirmProviders.querySelectorAll("input:checked"))
               .map(function (box) { return box.value; });
             var phaseRouting = null;
-            if (phaseEnabled.checked || (phasePolicy && !removePhasePolicy.checked)) {
+            // Removal is an explicit owner action and takes precedence over
+            // the enabled toggle. Otherwise retain an existing disabled policy
+            // so it can be re-enabled without rebuilding its configuration.
+            if (!removePhasePolicy.checked && (phaseEnabled.checked || phasePolicy)) {
               var routes = {};
               Object.keys(phaseRows).forEach(function (phase) {
                 var item = phaseRows[phase];

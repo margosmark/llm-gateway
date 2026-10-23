@@ -1356,12 +1356,34 @@ route serves it, under the R19 preference rule, and record the substitution
 when the model does not publish the level. Until then the console says so
 plainly rather than presenting the field as if it were in effect.
 
+### R39 — “Remove phase policy” was ignored for enabled policies — **closed**
+
+**Severity: medium UI correctness.** The save condition checked
+`phaseEnabled.checked` first, so JavaScript short-circuiting prevented the
+explicit remove checkbox from being read for an enabled policy. The editor
+reported success while preserving the policy.
+
+**Fix.** The remove checkbox is now authoritative: phase configuration is
+serialized only when removal is not checked, regardless of the enabled
+checkbox. With removal unchecked, existing disabled policies remain editable
+and can be re-enabled. Jev inference is serialized within the phase policy;
+there is no independent competing save toggle.
+
+**Regression evidence.** `tests/browser_console_test.js` now edits an enabled
+policy through the real console, checks “Remove phase policy,” saves, and
+asserts the policy is null in `/owner/api/state`. `tests/test_browser_console.py`
+seeds the enabled policy and enables that mutation flow. Verified with
+`NODE_PATH=/tmp/pwtest/node_modules GATEWAY_CHROMIUM=/usr/bin/chromium
+PYTHONPATH=src python3 -m unittest tests.test_browser_console -v` (1 test
+passed). The console source-string assertion was also updated to reject the
+old short-circuit condition.
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R26, R36 and R38 are
 open**; R26 is planned in `docs/TODO.md` (T2), R36 is the explicit
 post-deployment route replacement above, and R38 is the inert per-phase
-reasoning effort, which needs a routing change. R37 is closed. The register
+reasoning effort, which needs a routing change. R37 and R39 are closed. The register
 is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.

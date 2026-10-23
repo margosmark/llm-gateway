@@ -21,7 +21,7 @@ from pathlib import Path
 
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
-from gateway.config import Alias, ConfigStore, ModelEntry, ProviderState, RouteRef
+from gateway.config import Alias, ConfigStore, ModelEntry, PhaseRoute, PhaseRouting, ProviderState, RouteRef
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
@@ -125,6 +125,15 @@ class BrowserConsoleTests(unittest.TestCase):
                     fallback_triggers=["upstream_unavailable"],
                     fallback_authorized=True,
                     fallback_confirmed_providers=["opencode_go"],
+                    phase_routing=PhaseRouting(
+                        enabled=True,
+                        routes={
+                            "plan": PhaseRoute(
+                                phase="plan",
+                                route=RouteRef("opencode_go", "first-fallback"),
+                            )
+                        },
+                    ),
                 )
             router = Router(config, registry, ledger=RequestLedger())
             port = _free_port()
@@ -158,6 +167,7 @@ class BrowserConsoleTests(unittest.TestCase):
             environment = dict(os.environ)
             environment["NODE_PATH"] = node_path
             environment["GATEWAY_CHROMIUM"] = chromium
+            environment["GATEWAY_ALLOW_MUTATION"] = "1"
             result = subprocess.run(
                 [node, str(SCRIPT), f"http://127.0.0.1:{port}"],
                 capture_output=True,
