@@ -179,6 +179,7 @@ covered by a regression test. They are listed in full in
 ## The review register
 
 `docs/REVIEW.md` holds every finding, with its evidence. R0–R35 are
-closed or superseded; **R26 is open** and is planned in `docs/TODO.md`. **Add a finding when a defect is found**, and
+closed or superseded; **R26 and R36 are open**. R26 is planned in
+`docs/TODO.md`; R36 is the explicit post-deployment Go route replacement. **Add a finding when a defect is found**, and
 close it only with a cited fix and a regression test — the register is how
 the next agent avoids repeating the same work.

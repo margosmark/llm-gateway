@@ -28,7 +28,7 @@ from typing import Any
 
 SOURCE_URL = "https://opencode.ai/docs/go/"
 CATALOG_URL = "https://opencode.ai/inference/go/v1/models"
-OBSERVED_AT = "2026-10-19"
+OBSERVED_AT = "2026-10-22"
 
 # --- dialects, per the published "Endpoints" table -------------------------
 #
@@ -59,7 +59,7 @@ ENDPOINTS: dict[str, tuple[str, str]] = {
     "mimo-v2.6-pro": ("openai_chat", "/openai/v1/chat/completions"),
     "mimo-v2.5": ("openai_chat", "/openai/v1/chat/completions"),
     "mimo-v2.5-pro": ("openai_chat", "/openai/v1/chat/completions"),
-    "minimax-m3.1-flash-free": ("openai_chat", "/openai/v1/chat/completions"),
+    "minimax-m3.1-flash": ("openai_chat", "/openai/v1/chat/completions"),
     "longcat-2.5-preview-free": ("openai_chat", "/openai/v1/chat/completions"),
     "step-5-preview": ("openai_chat", "/openai/v1/chat/completions"),
     "beam-free": ("openai_chat", "/openai/v1/chat/completions"),
@@ -97,6 +97,7 @@ MONTHLY_LIMIT_GO = {
     "kimi-k2.7-code": 60.0,
     "mimo-v2.6-flash": 60.0,
     "mimo-v2.5": 60.0,
+    "minimax-m3.1-flash": 20.0,
     "minimax-m3": 60.0,
     "muse-spark-1.2-contributor": 60.0,
     "muse-spark-1.3-contributor": 60.0,
@@ -109,7 +110,7 @@ MONTHLY_LIMIT_GO = {
 }
 
 #: Free models remain usable after the included allowance is exhausted.
-UNLIMITED = ("longcat-2.5-preview-free", "beam-free", "minimax-m3.1-flash-free")
+UNLIMITED = ("longcat-2.5-preview-free", "beam-free")
 
 # --- retention, from the published privacy table --------------------------
 RETENTION_30_DAYS = (
@@ -146,7 +147,7 @@ PRICES: dict[str, tuple[float | None, float | None, float | None]] = {
     "mimo-v2.6-pro": (0.435, 0.87, 0.003625),
     "mimo-v2.5": (0.14, 0.28, 0.0028),
     "mimo-v2.5-pro": (0.435, 0.87, 0.003625),
-    "minimax-m3.1-flash-free": (None, None, None),
+    "minimax-m3.1-flash": (0.15, 0.60, 0.015),
     "minimax-m3": (0.30, 1.20, 0.06),
     "muse-spark-1.3-contributor": (0.10, 0.20, 0.002),
     "muse-spark-1.2-contributor": (0.10, 0.20, 0.002),
@@ -175,10 +176,40 @@ CONTEXT_TIERS = {
     "deepseek-v4-pro": "off-peak and peak prices apply by hour",
 }
 
-#: Reasoning-effort support, where the provider documents it.
+#: Context information from the *model providers'* official documentation.
+#:
+#: OpenCode Go documents that these exact model IDs are served over the listed
+#: endpoints, but it does not separately impose or publish a smaller service
+#: context cap.  These are therefore model windows, not an invented Go quota.
+#: The URLs stay with the snapshot so an operator can review this conclusion.
+MODEL_LIMITS: dict[str, dict[str, Any]] = {
+    "mimo-v2.6-flash": {
+        "context_window": 1_048_576,
+        "context_limit": 1_048_576,
+        "max_output_tokens": 131_072,
+        "source": "https://platform.xiaomimimo.com/docs/en-US/quick-start/model",
+        "note": (
+            "MiMo documents a 1M context window and a 131072-token maximum completion; "
+            "thinking defaults to enabled and is a binary thinking.type control, not an effort level."
+        ),
+    },
+    "minimax-m3.1-flash": {
+        "context_window": 1_000_000,
+        "context_limit": 1_000_000,
+        "max_output_tokens": None,
+        "source": "https://platform.minimax.io/docs/guides/text-generation",
+        "note": (
+            "MiniMax documents a 1,000,000-token context window and the low/medium/high/xhigh/max "
+            "reasoning-effort vocabulary; it does not publish a maximum output on this page."
+        ),
+    },
+}
+
+#: Reasoning-effort support, where the model provider documents it.
 REASONING_EFFORTS = {
     "gpt-6-luna": ("none", "low", "medium", "high", "xhigh", "max"),
     "gpt-5.6-luna": ("none", "low", "medium", "high", "xhigh", "max"),
+    "minimax-m3.1-flash": ("low", "medium", "high", "xhigh", "max"),
 }
 
 
@@ -215,17 +246,25 @@ def build() -> dict[str, Any]:
         if dialect is None:
             notes.append("served by the provider but absent from the published endpoint table")
 
+        model_limits = MODEL_LIMITS.get(model_id, {})
+        model_note = model_limits.get("note")
+        if isinstance(model_note, str):
+            notes.append(model_note)
         models[model_id] = {
             "model_id": model_id,
             "dialect": dialect,
             "endpoint_path": path,
             "monthly_limit_usd": monthly,
-            "limits_source": limits_source,
+            "limits_source": model_limits.get("source") or limits_source,
             "price_input_per_m": price[0],
             "price_output_per_m": price[1],
             "price_cached_read_per_m": price[2],
             "retention_class": retention_for(model_id),
             "reasoning_efforts": list(REASONING_EFFORTS.get(model_id, ())),
+            "context_window": model_limits.get("context_window"),
+            "context_limit": model_limits.get("context_limit"),
+            "max_output_tokens": model_limits.get("max_output_tokens"),
+            "context_source": model_limits.get("source"),
             "supports_streaming": True,
             "supports_function_tools": True,
             "supports_builtin_tools": False,

@@ -64,9 +64,9 @@ class Capability:
     supports_previous_response_id: bool = False
     #: The model's own context window, as the provider reports it.
     context_window: int | None = None
-    #: The context available for **input**, after the provider reserves
-    #: headroom for system prompts, tool overhead and the model's own
-    #: output. This is the number a client can actually rely on.
+    #: The context available to a client. This is the provider's published
+    #: input budget after headroom when it publishes one; otherwise it is the
+    #: documented model window. The gateway does not invent a reserve.
     context_limit: int | None = None
     max_output_tokens: int | None = None
     retention_class: str = RETENTION_UNKNOWN

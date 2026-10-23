@@ -146,13 +146,14 @@ next refresh (60 seconds), so unpublishing is a real revocation for this
 client - it is not access control for the API itself, which stays
 anonymous.
 
-An alias whose gateway limit is Unknown is shown with the owner-chosen
-**200,000-token OpenCode working budget** and labelled
-`(200k client budget; upstream unknown)`. That is a client-side budget for
-OpenCode's context management, not a provider guarantee; the gateway's own
-answer stays Unknown. Do not "fix" it by writing a context number into the
-gateway's model entries - the provider publishes no window, and a guessed
-number would be reported as fact.
+The snapshot uses a documented model window when Go's own endpoint table
+identifies the exact model and the model provider publishes its window:
+MiMo-V2.6-Flash is 1,048,576 tokens and MiniMax M3.1 Flash is 1,000,000.
+Do not substitute a Go price tier for a window. An alias without equivalent
+evidence is shown with the owner-chosen **200,000-token OpenCode working
+budget** and labelled `(200k client budget; upstream unknown)`. That is a
+client-side fallback, not a provider guarantee; do not hand-write a guessed
+number into a model entry.
 
 The base URL must be the gateway's private address with the `/v1` prefix.
 The plugin refuses a public host, an HTTPS host, another path, or a URL

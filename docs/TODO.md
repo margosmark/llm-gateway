@@ -68,8 +68,8 @@ described is implemented and tested. The duplicated bullets are merged, and
 the section now carries the limitations that are true today: the
 non-OpenAI dialects, the Unknown ChatGPT allowance, the beta device-code
 path, no TLS, no authentication boundary, the recorded bridge corpus, the
-unknown Go context window, and the fact that usage and cost are not yet
-recorded.
+Go models without a documented window, and the fact that usage and cost are
+not yet recorded.
 
 **Why.** The README states that two features are *not ready* and cites R1,
 R8 and R9 as open release blockers. All three are **closed** in
@@ -328,11 +328,13 @@ registers one provider and refreshes every 60 seconds.
 
 **Rules.** Metadata only: no provider inventory, no ledger, no credential,
 no unpublished route, and no provider call on a read. OpenCode requires a
-number, so an Unknown alias gets the **owner-chosen 200,000-token OpenCode
-working budget**, labelled `(200k client budget; upstream unknown)`. That is
-a client-side budget, not a provider guarantee - the gateway still reports
-Unknown. A failed refresh keeps the last complete inventory rather than
-erasing the owner's selection.
+number, so it uses a documented route window when Go's endpoint table and
+the exact model's official documentation establish one (currently
+MiMo-V2.6-Flash and MiniMax M3.1 Flash). An Unknown alias gets the
+**owner-chosen 200,000-token OpenCode working budget**, labelled
+`(200k client budget; upstream unknown)`. That is a client-side budget, not
+a provider guarantee - the gateway still reports Unknown. A failed refresh
+keeps the last complete inventory rather than erasing the owner's selection.
 
 **Landed.** Evidence: `tests/test_opencode_catalog.py`,
 `tests/test_opencode_catalog.mjs`, and R34 in [`REVIEW.md`](REVIEW.md). The

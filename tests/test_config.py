@@ -133,13 +133,19 @@ class ProviderStateTests(unittest.TestCase):
             provider_id="opencode_go",
             kind="opencode_go",
             state=STATE_CONNECTED,
-            models={"gpt-6-luna": ModelEntry("gpt-6-luna", enabled=True, dialect="openai_responses")},
+            models={
+                "gpt-6-luna": ModelEntry(
+                    "gpt-6-luna", enabled=True, dialect="openai_responses",
+                    context_window=272000, context_limit=258400, max_output_tokens=32768,
+                )
+            },
         )
         restored = ProviderState.from_dict(provider.to_dict())
         assert restored is not None
         self.assertEqual(restored.state, STATE_CONNECTED)
         self.assertTrue(restored.models["gpt-6-luna"].enabled)
         self.assertEqual(restored.models["gpt-6-luna"].dialect, "openai_responses")
+        self.assertEqual(restored.models["gpt-6-luna"].max_output_tokens, 32768)
 
     def test_unknown_state_falls_back_to_not_configured(self) -> None:
         restored = ProviderState.from_dict(
