@@ -133,7 +133,7 @@
   function providerLabel(providerId) {
     if (providerId === "chatgpt_codex") return "ChatGPT / Codex";
     if (providerId === "opencode_go") return "OpenCode Go";
-    if (providerId === "typesafe_jev") return "TypeSafe Jev / System One";
+    if (providerId === "opencode_console") return "OpenCode Console Jev / System One";
     return providerId;
   }
 
@@ -436,7 +436,7 @@
       card.appendChild(renderDeviceCode(provider));
     } else {
       card.appendChild(renderKeyForm(provider));
-      if (provider.provider_id === "typesafe_jev") {
+      if (provider.provider_id === "opencode_console") {
         card.appendChild(el("p", { class: "small muted", text: "Jev evaluates the state and questions sent to the native /v1/systemone endpoint. It is a structured-decision provider, not a chat-completion model." }));
       }
     }

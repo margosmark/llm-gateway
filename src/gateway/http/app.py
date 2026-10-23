@@ -347,7 +347,7 @@ class GatewayApp:
     def handle_systemone_models(self, request: Request) -> Response:
         """Return explicitly refreshed Jev models, without an upstream read."""
         self._resolve_profile(request)
-        provider = self.config.snapshot().providers.get("typesafe_jev")
+        provider = self.config.snapshot().providers.get("opencode_console")
         models = [] if provider is None else [
             {"name": entry.model_id, "description": entry.notes or "", "release_date": "unknown"}
             for entry in sorted(provider.enabled_models(), key=lambda item: item.model_id)
@@ -358,7 +358,7 @@ class GatewayApp:
         """Pass a validated native Jev System One request through unchanged.
 
         This is deliberately separate from aliases and the chat router: callers
-        knowingly supply the state and questions to TypeSafe, and no completion
+        knowingly supply the state and questions to OpenCode Console, and no completion
         request is inspected or forwarded here.
         """
         self._resolve_profile(request)
@@ -369,24 +369,18 @@ class GatewayApp:
         error = _validate_systemone_request(payload)
         if error:
             raise RoutingError(error, code="malformed_request", status=400)
-        if request.headers.get("typesafe-danger-zone-images") or request.headers.get("typesafe-danger-zone-long-context"):
-            raise RoutingError(
-                "TypeSafe danger-zone image and long-context modes are not supported by this gateway",
-                code="unsupported_capability",
-                status=422,
-            )
         assert isinstance(payload, dict)
-        adapter = self.registry.get("typesafe_jev")
+        adapter = self.registry.get("opencode_console")
         if adapter is None or not hasattr(adapter, "invoke_systemone"):
-            raise RoutingError("TypeSafe Jev is not configured", code="provider_unavailable", status=503)
+            raise RoutingError("OpenCode Console Jev is not configured", code="provider_unavailable", status=503)
         config = self.config.snapshot()
-        provider = config.providers.get("typesafe_jev")
+        provider = config.providers.get("opencode_console")
         model = payload["model"]
         if provider is None or model not in provider.models or not provider.models[model].enabled:
             raise RoutingError(f"System One model '{model}' is not enabled by this gateway", code="unknown_model", status=404)
         request.context["action"] = "systemone"
         request.context["attribution"] = {
-            "requested_alias": None, "serving_provider": "typesafe_jev", "serving_model": model,
+            "requested_alias": None, "serving_provider": "opencode_console", "serving_model": model,
         }
         return Response(200, [("Content-Type", "application/json")], adapter.invoke_systemone(payload))
 
@@ -1195,11 +1189,10 @@ def _convert_buffered(body: bytes, source: str, target: str) -> bytes:
 
 
 def _validate_systemone_request(payload: Any) -> str | None:
-    """Validate the JSON-only safe subset of TypeSafe's native contract.
+    """Validate the JSON-only safe subset of OpenCode Console's native contract.
 
-    Image assets and box questions require the provider's danger-zone header;
-    long-context likewise requires an opt-in header. Neither crosses this
-    initial gateway boundary.  The submitted state/questions stay only in the
+    Image assets and box questions are outside this JSON-only initial gateway
+    boundary.  The submitted state/questions stay only in the
     request body and are never written to config, logs, or the ledger.
     """
     if not isinstance(payload, dict):

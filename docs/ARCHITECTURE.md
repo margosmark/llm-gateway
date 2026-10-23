@@ -82,15 +82,14 @@ the rest of the state.
 ### Native Jev / System One
 
 `GET /v1/systemone/models` returns only the owner-enabled models from the
-saved TypeSafe Jev catalogue and never calls TypeSafe. `POST /v1/systemone`
+saved OpenCode Console Jev catalogue and never calls OpenCode Console. `POST /v1/systemone`
 accepts a JSON-only native System One request: a model, a string/object/array
 state, and non-empty named `noul`, `choice`, or `score` questions. It checks
-that the model was explicitly enabled, sends the payload to TypeSafe, and
+that the model was explicitly enabled, sends the payload to OpenCode Console, and
 returns the native structured response. It is intentionally not an alias,
 chat-completions, or Responses route.
 
-The initial boundary refuses image assets, `box` questions, multipart bodies,
-and danger-zone long-context mode. State, questions, and answers are request
+The initial boundary refuses image assets, `box` questions, and multipart bodies. State, questions, and answers are request
 content: they are never persisted in configuration, request logs, or the
 ledger. Jev does not inspect or route completion requests; prompt-derived
 routing needs a separate explicit privacy and failure-boundary design.

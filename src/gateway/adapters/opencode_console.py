@@ -1,4 +1,4 @@
-"""TypeSafe Jev adapter for the native System One API.
+"""OpenCode Console Jev adapter for the native System One API.
 
 Jev is a structured-decision service, not a text-completion model.  It is
 therefore intentionally exposed only through ``/v1/systemone`` and never
@@ -15,16 +15,16 @@ from gateway.adapters.http_client import UpstreamClient, parse_json_body
 from gateway.config import STATE_CONNECTED, STATE_FAILED
 from gateway.core.capabilities import ModelInfo
 
-PROVIDER_ID = "typesafe_jev"
-KIND = "typesafe_jev"
-DEFAULT_BASE_URL = "https://api.typesafe.ai"
+PROVIDER_ID = "opencode_console"
+KIND = "opencode_console"
+DEFAULT_BASE_URL = "https://opencode.ai/inference"
 MODELS_PATH = "/v1/models"
 SYSTEMONE_PATH = "/v1/systemone"
 USER_AGENT = "personal-llm-gateway/2.0"
 
 
-class TypeSafeJevAdapter:
-    """Native adapter for TypeSafe's documented System One contract."""
+class OpenCodeConsoleAdapter:
+    """Native adapter for OpenCode Console's documented System One contract."""
 
     provider_id = PROVIDER_ID
     kind = KIND
@@ -56,40 +56,41 @@ class TypeSafeJevAdapter:
         )
         if response.status >= 400:
             raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body),
-                                      operation="the TypeSafe Jev catalogue request", headers=response.headers)
+                                      operation="the OpenCode Console Jev catalogue request", headers=response.headers)
         payload = parse_json_body(response.body)
-        entries = payload.get("models") if isinstance(payload, dict) else None
+        # OpenCode Console publishes its OpenAI-style catalogue as ``data``.
+        # It includes chat models as well, so this adapter deliberately keeps
+        # only the documented Jev System One ids rather than guessing a
+        # System One dialect for every Console model.
+        entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
             return []
         models: list[ModelInfo] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            name = entry.get("name")
-            if not isinstance(name, str) or not name:
+            model_id = entry.get("id")
+            if not isinstance(model_id, str) or not model_id.startswith("jev-"):
                 continue
-            description = entry.get("description")
-            release = entry.get("release_date")
-            notes = "; ".join(part for part in (description, f"release date: {release}" if isinstance(release, str) else "") if isinstance(part, str) and part)
             models.append(ModelInfo(
-                model_id=name,
+                model_id=model_id,
                 dialect="systemone",
                 supports_streaming=False,
                 supports_function_tools=False,
                 limits_source="unknown",
                 source="discovered",
-                notes=notes or None,
+                notes="OpenCode Console Jev System One model",
             ))
         return models
 
     def test_connection(self) -> TestResult:
         if not self._api_key():
-            return TestResult(False, STATE_FAILED, "No API key is stored for TypeSafe Jev.", {"reason": "not_configured"})
+            return TestResult(False, STATE_FAILED, "No API key is stored for OpenCode Console Jev.", {"reason": "not_configured"})
         try:
             models = self.list_models()
         except AdapterError as exc:
             return TestResult(False, STATE_FAILED, exc.message, exc.to_dict())
-        return TestResult(True, STATE_CONNECTED, f"TypeSafe Jev responded; {len(models)} models available.", {"model_count": len(models)})
+        return TestResult(True, STATE_CONNECTED, f"OpenCode Console Jev responded; {len(models)} models available.", {"model_count": len(models)})
 
     def invoke_systemone(self, payload: dict[str, Any]) -> bytes:
         """Send one already validated native System One request upstream."""
@@ -102,5 +103,5 @@ class TypeSafeJevAdapter:
         )
         if response.status >= 400:
             raise error_from_response(response.status, response.body, PROVIDER_ID, parse_json_body(response.body),
-                                      operation="the TypeSafe Jev System One request", headers=response.headers)
+                                      operation="the OpenCode Console Jev System One request", headers=response.headers)
         return response.body or b""
