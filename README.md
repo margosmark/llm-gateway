@@ -124,8 +124,9 @@ is available at `POST /v1/systemone`; send a model, a state string/object/array,
 and one or more named `noul`, `choice`, or `score` questions. The gateway
 returns OpenCode Console's structured response unchanged. Image assets, `box` questions, and multipart requests are refused for now rather than silently forwarded. A direct System One
 call sends its supplied state and questions to OpenCode Console; neither is persisted
-or written to gateway logs or the request ledger. Jev is not used to inspect
-or route chat requests in this release.
+or written to gateway logs or the request ledger. Direct System One calls are
+separate from phase inference: Jev inference is an explicit per-alias opt-in
+used only for phase selection, as described below.
 
 ### OpenCode Go
 
@@ -202,7 +203,7 @@ routes it excluded and why. It never silently serves a different model.
 An alias may carry an optional **phase-routing** policy that picks a
 different primary route depending on what the request is *for*. A phase is
 one of a closed set - `plan`, `implement`, `validate`. The policy is off by
-default and is configured per alias in the console.
+default. In this release it can be configured only through the owner-console LAN administration API (`POST /api/alias` with the `phase_routing` field); it is not exposed by the console editor or `/api/state`. Treat this as owner administration on the trusted LAN, not as a public-client setup instruction. A console editor is pending its separate PR.
 
 The precedence is fixed and never silent:
 
