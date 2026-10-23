@@ -78,6 +78,33 @@ cooldown cannot look like a silent failover.
 
 ---
 
+## TypeSafe Jev / System One
+
+**Established from** TypeSafe's official OpenAPI document at
+`https://api.typesafe.ai/openapi.json` (read 2026-10-22).
+
+| Fact | Value |
+|---|---|
+| Catalogue endpoint | authenticated `GET https://api.typesafe.ai/v1/models` |
+| Native decision endpoint | authenticated `POST https://api.typesafe.ai/v1/systemone` |
+| Authentication | `Authorization: Bearer <API_KEY>` |
+| Request | `model`, `state` (string/object/array), and named `questions` |
+| Supported initial question types | `noul`, `choice`, `score` |
+| Response | native `{model, answers, usage}` structure |
+
+The gateway exposes Jev only through its native `GET /v1/systemone/models` and
+`POST /v1/systemone` surfaces. It does not present Jev as an OpenAI chat or
+Responses model. The first implementation accepts JSON only and refuses
+assets, `box` questions, multipart bodies, and the provider's explicit
+image/long-context danger-zone headers. Catalogue refresh, connection test,
+and credential enrollment remain explicit owner actions.
+
+A direct System One request intentionally sends its submitted state and
+questions to TypeSafe. That content is never stored in gateway configuration,
+logs, or the ledger. Jev is not a hidden completion-router in this release.
+
+---
+
 ## OpenCode Go
 
 **Established from** `https://opencode.ai/docs/go/` and from probing

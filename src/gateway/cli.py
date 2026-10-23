@@ -11,6 +11,7 @@ from pathlib import Path
 
 from gateway.adapters.chatgpt_codex import ChatGPTCodexAdapter
 from gateway.adapters.opencode_go import OpenCodeGoAdapter
+from gateway.adapters.typesafe_jev import TypeSafeJevAdapter
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.buildinfo import release_identity
@@ -87,6 +88,7 @@ def build_application(data_dir: Path, host: str, port: int):
     registry = AdapterRegistry()
     registry.register(ChatGPTCodexAdapter(credentials.provider_handle("chatgpt_codex")))
     registry.register(OpenCodeGoAdapter(credentials.provider_handle("opencode_go")))
+    registry.register(TypeSafeJevAdapter(credentials.provider_handle("typesafe_jev")))
     with config.mutate() as snapshot:
         for provider_id in registry.provider_ids():
             if provider_id not in snapshot.providers:

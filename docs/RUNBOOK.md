@@ -97,6 +97,16 @@ Everything else happens in the browser.
 | Read status and limits | Owner console → Status |
 | Make the aliases appear in OpenCode's `/models` | Install `integrations/opencode/` once (see §3.1) |
 
+### TypeSafe Jev / System One
+
+To use Jev, open **Providers → TypeSafe Jev**, enter the API key in its
+write-only field, then explicitly test and refresh the catalogue. Enable the
+Jev model you intend to call. The native API is `POST /v1/systemone`; it needs
+a model, a state, and named `noul`, `choice`, or `score` questions. The
+matching `GET /v1/systemone/models` returns only saved, enabled model
+metadata and never makes a provider call. System One state/questions are sent
+to TypeSafe for that direct request; they are not retained by the gateway.
+
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Credentials are stored
 separately and never returned by state or status APIs.

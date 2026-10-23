@@ -119,6 +119,8 @@ class GatewayApp:
 
         r.add(["GET"], "/v1/models", self.handle_models)
         r.add(["GET"], "/v1/alias-catalog", self.handle_alias_catalog)
+        r.add(["GET"], "/v1/systemone/models", self.handle_systemone_models)
+        r.add(["POST"], "/v1/systemone", self.handle_systemone)
         r.add(["POST"], "/v1/chat/completions", self.handle_chat_completions)
         r.add(["POST"], "/v1/responses", self.handle_responses)
 
@@ -341,6 +343,52 @@ class GatewayApp:
                 ),
             })
         return json_response({"object": "list", "data": aliases})
+
+    def handle_systemone_models(self, request: Request) -> Response:
+        """Return explicitly refreshed Jev models, without an upstream read."""
+        self._resolve_profile(request)
+        provider = self.config.snapshot().providers.get("typesafe_jev")
+        models = [] if provider is None else [
+            {"name": entry.model_id, "description": entry.notes or "", "release_date": "unknown"}
+            for entry in sorted(provider.enabled_models(), key=lambda item: item.model_id)
+        ]
+        return json_response({"models": models})
+
+    def handle_systemone(self, request: Request) -> Response:
+        """Pass a validated native Jev System One request through unchanged.
+
+        This is deliberately separate from aliases and the chat router: callers
+        knowingly supply the state and questions to TypeSafe, and no completion
+        request is inspected or forwarded here.
+        """
+        self._resolve_profile(request)
+        try:
+            payload = request.json()
+        except ValueError:
+            raise RoutingError("request body is not valid JSON", code="malformed_request", status=400)
+        error = _validate_systemone_request(payload)
+        if error:
+            raise RoutingError(error, code="malformed_request", status=400)
+        if request.headers.get("typesafe-danger-zone-images") or request.headers.get("typesafe-danger-zone-long-context"):
+            raise RoutingError(
+                "TypeSafe danger-zone image and long-context modes are not supported by this gateway",
+                code="unsupported_capability",
+                status=422,
+            )
+        assert isinstance(payload, dict)
+        adapter = self.registry.get("typesafe_jev")
+        if adapter is None or not hasattr(adapter, "invoke_systemone"):
+            raise RoutingError("TypeSafe Jev is not configured", code="provider_unavailable", status=503)
+        config = self.config.snapshot()
+        provider = config.providers.get("typesafe_jev")
+        model = payload["model"]
+        if provider is None or model not in provider.models or not provider.models[model].enabled:
+            raise RoutingError(f"System One model '{model}' is not enabled by this gateway", code="unknown_model", status=404)
+        request.context["action"] = "systemone"
+        request.context["attribution"] = {
+            "requested_alias": None, "serving_provider": "typesafe_jev", "serving_model": model,
+        }
+        return Response(200, [("Content-Type", "application/json")], adapter.invoke_systemone(payload))
 
     def handle_chat_completions(self, request: Request) -> Any:
         return self._handle_inference(request, DIALECT_OPENAI_CHAT)
@@ -1144,6 +1192,40 @@ def _convert_buffered(body: bytes, source: str, target: str) -> bytes:
     except Exception:  # pragma: no cover - defensive
         return body
     return json.dumps(converted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _validate_systemone_request(payload: Any) -> str | None:
+    """Validate the JSON-only safe subset of TypeSafe's native contract.
+
+    Image assets and box questions require the provider's danger-zone header;
+    long-context likewise requires an opt-in header. Neither crosses this
+    initial gateway boundary.  The submitted state/questions stay only in the
+    request body and are never written to config, logs, or the ledger.
+    """
+    if not isinstance(payload, dict):
+        return "request body is not valid JSON"
+    model = payload.get("model")
+    if not isinstance(model, str) or not model:
+        return "request is missing a System One model"
+    if "state" not in payload or not isinstance(payload["state"], (str, dict, list)):
+        return "System One state must be a string, object, or array"
+    if payload.get("assets") is not None:
+        return "System One image assets are not supported by this gateway"
+    questions = payload.get("questions")
+    if not isinstance(questions, dict) or not questions:
+        return "System One questions must be a non-empty object"
+    for name, question in questions.items():
+        if not isinstance(name, str) or not name or not isinstance(question, dict):
+            return "each System One question must have a non-empty name and object value"
+        kind = question.get("type")
+        if kind not in ("noul", "choice", "score"):
+            return "System One questions support only noul, choice, and score"
+        criteria = question.get("criteria")
+        if kind == "choice" and (not isinstance(criteria, dict) or not criteria):
+            return "a System One choice question requires non-empty criteria"
+        if kind == "score" and (not isinstance(criteria, list) or not criteria or len(criteria) > 10):
+            return "a System One score question requires one to ten criteria"
+    return None
 
 
 def _alias_from_payload(

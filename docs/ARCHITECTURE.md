@@ -79,6 +79,22 @@ the rest of the state.
 6. The adapter makes the provider request. The returned provider/model is
    attributed to the route result. A stream is forwarded incrementally.
 
+### Native Jev / System One
+
+`GET /v1/systemone/models` returns only the owner-enabled models from the
+saved TypeSafe Jev catalogue and never calls TypeSafe. `POST /v1/systemone`
+accepts a JSON-only native System One request: a model, a string/object/array
+state, and non-empty named `noul`, `choice`, or `score` questions. It checks
+that the model was explicitly enabled, sends the payload to TypeSafe, and
+returns the native structured response. It is intentionally not an alias,
+chat-completions, or Responses route.
+
+The initial boundary refuses image assets, `box` questions, multipart bodies,
+and danger-zone long-context mode. State, questions, and answers are request
+content: they are never persisted in configuration, request logs, or the
+ledger. Jev does not inspect or route completion requests; prompt-derived
+routing needs a separate explicit privacy and failure-boundary design.
+
 ### The upstream conversation identifier
 
 Some upstreams require a conversation identifier. OpenCode Go refuses a
