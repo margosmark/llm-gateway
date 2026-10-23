@@ -725,6 +725,73 @@ class ConsoleApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
 
+    def test_alias_state_round_trips_phase_routing_policy(self) -> None:
+        policy = {
+            "enabled": True,
+            "routes": {
+                "plan": {"provider": "chatgpt_codex", "model": "gpt-6-luna", "effort": "high"},
+                "implement": {"provider": "chatgpt_codex", "model": "gpt-6-luna"},
+                "validate": {"provider": "chatgpt_codex", "model": "gpt-6-luna", "effort": "medium"},
+            },
+            "default_route": {"provider": "chatgpt_codex", "model": "gpt-6-luna"},
+            "inference": {
+                "enabled": True, "provider": "opencode_console", "model": "jev-1.13",
+                "minimum_confidence": 0.91, "on_uncertain": "default",
+            },
+        }
+        status, payload, _ = self.harness.request("POST", "/owner/api/alias", body={
+            "action": "save", "name": "phase-test",
+            "primary": {"provider": "chatgpt_codex", "model": "gpt-6-luna"},
+            "phase_routing": policy,
+        })
+        self.assertEqual(status, 200, payload)
+        status, state, _ = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        alias = next(item for item in state["aliases"] if item["name"] == "phase-test")
+        saved_policy = alias["phase_routing"]
+        self.assertEqual(saved_policy["enabled"], policy["enabled"])
+        self.assertEqual(set(saved_policy["routes"]), {"plan", "implement", "validate"})
+        for phase, route in policy["routes"].items():
+            self.assertEqual(saved_policy["routes"][phase], {
+                "phase": phase,
+                "route": {"provider": route["provider"], "model": route["model"]},
+                **({"effort": route["effort"]} if "effort" in route else {}),
+            })
+        self.assertEqual(saved_policy["default_route"], policy["default_route"])
+        self.assertEqual(saved_policy["inference"], policy["inference"])
+
+    def test_phase_route_validation_refusal_does_not_change_alias(self) -> None:
+        original = {
+            "enabled": True,
+            "routes": {"plan": {"provider": "chatgpt_codex", "model": "gpt-6-luna"}},
+            "default_route": None,
+            "inference": {"enabled": False, "provider": "opencode_console", "model": "", "minimum_confidence": 0.8, "on_uncertain": "default"},
+        }
+        save = {"action": "save", "name": "phase-test", "primary": {"provider": "chatgpt_codex", "model": "gpt-6-luna"}, "phase_routing": original}
+        self.assertEqual(self.harness.request("POST", "/owner/api/alias", body=save)[0], 200)
+        bad = dict(save)
+        bad["phase_routing"] = {**original, "routes": {"invented": {"provider": "chatgpt_codex", "model": "gpt-6-luna"}}}
+        status, payload, _ = self.harness.request("POST", "/owner/api/alias", body=bad)
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["field"], "phase_routing.routes")
+        state = self.harness.request("GET", "/owner/api/state")[1]
+        alias = next(item for item in state["aliases"] if item["name"] == "phase-test")
+        self.assertEqual(alias["phase_routing"]["routes"]["plan"]["route"], {
+            "provider": original["routes"]["plan"]["provider"],
+            "model": original["routes"]["plan"]["model"],
+        })
+        self.assertEqual(alias["phase_routing"]["enabled"], original["enabled"])
+        self.assertNotIn("request content", json.dumps(state).lower())
+
+    def test_console_displays_phase_routing_fields_and_server_field_errors(self) -> None:
+        status, body, _ = self.harness.request("GET", "/owner/app.js", raw=True)
+        self.assertEqual(status, 200)
+        source = body.decode()
+        for text in ("Per-alias phase routing", "Enable phase routing", "Jev phase inference", "minimum_confidence", "phase_routing: phaseRouting", "serverError.field"):
+            self.assertIn(text, source)
+        self.assertIn('["plan", "implement", "validate"]', source)
+        self.assertIn("m.enabled", source)
+
     def test_cross_origin_mutation_is_rejected(self) -> None:
         status, payload, _ = self.harness.request(
             "POST", "/owner/api/model", body={"action": "enable", "provider_id": "x", "model_id": "y"},

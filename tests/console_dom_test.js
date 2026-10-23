@@ -155,6 +155,38 @@ check("editing an alias reuses its existing route configuration", function () {
   assert(source.includes("text: \"Cancel edit\""));
 });
 
+check("phase policy editor has only the three supported phases and enabled-model route selects", function () {
+  assert(source.includes('["plan", "implement", "validate"]'));
+  assert(source.includes('found.models.filter(function (m) { return m.enabled; })'));
+  assert(source.includes('text: "Enable phase routing"'));
+  assert(source.includes('text: "Effort (optional)"'));
+  assert(source.includes('text: "Use default route"'));
+  assert(source.includes('text: "Enable Jev inference"'));
+  assert(source.includes('text: "Minimum confidence (0–1)"'));
+  assert(source.includes('text: "When uncertain"'));
+});
+
+check("existing phase policy is sent unchanged unless explicitly removed", function () {
+  assert(source.includes("if (phaseEnabled.checked || (phasePolicy && !removePhasePolicy.checked))"));
+  assert(source.includes("phase_routing: phaseRouting"));
+  assert(source.includes('text: "Remove phase policy"'));
+});
+
+check("server refusal names the invalid field in the visible error message", function () {
+  assert(source.includes('if (serverError && serverError.field) message += " (field: " + serverError.field + ")";'));
+  assert(source.includes('toast(error.message || "something went wrong", "bad")'));
+});
+
+check("disabled models cannot be selected for phase routes", function () {
+  assert(source.includes('found.models.filter(function (m) { return m.enabled; })'));
+});
+
+check("phase UI contains no request-content source", function () {
+  const phaseEditor = source.slice(source.indexOf("var phasePolicy ="), source.indexOf("// --- profiles"));
+  assert(!phaseEditor.includes("messages"));
+  assert(!phaseEditor.includes("completion"));
+});
+
 if (failures.length) {
   console.error("\n" + failures.length + " check(s) failed");
   process.exit(1);
