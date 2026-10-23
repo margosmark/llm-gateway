@@ -101,7 +101,9 @@ and credential enrollment remain explicit owner actions.
 
 A direct System One request intentionally sends its submitted state and
 questions to OpenCode Console. That content is never stored in gateway configuration,
-logs, or the ledger. Jev is not a hidden completion-router in this release.
+logs, or the ledger. Separately, the gateway supports explicit, per-alias Jev
+phase inference for phase routing; it does not use Jev to select a completion
+model outside that opt-in policy.
 
 ### Opt-in phase inference
 
