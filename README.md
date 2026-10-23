@@ -582,10 +582,13 @@ them.
   currently covers MiMo-V2.6-Flash and MiniMax M3.1 Flash; a service-side
   cap not documented by Go would still win, and a model without both sources
   stays Unknown rather than inheriting a price tier or a guess.
-* **Usage and cost are not yet recorded.** The bridge reads the provider's
-  token counters and the catalogue publishes per-token prices, but the
-  request ledger does not store either yet, so the Status page reports
-  request counts and timings rather than spend.
+* **Local cost is an estimate from published prices, not a bill.** The token
+  counters come from the provider's reported usage and the cost is computed
+  from the dated catalogue's published per-token prices, with the price's
+  source and observation date shown beside it. The provider's own allowance,
+  and any credit, discount or plan the owner holds, stay **Unknown**: the
+  gateway has no tokenizer and no billing relationship with the provider, and
+  a model with no published price reports **Unknown** rather than zero.
 
 ---
 

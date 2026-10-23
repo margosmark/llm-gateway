@@ -18,7 +18,9 @@ no response text" - is enforced in one place rather than at each call site.
 from __future__ import annotations
 
 import re
+import secrets
 import threading
+import time
 from pathlib import Path
 from .ledger_persistence import LedgerPersistence
 from collections import deque
@@ -51,6 +53,38 @@ DEFAULT_LEDGER_CAPACITY = 10_000
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+#: A random per-process component of every request identifier. An identifier
+#: minted after a restart must not collide with one that is already in the
+#: durable ledger, and a random component is the cheapest way to guarantee it.
+_REQUEST_ID_NONCE = secrets.token_hex(4)
+
+#: The counter that makes an identifier unique inside this process.
+_request_id_counter = 0
+_request_id_lock = threading.Lock()
+
+
+def new_request_id() -> str:
+    """Mint an identifier that names exactly one request.
+
+    The ledger amends a recorded outcome by its request identifier, so two
+    requests that share an identifier would have one request's usage
+    counters written onto another request's record. A millisecond
+    timestamp alone is not unique: the gateway serves requests
+    concurrently, and two requests routinely begin inside the same
+    millisecond.
+
+    The identifier therefore carries three parts - the millisecond, a
+    counter that is unique inside this process, and a nonce that is unique
+    to this process - so no two requests, in this process or across a
+    restart, can share one.
+    """
+    global _request_id_counter
+    with _request_id_lock:
+        _request_id_counter += 1
+        sequence = _request_id_counter
+    return f"req_{int(time.time() * 1000):x}_{sequence:x}_{_REQUEST_ID_NONCE}"
 
 
 @dataclass
@@ -159,9 +193,14 @@ class RequestLedger:
             if not isinstance(counters, dict) or any(not isinstance(k, str) or not isinstance(v, int) or v < 0 for k, v in counters.items()):
                 raise ValueError("token_counters must contain non-negative integer metadata")
         with self._lock:
-            event = next((item for item in self._events if item.request_id == request_id), None)
-            if event is None:
+            matches = [item for item in self._events if item.request_id == request_id]
+            if len(matches) != 1:
+                # No match: the outcome was never recorded, or it has already
+                # been evicted. More than one match: the identifier does not
+                # name a single request, and guessing would write one
+                # request's counters onto another request's record.
                 return False
+            event = matches[0]
             before = event.error_class
             event.status = fields.get("status", event.status)
             event.error_class = fields.get("error_class", event.error_class)

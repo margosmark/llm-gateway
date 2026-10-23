@@ -1,6 +1,12 @@
 import unittest
 
-from gateway.costs import aggregate_usage, calculate_cost, response_token_counters, stream_token_counters
+from gateway.costs import (
+    aggregate_usage,
+    calculate_cost,
+    published_prices,
+    response_token_counters,
+    stream_token_counters,
+)
 from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
 
 
@@ -14,7 +20,9 @@ class UsageCostTests(unittest.TestCase):
         cost = calculate_cost(counters, "claude-haiku-5-5")
         self.assertAlmostEqual(cost["amount_usd"], 0.000225)
         self.assertEqual(cost["source"], "https://opencode.ai/docs/go/")
-        self.assertEqual(cost["observed_at"], "2026-10-19")
+        # The dated catalogue snapshot is refreshed, so the as-of date is read
+        # from it rather than pinned to one snapshot's date.
+        self.assertEqual(cost["observed_at"], published_prices()["claude-haiku-5-5"]["observed_at"])
 
     def test_stream_usage_is_normalised_on_both_wire_dialects(self):
         chat = [b'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}\n\n']
