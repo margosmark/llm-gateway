@@ -111,9 +111,12 @@ one - the API surface, the alias test, and any future caller.
 
 The eligibility check separates two kinds of mismatch:
 
-* a **hard requirement** - wire dialect, streaming, function tools. A route
-  that cannot satisfy it is excluded, because dropping a tool would change
-  the API contract.
+* a **hard requirement** - wire dialect, streaming, function tools, and
+  **image input**. A route that cannot satisfy it is excluded, because
+  dropping a tool would change the API contract, and a model that cannot see
+  an image cannot answer a question about it. Image detection reuses the
+  bridge's own content parsers, so routing and conversion can never disagree
+  about which fields carry an image.
 * a **preference** - `reasoning_effort`. A model that cannot produce the
   requested depth of reasoning can still answer, so the route stays
   eligible, the effort is dropped *for that route*, and the substitution is

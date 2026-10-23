@@ -38,6 +38,16 @@ export function catalogue(data) {
     // rather than curated: a level the gateway says the primary route
     // publishes is a level the owner may select. The grammar check is a
     // safety rail on the way into an OpenCode variant id, not a vocabulary.
+    if (typeof row.supports_function_tools !== "boolean") {
+      throw new Error("invalid alias capabilities")
+    }
+    // An older gateway may not emit image capability yet. Absent means "not
+    // advertised", which is exactly the previous behaviour: the alias stays
+    // text-only rather than the whole refresh failing over version skew.
+    if (row.supports_image_input !== undefined &&
+        typeof row.supports_image_input !== "boolean") {
+      throw new Error("invalid alias capabilities")
+    }
     const efforts = Array.isArray(row.primary_reasoning_efforts)
       ? [...new Set(row.primary_reasoning_efforts)]
       : []
@@ -52,7 +62,10 @@ export function catalogue(data) {
       context,
       input: context,
       output: OUTPUT_RESERVE,
-      tools: row.supports_function_tools === true,
+      tools: row.supports_function_tools,
+      // Absent means "not advertised" on an older gateway, so it normalises
+      // to false rather than leaving the field undefined for the client.
+      image: row.supports_image_input === true,
       efforts,
       // The OpenCode-side variants. The body uses the Chat Completions
       // spelling, which the gateway normalises on both paths.

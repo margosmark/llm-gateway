@@ -1253,12 +1253,70 @@ documented context and effort metadata, and that the retired ID is absent;
 `tests/test_opencode_catalog.py` proves those windows make aliases finite
 and publishes the MiniMax effort levels.
 
+### R37 — The Go snapshot asserted *no* model accepts images, on no evidence — **closed**
+
+**Severity: medium metadata correctness, with a client-visible symptom.**
+*(closed)*
+
+`scripts/build_go_catalog_snapshot.py` wrote `"supports_image_input": False`
+for **all 37 models** as a bare constant, while its own docstring claimed the
+snapshot was "published information, transcribed from the provider's own
+documentation... *not* a guess." The claim was therefore unfounded in
+**both** directions: it denied image input to plainly multimodal models
+(`minimax-m3.1-flash`, `claude-haiku-5-5`, `gemini-4-argon-contributor`) and
+would have affirmed it for any model added later without a word of evidence.
+
+The value was then dropped a second time: `opencode_go.py` built its
+`ModelInfo` without passing `supports_image_input`, so even a corrected
+snapshot would not have reached the router. `/v1/alias-catalog` published no
+image field at all, and `integrations/opencode/index.ts` hardcoded
+`input: ["text"]` behind the comment *"Image routing is not yet enforced by
+the gateway."* Three independent drops meant a user whose models do accept
+images could never attach one through OpenCode.
+
+This is the same defect shape as the context-window problem, which the
+project already solved with a tri-state plus a labelled fallback: **an
+unsupported capability must be Unknown, not asserted false.**
+
+**Resolution.** Image support is now recorded per **exact upstream model
+ID**, only from official model-provider documentation, with the source URL
+kept beside the flag (`IMAGE_INPUT_SOURCES`, rendered as
+`image_input_source`). A model absent from that map stays false and
+sourceless, and a regression test asserts the two always agree. MiniMax
+documents that `MiniMax-M3.1-Flash` accepts OpenAI `image_url` parts
+(`platform.minimax.io/docs/api-reference/text-openai-api`, read 2026-10-23),
+and the published Go endpoint table establishes that the exact
+`minimax-m3.1-flash` ID is served over that compatibility endpoint. That is
+the only model currently claimed, because it is the only one evidenced.
+
+`opencode_go.py` now propagates the capability from the snapshot;
+`/v1/alias-catalog` publishes `supports_image_input` under an **any-route**
+rule; the OpenCode plugin maps it to `input: ["text", "image"]`; and the
+router **excludes** an image-incapable route from a request carrying an
+image, with the reason recorded, failing closed at the gateway when no
+capable route remains.
+
+The any-route rule is deliberately looser than the all-routes rule the tools
+flag uses, and it is safe only *because* the router now enforces the
+capability per request. The hazard the all-routes rule guarded against — a
+fallback serving an image to a model that cannot see it — is removed by that
+enforcement, not by the publication rule. Without the router check, the
+any-route rule would have reintroduced exactly the failure R37 describes.
+
+**Regression evidence:** `tests/test_image_input.py` — every claimed
+capability has a source and every unclaimed one has none; the capability
+survives snapshot → adapter → catalog; an alias is image-capable when any
+route is, and stays text-only when none is; an image request excludes a
+text-only primary, uses a capable fallback, and fails closed with no capable
+route; a text-only request is unaffected; and detection agrees with the
+bridge across a dialect conversion.
+
 ## Recommended order
 
-Findings R0-R27 and R28-R35 are closed or superseded. **R26 and R36 are
+Findings R0-R27 and R28-R36 are closed or superseded. **R26 and R36 are
 open**; R26 is planned in `docs/TODO.md` (T2), while R36 is the explicit
-post-deployment route replacement above. The register is kept so the next
-agent can see what was already paid for in time.
+post-deployment route replacement above. R37 is closed. The register is kept
+so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or

@@ -198,6 +198,13 @@ class OpenCodeGoAdapter:
                     if isinstance(published.get("max_output_tokens"), int)
                     else None,
                     reasoning_efforts=tuple(published.get("reasoning_efforts") or ()),
+                    supports_streaming=bool(published.get("supports_streaming", True)),
+                    supports_function_tools=bool(published.get("supports_function_tools", True)),
+                    supports_builtin_tools=bool(published.get("supports_builtin_tools", False)),
+                    # The dated, source-backed catalogue is the capability
+                    # authority for Go routes. Do not invent vision support
+                    # from a model name or its wire dialect.
+                    supports_image_input=bool(published.get("supports_image_input", False)),
                     retention_class=str(published.get("retention_class") or "unknown"),
                     monthly_limit_usd=published.get("monthly_limit_usd")
                     if isinstance(published.get("monthly_limit_usd"), (int, float))
