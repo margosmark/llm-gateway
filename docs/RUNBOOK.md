@@ -107,6 +107,14 @@ matching `GET /v1/systemone/models` returns only saved, enabled model
 metadata and never makes a provider call. System One state/questions are sent
 to OpenCode Console for that direct request; they are not retained by the gateway.
 
+The Status ledger is metadata-only and asynchronously persisted to
+`request-ledger.jsonl` in the state volume. It retains up to 30 days with
+bounded rotation (5 MiB active file plus two rotations); disk-write errors or
+a full queue can cause a persistence update to be dropped. The in-memory ring
+is the live view. Local usage aggregates cover the last 24 hours; costs use
+published prices only and display their source and observation date. A model
+without published prices reports **Unknown**. This is not a billing system.
+
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Credentials are stored
 separately and never returned by state or status APIs.

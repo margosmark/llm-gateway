@@ -93,7 +93,7 @@ def build_application(data_dir: Path, host: str, port: int):
         for provider_id in registry.provider_ids():
             if provider_id not in snapshot.providers:
                 snapshot.providers[provider_id] = ProviderState(provider_id=provider_id, kind=provider_id)
-    ledger = RequestLedger()
+    ledger = RequestLedger(persistence_path=data_dir / "request-ledger.jsonl")
     limits = LimitStore()
     # The open circuits are remembered on disk, so a gateway that restarts
     # during an outage does not call the exhausted provider again.

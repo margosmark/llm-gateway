@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from gateway.adapters.base import Adapter, AdapterError, ProviderRequest, ProviderResponse
+from gateway.adapters.base import Adapter, AdapterError, CLASS_MESSAGES, ProviderRequest, ProviderResponse
 from gateway.bridge.model import ConversionError
 from gateway.bridge.requests import convert_request, payload_has_image_input
 from gateway.circuits import CircuitStore
@@ -675,7 +675,7 @@ class Router:
                         "model": candidate.route.model,
                         "outcome": "error",
                         "error_class": exc.error_class,
-                        "reason": exc.message,
+                        "reason": CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN]),
                     }
                 )
                 self._maybe_open_circuit(alias, candidate, exc)
@@ -686,7 +686,7 @@ class Router:
                     alias, exc.error_class, eligible[index + 1], needs_tools
                 )
                 if not allowed:
-                    exc.message = f"{exc.message} (fallback not used: {reason})"
+                    exc.message = f"{CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN])} (fallback not used: {reason})"
                     break
                 attribution.fallback_reason = reason
                 attribution.fallback_used = True

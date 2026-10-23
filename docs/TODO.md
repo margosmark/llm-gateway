@@ -68,8 +68,8 @@ described is implemented and tested. The duplicated bullets are merged, and
 the section now carries the limitations that are true today: the
 non-OpenAI dialects, the Unknown ChatGPT allowance, the beta device-code
 path, no TLS, no authentication boundary, the recorded bridge corpus, the
-Go models without a documented window, and the fact that usage and cost are
-not yet recorded.
+Go models without a documented window, and the fact that a local cost is an
+estimate from published prices rather than a bill (T2).
 
 **Why.** The README states that two features are *not ready* and cites R1,
 R8 and R9 as open release blockers. All three are **closed** in
@@ -88,38 +88,36 @@ observed in this repository; no bullet is duplicated; each citation points
 at the right finding; and each claim has been re-read against the code that
 implements it.
 
-### T2 — Local usage and cost accounting — `todo`
+### T2 — Local usage and cost accounting — `done`
 
-**Why.** Three finished pieces are not connected to each other:
+**Landed.** The dated Go catalogue snapshot is now read for its published
+per-token prices, and every price carries the source it was published at and
+the date it was observed. Usage is extracted on both paths — the buffered
+response and the streamed one — and amended into the recorded request, so a
+request's record carries its own token counts. The Status page shows the
+local estimate per request and the last 24 hours aggregated by alias,
+provider and model.
 
-* the bridge **already normalises usage** on both paths
-  (`bridge/streams.py:174-190`, `bridge/buffered.py:103-127`);
-* `RequestEvent` **already has** a `token_counters` field
-  (`observability.py:70`) that is **never populated** — it appears in the
-  declaration and its serialiser and nowhere else;
-* the catalogue **already publishes** `price_input_per_m`,
-  `price_output_per_m` and `price_cached_read_per_m` for 29 of its 37
-  models, and **no code in `src/` reads any of them** (only
-  `monthly_limit_usd` is used, and only for display).
+**Rules kept.** Metadata only — counts and published prices, never content.
+The price's source and as-of date sit next to the number. A model with no
+published price reports **Unknown**, never `0` and never "unlimited", and a
+price is only applied to the provider that published it. The provider's
+allowance is still Unknown: the gateway has no entitlement to it and does
+not claim one. The aggregates survive a restart, because T7 landed with it.
 
-The gateway therefore knows the token counts and the prices and reports
-neither. This is the only way to get a *real* number for the one thing the
-project says most often: **the provider's allowance is Unknown**. Local
-spend is computable from metadata alone — counts times published price —
-which the observability rules explicitly permit.
+**Landed with it.** The request identifier is now unique per request
+(`observability.new_request_id`). The old `req_<millisecond>` was not: two
+requests inside one millisecond shared one identifier, and the ledger amends
+a record by that identifier — so one request's usage could be written onto
+another's. The ledger now also refuses to amend an identifier that matches
+more than one record. See `docs/REVIEW.md` R38.
 
-**Scope.** Populate `token_counters` on the buffered *and* the streamed
-path; compute per-request cost from the published prices, carrying the
-price's source and observation date; aggregate by alias, provider and model
-over a window; show it on the Status page.
-
-**Rules.** Metadata only — counts and published prices, never content. A
-model with no published price reports **Unknown**, never `0` and never
-"unlimited". Keep the price's source and as-of date next to the number.
-
-**Depends on.** T7 if the aggregates must survive a restart. Otherwise the
-totals are in-memory like today's ledger, and the Status page must keep
-saying so.
+**Evidence.** `src/gateway/costs.py`; `tests/test_costs.py` (the price's
+provenance against the snapshot itself, the arithmetic, and the
+no-published-price case); `tests/test_end_to_end.py` (the counters on the
+buffered and the streamed path); `tests/test_request_ids.py` (identifier
+uniqueness, concurrency, the durable round trip, and per-request
+attribution). Full suite passed (463 tests, 2 skipped) on the rebased tree.
 
 ### T3 — Enforce the capabilities that are declared but never checked — `partial`
 
@@ -390,18 +388,19 @@ is refused.
 
 ## Tier 2 — operational completeness
 
-### T7 — A durable request ledger — `todo`
+### T7 — A durable request ledger — `done`
 
-**Why.** The ledger is a 10,000-entry **in-memory** ring
-(`observability.py:101-108`). It is lost on every restart, and the console
-says so (`static/console.js:299`). The Status page is operationally
-useful, but it is not a record.
+**Landed.** Request outcomes are persisted asynchronously as metadata-only
+records on the state volume in `request-ledger.jsonl`, rotated at 5 MiB with
+two backups and a 30-day retention window. The in-memory ring remains the hot
+view, is restored at startup, and exposes an `amend(request_id, **fields)`
+seam for updating safe outcome metadata without exposing storage details. The
+Status view reports the persistence mode and explicitly says the ledger is
+not a billing system.
 
-**Scope.** Persist to the state volume as metadata-only records, rotated
-and size-capped; keep the in-memory ring as the hot path; a declared
-retention window; a truthful durability statement in the Status view.
-
-**Rule.** Still not a billing system, and must not be described as one.
+**Evidence.** `src/gateway/ledger_persistence.py`,
+`tests/test_ledger_persistence.py` (including restart survival and content
+refusal), and the Status payload/UI; full suite passed (385 tests, 2 skipped).
 
 ### T8 — Backup, export and import in the console — `todo`
 
@@ -780,9 +779,9 @@ single owner. It should land only if the simpler shapes have been used.
 
 ### T27 — Honour a client-supplied request id — `todo`
 
-**Why.** The gateway invents `req_<timestamp>` (`http/app.py:359`). A
-client that already correlates its own requests cannot join the two
-records together.
+**Why.** The gateway invents its own request id
+(`observability.new_request_id`). A client that already correlates its own
+requests cannot join the two records together.
 
 **Scope.** Accept `X-Request-Id`, validate it - length, character set, no
 control characters - and record it beside the gateway's own id. A client
@@ -1011,12 +1010,12 @@ no content.
 | ID | Item | Tier | Status |
 |---|---|---|---|
 | T1 | Refresh the README's Known Limitations | 1 | **done** |
-| T2 | Local usage and cost accounting | 1 | todo |
+| T2 | Local usage and cost accounting | 1 | **done** |
 | T3 | Enforce the declared-but-unchecked capabilities | 1 | todo |
 | T4 | Normalised thinking levels | 1 | **done** |
 | T5 | Anthropic Messages dialect and `/v1/messages` | 1 | todo |
 | T6 | Google v1beta dialect | 1 | blocked |
-| T7 | A durable request ledger | 2 | todo |
+| T7 | A durable request ledger | 2 | **done** |
 | T8 | Console backup, export and import | 2 | todo |
 | T9 | A `/metrics` endpoint | 2 | todo |
 | T10 | Concurrency cap and per-client rate limit | 2 | todo |

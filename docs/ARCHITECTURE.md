@@ -35,11 +35,25 @@ not values.
 The following state is intentionally in-memory only and disappears on restart:
 
 * in-flight ChatGPT/Codex device authorization state;
-* request ledger events and totals;
 * limit snapshots.
 
-This means the Status page is operationally useful but is **not** a durable
-audit or billing system.
+Request outcomes are also appended asynchronously to `request-ledger.jsonl`
+under the state directory. Expired records are physically pruned on load and before rotation; the append-only metadata log is rotated at 5 MiB
+with two rotated files (15 MiB maximum) and records older than 30 days are
+ignored when loading. The bounded in-memory ring remains the live hot view;
+records are restored after restart. This is operational metadata, not a
+complete audit trail and **not a billing system**. A full write queue or
+storage error may drop a persistence update; the request path does not wait
+for disk I/O.
+
+The Status view reports whether persistence is enabled and the declared
+30-day retention window. Local usage aggregates cover the last 24 hours and
+are computed from token counters and published prices, with source and
+observation date; a missing price remains Unknown. Because aggregation uses
+the bounded recent-event ring, evictions that may include in-window events
+mark cost estimates Unknown rather than presenting a partial sum. This
+estimate is not a provider bill. Totals are reconstructed from the restored
+ring, not a lifetime accounting source.
 
 The open circuits are the exception: they are written to
 `circuits.json` in the state directory, because a gateway that restarts

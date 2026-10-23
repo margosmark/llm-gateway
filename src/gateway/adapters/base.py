@@ -84,11 +84,10 @@ POLICY_CODES = frozenset(
     }
 )
 
-#: A safe upstream code looks like this. Anything else is not echoed.
-#: Uppercase is allowed, because providers use camel-cased type names such
-#: as ``MissingSessionID``; refusing them would hide the useful cause
-#: behind a generic code.
-SAFE_CODE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+#: Only documented classification codes may influence routing. Never retain
+#: arbitrary provider-controlled strings: they can contain credential material.
+KNOWN_ERROR_CODES = EXHAUSTION_CODES | RATE_LIMIT_CODES | ROUTE_GONE_CODES | POLICY_CODES
+SAFE_CODE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$") # retained for compatibility; not an acceptance rule.
 
 #: Fixed, safe explanation per error class. These never contain upstream
 #: body text, because the body could echo request content.
@@ -183,12 +182,12 @@ class AdapterError(Exception):
         self.error_class = error_class
         self.provider_id = provider_id
         self.status = status
-        self.upstream_code = upstream_code
+        self.upstream_code = _safe_classification_code(upstream_code)
         #: How long the provider asked the gateway to wait, in seconds. It
         #: is a hint from the provider about its own recovery, not evidence
         #: that the provider has recovered.
         self.retry_after = retry_after
-        self.message = message or CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
+        self.message = _safe_error_message(error_class, message)
         super().__init__(self.message)
 
     @property
@@ -280,26 +279,33 @@ class Adapter(Protocol):
 
 
 def _extract_upstream_code(payload: Any) -> str | None:
-    """Pull a short, safe error code out of an upstream error body."""
+    """Return a documented classification code, never arbitrary provider text."""
     if not isinstance(payload, dict):
         return None
+    candidates: list[Any] = []
     error = payload.get("error")
     if isinstance(error, dict):
-        for key in ("code", "type"):
-            value = error.get(key)
-            if isinstance(value, str) and SAFE_CODE.match(value):
-                return value
+        candidates.extend(error.get(key) for key in ("code", "type"))
         inner = error.get("error")
         if isinstance(inner, dict):
-            for key in ("code", "type"):
-                value = inner.get(key)
-                if isinstance(value, str) and SAFE_CODE.match(value):
-                    return value
-    for key in ("code", "type", "error_code"):
-        value = payload.get(key)
-        if isinstance(value, str) and SAFE_CODE.match(value):
-            return value
-    return None
+            candidates.extend(inner.get(key) for key in ("code", "type"))
+    candidates.extend(payload.get(key) for key in ("code", "type", "error_code"))
+    return next(
+        (value for value in candidates if isinstance(value, str) and value in KNOWN_ERROR_CODES),
+        None,
+    )
+
+
+def _safe_classification_code(value: str | None) -> str | None:
+    """Keep caller-supplied AdapterError codes within the classification allowlist."""
+    return value if isinstance(value, str) and value in KNOWN_ERROR_CODES else None
+
+
+def _safe_error_message(error_class: str, message: str | None = None) -> str:
+    """Preserve gateway-authored context, but redact token-shaped credentials."""
+    safe_message = message or CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
+    return re.sub(r"(?i)\b(?:sk|tok|key)-[A-Za-z0-9_-]{16,}\b", "[redacted]", safe_message)
+
 
 
 def classify_status(status: int, payload: Any = None, upstream_code: str | None = None) -> str:
@@ -362,18 +368,11 @@ def error_from_response(
     """
     code = _extract_upstream_code(payload)
     error_class = classify_status(status, payload, code)
-    message = CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
-    # The upstream status is metadata, and it is what tells an operator
-    # whether the provider is refusing our request or is failing itself.
-    details = [f"upstream status {status}"]
-    if code:
-        details.append(f"upstream code: {code}")
-    message = f"{message} ({'; '.join(details)})"
-    if operation:
-        message = f"{operation}: {message}"
     return AdapterError(
         error_class=error_class,
-        message=message,
+        # Provider text (including codes and operation labels) is untrusted.
+        # Expose only the fixed message for the gateway-owned error class.
+        message=CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN]),
         provider_id=provider_id,
         status=status,
         upstream_code=code,

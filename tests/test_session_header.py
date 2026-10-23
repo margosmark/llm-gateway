@@ -28,7 +28,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gateway.adapters.base import classify_status, error_from_response
+from gateway.adapters.base import AdapterError, classify_status, error_from_response
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.config import ConfigStore, ModelEntry, ProviderState, RouteRef
@@ -239,37 +239,41 @@ class AliasTestPathTests(unittest.TestCase):
 
 
 class UpstreamCodeTests(unittest.TestCase):
-    def test_a_camel_cased_upstream_type_is_reported(self) -> None:
-        body = json.dumps(
-            {
-                "type": "error",
-                "error": {
-                    "type": "MissingSessionID",
-                    "message": "Request is missing x-opencode-session and cannot be routed efficiently.",
-                },
-            }
-        ).encode("utf-8")
-        error = error_from_response(400, body, "opencode_go", json.loads(body))
-        self.assertEqual(error.upstream_code, "MissingSessionID")
-        self.assertIn("MissingSessionID", error.message)
+    def test_only_allowlisted_classification_codes_are_retained(self) -> None:
+        body = json.dumps({"error": {"code": "insufficient_quota"}}).encode("utf-8")
+        error = error_from_response(429, body, "opencode_go", json.loads(body))
+        self.assertEqual(error.upstream_code, "insufficient_quota")
+        self.assertEqual(error.error_class, "exhausted")
 
-    def test_the_upstream_body_is_still_not_echoed(self) -> None:
-        body = json.dumps(
-            {
-                "type": "error",
-                "error": {
-                    "type": "MissingSessionID",
-                    "message": "the caller's prompt text appears here",
-                },
-            }
-        ).encode("utf-8")
+    def test_arbitrary_upstream_codes_and_messages_are_discarded(self) -> None:
+        secret = "sk-" + "B" * 32
+        body = json.dumps({"error": {"code": secret, "message": secret}}).encode("utf-8")
         error = error_from_response(400, body, "opencode_go", json.loads(body))
-        self.assertNotIn("prompt text", error.message)
-        self.assertIn("MissingSessionID", error.message)
+        self.assertIsNone(error.upstream_code)
+        self.assertNotIn(secret, error.message)
+        self.assertNotIn(secret, json.dumps(error.to_dict()))
+
+    def test_provider_type_not_in_allowlist_is_not_exposed(self) -> None:
+        body = json.dumps({"error": {"type": "MissingSessionID"}}).encode("utf-8")
+        error = error_from_response(400, body, "opencode_go", json.loads(body))
+        self.assertIsNone(error.upstream_code)
+        self.assertNotIn("MissingSessionID", error.message)
+
+    def test_caller_supplied_adapter_message_and_code_are_discarded(self) -> None:
+        secret = "sk-" + "C" * 32
+        error = AdapterError("auth", message=secret, upstream_code=secret)
+        self.assertNotIn(secret, error.message)
+        self.assertNotIn(secret, json.dumps(error.to_dict()))
+        self.assertIsNone(error.upstream_code)
 
     def test_a_missing_session_id_is_classified_as_malformed(self) -> None:
         payload = {"type": "error", "error": {"type": "MissingSessionID"}}
         self.assertEqual(classify_status(400, payload), "malformed")
+
+    def test_unknown_code_cannot_change_an_allowlisted_classification(self) -> None:
+        secret = "sk-" + "D" * 32
+        self.assertEqual(classify_status(429, {"error": {"code": secret}}), "rate_limited")
+        self.assertEqual(classify_status(400, {"error": {"code": secret}}), "malformed")
 
 
 if __name__ == "__main__":

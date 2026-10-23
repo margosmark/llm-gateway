@@ -22,6 +22,7 @@ from gateway.bridge.aggregate import aggregate_stream
 from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_chat
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import convert_stream, sse_done
+from gateway.costs import aggregate_usage, annotate_events, published_prices, response_token_counters, stream_token_counters
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
@@ -56,6 +57,7 @@ from gateway.observability import (
     RequestLedger,
     SOURCE_PUBLISHED_ESTIMATE,
     SOURCE_UNKNOWN,
+    new_request_id,
 )
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -447,7 +449,7 @@ class GatewayApp:
             )
 
         stream = bool(payload.get("stream"))
-        request_id = f"req_{int(time.time() * 1000):x}"
+        request_id = new_request_id()
         session_hint = self._session_hint(request)
         # Read and strip the gateway-owned phase hint before the payload is
         # converted or forwarded: no upstream provider ever sees it.
@@ -469,6 +471,8 @@ class GatewayApp:
         # name the alias and the provider that served it.
         request.context["attribution"] = routed.attribution.to_dict()
         request.context["streamed"] = stream
+        request.context["request_id"] = request_id
+        request.context["serving_model"] = routed.attribution.serving_model
 
         if not stream:
             upstream_dialect = routed.request.dialect or dialect
@@ -488,6 +492,8 @@ class GatewayApp:
             # request.
             if upstream_dialect != dialect and body:
                 body = _convert_buffered(body, upstream_dialect, dialect)
+            if self.ledger:
+                self.ledger.amend(request_id, token_counters=response_token_counters(body, dialect))
             return Response(
                 routed.response.status,
                 [("Content-Type", routed.response.content_type or "application/json")],
@@ -498,13 +504,17 @@ class GatewayApp:
         upstream_stream = routed.response.stream or iter(())
 
         def frames():
-            if upstream_dialect == dialect:
-                yield from upstream_stream
-                return
-            for frame in convert_stream(upstream_stream, upstream_dialect, dialect, routed.request.model):
+            observed: dict[str, int] = {}
+            converted = upstream_stream if upstream_dialect == dialect else convert_stream(
+                upstream_stream, upstream_dialect, dialect, routed.request.model
+            )
+            for frame in converted:
+                observed.update(stream_token_counters([frame], dialect) or {})
                 yield frame
-            if dialect == DIALECT_OPENAI_CHAT:
+            if dialect != upstream_dialect and dialect == DIALECT_OPENAI_CHAT:
                 yield sse_done()
+            if self.ledger:
+                self.ledger.amend(request_id, token_counters=observed or None)
 
         return StreamResponse(
             frames(),
@@ -651,6 +661,9 @@ class GatewayApp:
                 }
             )
 
+        price_snapshot = published_prices()
+        recent_ledger = self.ledger.recent(limit=25) if self.ledger else []
+        usage_ledger = self.ledger.recent(limit=10_000) if self.ledger else []
         return json_response(
             {
                 "initialized": config.initialized,
@@ -666,8 +679,10 @@ class GatewayApp:
                 "profiles": profiles,
                 "published_models": [alias.name for alias in sorted(config.published_aliases(), key=lambda a: a.name)],
                 "limits": self.limits.all(),
-                "ledger": self.ledger.recent(limit=25) if self.ledger else [],
+                "ledger": annotate_events(recent_ledger, _prices=price_snapshot),
                 "totals": self.ledger.totals() if self.ledger else {},
+                "usage_costs": aggregate_usage(usage_ledger, window_hours=24, evicted_events=self.ledger.evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
+                "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),
                 "release": self._release_identity() if self._release_identity else {},
@@ -1063,7 +1078,7 @@ class GatewayApp:
                 },
                 source_dialect=DIALECT_OPENAI_CHAT,
                 stream=False,
-                request_id="route_test",
+                request_id=new_request_id(),
             )
         except (RoutingError, AdapterError, ConversionError) as exc:
             message = getattr(exc, "message", str(exc))

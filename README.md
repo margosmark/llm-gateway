@@ -154,6 +154,12 @@ Your client asks for the **alias**; the provider only knows its own model
 ids. The gateway substitutes the upstream model id for the chosen route and
 never sends the alias upstream, and the request ledger records both the
 alias you asked for and the provider and model that actually served it.
+Metadata-only outcomes are persisted asynchronously on the state volume with
+bounded rotation and a 30-day retention window when durable ledger storage is
+enabled; otherwise only the bounded in-memory ring is available and is lost
+when the gateway restarts. The Status view reports the current durability
+mode and marks aggregates Unknown when evictions may omit in-window events.
+This is not a billing system.
 
 ```text
 Alias: coding
@@ -359,7 +365,12 @@ and invoke every published route.
 
 Status, analytics and exports are metadata only. A request ledger records
 which alias was asked for, which provider and model actually served it, how
-long it took and how it ended — never what it said.
+long it took and how it ended — never what it said. Token counters come from
+reported provider usage; local cost estimates use published prices only and
+are not provider bills. The Status page aggregates usage for the last 24 hours
+and displays the price source and observation date. No published price means
+**Unknown**, never zero. Request metadata is retained on the state volume for
+up to 30 days; it is not a billing system.
 
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
@@ -574,10 +585,13 @@ them.
   currently covers MiMo-V2.6-Flash and MiniMax M3.1 Flash; a service-side
   cap not documented by Go would still win, and a model without both sources
   stays Unknown rather than inheriting a price tier or a guess.
-* **Usage and cost are not yet recorded.** The bridge reads the provider's
-  token counters and the catalogue publishes per-token prices, but the
-  request ledger does not store either yet, so the Status page reports
-  request counts and timings rather than spend.
+* **Local cost is an estimate from published prices, not a bill.** The token
+  counters come from the provider's reported usage and the cost is computed
+  from the dated catalogue's published per-token prices, with the price's
+  source and observation date shown beside it. The provider's own allowance,
+  and any credit, discount or plan the owner holds, stay **Unknown**: the
+  gateway has no tokenizer and no billing relationship with the provider, and
+  a model with no published price reports **Unknown** rather than zero.
 
 ---
 
