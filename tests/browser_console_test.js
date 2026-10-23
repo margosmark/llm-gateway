@@ -155,9 +155,24 @@ function check(name, condition, detail) {
       JSON.stringify(after.fallbacks)
     );
     check(
-      "the primary is untouched",
+      "primary is untouched",
       after.primary && after.primary.model === "first-fallback",
       JSON.stringify(after.primary)
+    );
+
+    // Removal must win even though an existing enabled policy has the
+    // "Enable phase routing" checkbox checked when the editor opens.
+    console.log("removing an enabled phase policy");
+    await page.getByRole("button", { name: /^Edit/ }).first().click();
+    await page.waitForTimeout(500);
+    await page.getByLabel("Remove phase policy").check();
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.waitForTimeout(700);
+    after = (await state()).aliases.filter((a) => a.name === "chain")[0];
+    check(
+      "removing phase policy clears it from owner state while enabled toggle was checked",
+      after.phase_routing === null,
+      JSON.stringify(after.phase_routing)
     );
     await page.close();
   }

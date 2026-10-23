@@ -630,20 +630,9 @@ class GatewayApp:
                 provider = config.providers.get(ref.provider)
                 entry = provider.models.get(ref.model) if provider else None
                 route_limits.append((ref.label(), entry.context_limit if entry else None))
-            aliases.append(
-                {
-                    "name": alias.name,
-                    "enabled": alias.enabled,
-                    "primary": alias.primary.to_dict() if alias.primary else None,
-                    "fallbacks": [ref.to_dict() for ref in alias.fallbacks],
-                    "fallback_triggers": list(alias.fallback_triggers),
-                    "fallback_authorized": alias.fallback_authorized,
-                    "fallback_confirmed_providers": list(alias.fallback_confirmed_providers),
-                    "fallback_error_classes": list(alias.fallback_error_classes),
-                    "cooldown_seconds": alias.cooldown_seconds,
-                    "context_limit": alias_context_limit(route_limits),
-                }
-            )
+            alias_payload = alias.to_dict()
+            alias_payload["context_limit"] = alias_context_limit(route_limits)
+            aliases.append(alias_payload)
 
         profiles = []
         for profile_id in sorted(config.profiles):
