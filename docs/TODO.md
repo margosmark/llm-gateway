@@ -343,6 +343,43 @@ appeared in `/models` with their real limits, and a real request completed
 through the gateway with the fallback chain and attribution recorded.
 
 
+### T37 — Opt-in per-alias phase routing with optional Jev inference — `done`
+
+**Why.** One alias served every kind of request through one primary route.
+An owner who wanted a planning prompt on a reasoning-heavy model and an
+implementation prompt on a fast model had to define two aliases and switch
+them by hand in the client.
+
+**Scope.** An alias may carry an optional, off-by-default `phase_routing`
+policy mapping a closed phase vocabulary (`plan`, `implement`, `validate`)
+to owner-configured routes, plus an optional default route. Precedence is
+caller-supplied phase, then Jev inference (only when enabled and the request
+is safe to classify), then the ordinary primary. The caller's hint lives in
+the gateway-owned `metadata.personal_gateway.phase` field; the entire
+`personal_gateway` block is stripped before conversion, so no provider ever
+sees it.
+
+**Rules.** A phase-selected route is the **primary for that phase**, never a
+fallback: it does not set `fallback_used` and needs no fallback
+authorization. Jev inference is opt-in per alias, sends a single
+gateway-owned closed-set `choice` question with a bounded slice of request
+text as state, and applies only on a confident, known choice. Low
+confidence, an unknown choice, a non-choice answer, tools, a continuation, or
+a Jev failure all use the ordinary route and record why. Every phase route
+and the inference model are validated at save time like any other route. The
+ledger records only the phase and its source (`caller`/`jev`/`default`) as
+metadata - never the request content, the Jev question, or the answer
+distribution.
+
+**Landed.** Evidence: `tests/test_phase_routing.py` - caller phase selects
+the phase route and is stripped before upstream; invalid phase ignored; Jev
+confident choice selects the phase route; low confidence, unknown choice,
+non-choice answer and Jev failure use the ordinary route; tools skip
+inference; inference disabled never calls Jev; the ledger records phase
+metadata only; and every invalid phase route, provider, model and confidence
+is refused.
+
+
 ---
 
 ## Tier 2 — operational completeness
@@ -1002,6 +1039,7 @@ no content.
 | T33 | Honour the provider's `Retry-After` | 4 | **done** |
 | T34 | Decide whether a response cache may exist at all | 4 | blocked |
 | T36 | The gateway appears in OpenCode's model selector | 1 | **done** |
+| T37 | Opt-in per-alias phase routing with optional Jev inference | 3 | **done** |
 
 ## Suggested order
 

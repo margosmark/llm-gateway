@@ -191,6 +191,41 @@ The gateway **never** switches provider:
 When no eligible route remains, the gateway fails closed and names the
 routes it excluded and why. It never silently serves a different model.
 
+### Phase routing is opt-in per alias
+
+An alias may carry an optional **phase-routing** policy that picks a
+different primary route depending on what the request is *for*. A phase is
+one of a closed set - `plan`, `implement`, `validate`. The policy is off by
+default and is configured per alias in the console.
+
+The precedence is fixed and never silent:
+
+1. A **caller-supplied phase** wins. A client sends it in the gateway-owned
+   request field `metadata.personal_gateway.phase` (for example
+   `{"metadata": {"personal_gateway": {"phase": "plan"}}}`). The gateway
+   validates it against the closed vocabulary and **strips the whole
+   `personal_gateway` block** before the request is converted or forwarded,
+   so no upstream provider ever sees it. An unknown value is ignored, not
+   refused - a stale hint still gets the ordinary route.
+2. Otherwise, if you enabled **Jev inference** for the alias, the gateway
+   asks Jev to classify the request. This is opt-in, runs only when the
+   request is safe to classify (no tools, not a continuation, and it carries
+   text), and sends Jev a single bounded, closed-set question the gateway
+   owns - never a caller-authored prompt. A Jev choice applies only when it
+   names a **configured phase** and its confidence meets your
+   `minimum_confidence`. Low confidence, an unknown choice, a Jev error or a
+   timeout all fall back to the ordinary route and say why.
+3. Otherwise the ordinary primary (or the policy's configured default route)
+   is used.
+
+A phase-selected route is the **primary for that phase**, not a fallback:
+selecting it never counts as a fallback and needs no fallback authorization.
+Phase resolution happens before the route loop, so a phase decision never
+occurs after a stream has begun or after a tool may have executed. The
+request ledger records the phase and its source (`caller`, `jev`, or
+`default`) as metadata only - never the request content, the Jev question,
+or the answer distribution.
+
 ---
 
 ## Using it from OpenCode

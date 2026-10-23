@@ -23,6 +23,7 @@ The rules, in the order they matter:
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from gateway.config import (
     ERROR_ROUTE_GONE,
     ERROR_TRANSIENT,
     ERROR_UNKNOWN,
+    PHASES,
     Alias,
     ConfigStore,
     RouteRef,
@@ -149,6 +151,13 @@ class Attribution:
     skipped: list[dict[str, Any]] = field(default_factory=list)
     #: What was dropped to serve the request on this route, and why.
     degradations: list[dict[str, Any]] = field(default_factory=list)
+    #: Phase-routing metadata, when the alias has an enabled phase policy.
+    #: Metadata only: the phase, its source, and the confidence bucket. Never
+    #: the request content or the Jev answer distribution.
+    phase: str | None = None
+    phase_source: str | None = None  # "caller" | "jev" | "default"
+    phase_confidence_bucket: str | None = None  # e.g. ">=0.80"
+    phase_inference_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,6 +169,10 @@ class Attribution:
             "attempts": self.attempts,
             "skipped": self.skipped,
             "degradations": self.degradations,
+            "phase": self.phase,
+            "phase_source": self.phase_source,
+            "phase_confidence_bucket": self.phase_confidence_bucket,
+            "phase_inference_note": self.phase_inference_note,
         }
 
 
@@ -356,6 +369,118 @@ class Router:
             return False, f"the '{trigger}' trigger is not enabled for this alias"
         return True, f"the '{trigger}' trigger is enabled for this alias"
 
+    # --- phase routing ---------------------------------------------------
+
+    def _bounded_state(self, payload: dict[str, Any]) -> str:
+        """A short, bounded text view of the request for Jev inference.
+
+        This is request-derived content that is sent to the Jev provider
+        when — and only when — the owner has enabled inference for the
+        alias. It is bounded so a large prompt cannot be forwarded wholesale,
+        and it is never logged or recorded.
+        """
+        pieces: list[str] = []
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            for message in messages[-4:]:
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if isinstance(content, str):
+                    pieces.append(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and isinstance(part.get("text"), str):
+                            pieces.append(part["text"])
+        elif isinstance(payload.get("input"), str):
+            pieces.append(payload["input"])
+        text = "\n".join(pieces).strip()
+        return text[:2000]
+
+    def _infer_phase_jev(self, alias: Alias, payload: dict[str, Any]) -> tuple[str | None, str | None, str]:
+        """Ask Jev for a phase, bounded and closed-set.
+
+        Returns ``(phase, confidence_bucket, note)``. ``phase`` is ``None``
+        when inference could not produce a confident, known phase — the
+        caller then falls back to the ordinary route. The note explains why.
+        Never raises: a Jev failure must not fail the completion request.
+        """
+        inference = alias.phase_routing.inference if alias.phase_routing else None
+        if inference is None or not inference.enabled or not inference.model:
+            return None, None, "inference is not enabled for this alias"
+        adapter = self._registry.get(inference.provider)
+        if adapter is None or not hasattr(adapter, "invoke_systemone"):
+            return None, None, f"no System One adapter is registered for provider '{inference.provider}'"
+        config = self._config.snapshot()
+        provider = config.providers.get(inference.provider)
+        entry = provider.models.get(inference.model) if provider else None
+        if entry is None or not entry.enabled:
+            return None, None, f"inference model '{inference.model}' is not enabled"
+        state = self._bounded_state(payload)
+        if not state:
+            return None, None, "the request carried no text to classify"
+        question = {
+            "type": "choice",
+            "instructions": "Choose the phase that best describes this request.",
+            "criteria": {
+                "plan": "Analysis, design, investigation, or a proposed approach.",
+                "implement": "Writing or modifying code or configuration.",
+                "validate": "Testing, reviewing, verifying, or troubleshooting existing work.",
+            },
+        }
+        try:
+            body = adapter.invoke_systemone(
+                {"model": inference.model, "state": state, "questions": {"phase": question}}
+            )
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except Exception:  # noqa: BLE001 - a Jev failure must never fail the completion.
+            return None, None, "Jev inference failed; the ordinary route is used"
+        answers = data.get("answers") if isinstance(data, dict) else None
+        answer = answers.get("phase") if isinstance(answers, dict) else None
+        if not isinstance(answer, dict) or answer.get("type") != "choice":
+            return None, None, "Jev returned no usable phase answer"
+        choice = answer.get("choice")
+        confidence = answer.get("confidence")
+        bucket = None
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+            bucket = f">={inference.minimum_confidence:.2f}" if confidence >= inference.minimum_confidence else f"<{inference.minimum_confidence:.2f}"
+        if choice not in PHASES:
+            return None, bucket, "Jev chose an unknown phase; the ordinary route is used"
+        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or confidence < inference.minimum_confidence:
+            return None, bucket, "Jev confidence was below the threshold; the ordinary route is used"
+        return choice, bucket, "Jev selected a confident phase"
+
+    def _resolve_phase(
+        self,
+        alias: Alias,
+        payload: dict[str, Any],
+        caller_phase: str | None,
+        needs_tools: bool,
+    ) -> tuple[str | None, str, str | None, str | None]:
+        """Resolve the effective phase for a request.
+
+        Returns ``(phase, source, confidence_bucket, note)``. Precedence:
+        a valid caller phase wins; otherwise inference runs only when it is
+        enabled and the request is safe to classify (no tools, has text).
+        Anything uncertain falls back to the ordinary route.
+        """
+        policy = alias.phase_routing
+        if policy is None or not policy.enabled:
+            return None, "default", None, None
+        if caller_phase is not None and caller_phase in PHASES:
+            # The caller was explicit, so inference never overrides it. A
+            # phase with no configured route is recorded and the ordinary
+            # route is used; it is not silently re-classified.
+            if caller_phase in policy.routes:
+                return caller_phase, "caller", None, None
+            return caller_phase, "caller", None, "no route is configured for this phase; the ordinary route is used"
+        if needs_tools:
+            return None, "default", None, "phase inference skipped: the request carried tools"
+        phase, bucket, note = self._infer_phase_jev(alias, payload)
+        if phase is not None and phase in policy.routes:
+            return phase, "jev", bucket, note
+        return None, "default", bucket, note
+
     def invoke(
         self,
         alias_name: str,
@@ -366,8 +491,15 @@ class Router:
         session_hint: str | None = None,
         profile_id: str | None = None,
         client_ip: str | None = None,
+        caller_phase: str | None = None,
     ) -> RoutedResponse:
-        """Resolve an alias and send the request, applying the fallback policy."""
+        """Resolve an alias and send the request, applying the fallback policy.
+
+        ``caller_phase`` is a validated phase hint (``plan``/``implement``/
+        ``validate``) already stripped from the request payload by the
+        handler. It is honoured only when the alias has an enabled phase
+        policy that maps that phase to a route.
+        """
         alias = self.resolve_alias(alias_name)
 
         needs_tools = bool(payload.get("tools"))
@@ -393,7 +525,29 @@ class Router:
                 detail=detail,
             )
 
+        # Phase routing is opt-in per alias and resolved before the route
+        # loop, so a phase decision never happens after a stream has begun
+        # or after a tool may have executed. The selected route is moved to
+        # the front of the eligible list; it is not a fallback, so it does
+        # not set fallback_used.
+        phase, phase_source, phase_bucket, phase_note = self._resolve_phase(
+            alias, payload, caller_phase, needs_tools
+        )
+        phase_selected_route: RouteRef | None = None
+        if phase is not None:
+            target = alias.phase_routing.routes.get(phase) if alias.phase_routing else None
+            if target is not None:
+                for index, candidate in enumerate(eligible):
+                    if candidate.route == target.route:
+                        eligible.insert(0, eligible.pop(index))
+                        phase_selected_route = target.route
+                        break
+
         attribution = Attribution(requested_alias=alias_name)
+        attribution.phase = phase
+        attribution.phase_source = phase_source
+        attribution.phase_confidence_bucket = phase_bucket
+        attribution.phase_inference_note = phase_note
         # A route that was not eligible is recorded, so the record explains
         # why the request was not served by the primary.
         for candidate in candidates:
@@ -405,8 +559,14 @@ class Router:
                         "reason": candidate.excluded_reason,
                     }
                 )
-        if eligible and eligible[0].route != (alias.primary or eligible[0].route):
+        if (
+            eligible
+            and eligible[0].route != (alias.primary or eligible[0].route)
+            and eligible[0].route != phase_selected_route
+        ):
             # The primary was skipped, so a later route served the request.
+            # A route chosen by the owner's phase policy is not a fallback:
+            # it is the primary for that phase, so it is not reported as one.
             skipped_primary = next(
                 (entry for entry in attribution.skipped if alias.primary is not None
                  and entry["provider"] == alias.primary.provider
@@ -616,6 +776,8 @@ class Router:
                 skipped=attribution.skipped,
                 attempts=attribution.attempts,
                 degradations=attribution.degradations,
+                phase=attribution.phase,
+                phase_source=attribution.phase_source,
             )
         )
 

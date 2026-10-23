@@ -52,6 +52,15 @@ FALLBACK_TRIGGERS = (
     TRIGGER_EXPLICIT_COOLDOWN,
 )
 
+# Phases a request can be classified into. A caller or the gateway's own
+# Jev inference may name one; the gateway maps it to an owner-configured
+# route. The vocabulary is closed so a hostile or malformed answer cannot
+# select an arbitrary route.
+PHASE_PLAN = "plan"
+PHASE_IMPLEMENT = "implement"
+PHASE_VALIDATE = "validate"
+PHASES = (PHASE_PLAN, PHASE_IMPLEMENT, PHASE_VALIDATE)
+
 # Error classes shared by the routing core and the adapters.
 ERROR_EXHAUSTED = "exhausted"
 ERROR_RATE_LIMITED = "rate_limited"
@@ -249,6 +258,147 @@ class ProviderState:
 
 
 @dataclass
+class PhaseRoute:
+    """One phase-to-route mapping.
+
+    The route is a normal provider-qualified reference. It is validated the
+    same way an alias primary or fallback is: the provider must exist and the
+    model must be enabled, or the route is refused at save time.
+    """
+
+    phase: str
+    route: RouteRef
+    effort: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"phase": self.phase, "route": self.route.to_dict()}
+        if self.effort is not None:
+            payload["effort"] = self.effort
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "PhaseRoute | None":
+        if not isinstance(data, dict):
+            return None
+        phase = data.get("phase")
+        if phase not in PHASES:
+            return None
+        route = RouteRef.from_dict(data.get("route"))
+        if route is None:
+            return None
+        effort = data.get("effort")
+        return cls(phase=phase, route=route, effort=effort if isinstance(effort, str) and effort else None)
+
+
+@dataclass
+class JevInference:
+    """An opt-in Jev phase-inference policy for one alias.
+
+    Disabled by default. When enabled and the caller supplies no phase, the
+    gateway sends a bounded, closed-set ``choice`` question to the configured
+    Jev model. A choice applies only when it is one of the owner-configured
+    phases and its confidence meets the threshold. Anything else uses the
+    alias's ordinary primary route.
+    """
+
+    enabled: bool = False
+    provider: str = "opencode_console"
+    model: str = ""
+    minimum_confidence: float = 0.8
+    on_uncertain: str = "default"  # "default" = the alias's ordinary primary route.
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "provider": self.provider,
+            "model": self.model,
+            "minimum_confidence": self.minimum_confidence,
+            "on_uncertain": self.on_uncertain,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "JevInference | None":
+        if not isinstance(data, dict):
+            return None
+        model = data.get("model")
+        confidence = data.get("minimum_confidence")
+        on_uncertain = data.get("on_uncertain")
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            provider=str(data.get("provider") or "opencode_console"),
+            model=model if isinstance(model, str) else "",
+            minimum_confidence=(
+                confidence if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+                and 0.0 <= float(confidence) <= 1.0 else 0.8
+            ),
+            on_uncertain=on_uncertain if on_uncertain in ("default",) else "default",
+        )
+
+
+@dataclass
+class PhaseRouting:
+    """An optional, opt-in per-alias phase-routing policy.
+
+    Routes are keyed by phase (``plan``, ``implement``, ``validate``). A
+    ``default`` entry names the route used when no phase applies or inference
+    is uncertain. When no ``default`` is configured, the alias's ordinary
+    primary route is used.
+    """
+
+    enabled: bool = False
+    routes: dict[str, PhaseRoute] = field(default_factory=dict)
+    default_route: RouteRef | None = None
+    inference: JevInference = field(default_factory=JevInference)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "routes": {key: value.to_dict() for key, value in sorted(self.routes.items())},
+            "default_route": self.default_route.to_dict() if self.default_route else None,
+            "inference": self.inference.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "PhaseRouting | None":
+        if not isinstance(data, dict):
+            return None
+        routes: dict[str, PhaseRoute] = {}
+        raw_routes = data.get("routes")
+        if isinstance(raw_routes, dict):
+            for value in raw_routes.values():
+                entry = PhaseRoute.from_dict(value)
+                if entry is not None:
+                    routes[entry.phase] = entry
+        default_route = RouteRef.from_dict(data.get("default_route"))
+        inference = JevInference.from_dict(data.get("inference"))
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            routes=routes,
+            default_route=default_route,
+            inference=inference if inference is not None else JevInference(),
+        )
+
+    def route_for(self, phase: str | None) -> RouteRef | None:
+        """The route for a phase, falling back to the configured default."""
+        if phase is not None and phase in self.routes:
+            return self.routes[phase].route
+        return self.default_route
+
+    def all_routes(self) -> list[RouteRef]:
+        """Every route this policy may select, de-duplicated."""
+        seen: set[tuple[str, str]] = set()
+        ordered: list[RouteRef] = []
+        for ref in [entry.route for entry in self.routes.values()] + (
+            [self.default_route] if self.default_route else []
+        ):
+            key = (ref.provider, ref.model)
+            if key not in seen:
+                seen.add(key)
+                ordered.append(ref)
+        return ordered
+
+
+@dataclass
 class Alias:
     """A friendly name that resolves to a primary route and ordered fallbacks."""
 
@@ -267,6 +417,8 @@ class Alias:
     #: malformed-request failures never trigger a fallback.
     fallback_error_classes: list[str] = field(default_factory=list)
     cooldown_seconds: int = 300
+    #: An optional, opt-in phase-routing policy. Disabled by default.
+    phase_routing: PhaseRouting | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -279,6 +431,7 @@ class Alias:
             "fallback_confirmed_providers": list(self.fallback_confirmed_providers),
             "fallback_error_classes": list(self.fallback_error_classes),
             "cooldown_seconds": self.cooldown_seconds,
+            "phase_routing": self.phase_routing.to_dict() if self.phase_routing else None,
         }
 
     @classmethod
@@ -300,6 +453,7 @@ class Alias:
         confirmed = [p for p in data.get("fallback_confirmed_providers") or [] if isinstance(p, str)]
         safe_classes = [c for c in data.get("fallback_error_classes") or [] if c in OWNER_OVERRIDABLE_CLASSES]
         cooldown = data.get("cooldown_seconds")
+        phase_routing = PhaseRouting.from_dict(data.get("phase_routing"))
         return cls(
             name=name,
             enabled=bool(data.get("enabled", False)),
@@ -310,6 +464,7 @@ class Alias:
             fallback_confirmed_providers=confirmed,
             fallback_error_classes=safe_classes,
             cooldown_seconds=cooldown if isinstance(cooldown, int) and cooldown >= 0 else 300,
+            phase_routing=phase_routing,
         )
 
     def all_routes(self) -> list[RouteRef]:
@@ -317,7 +472,17 @@ class Alias:
         if self.primary is not None:
             routes.append(self.primary)
         routes.extend(self.fallbacks)
-        return routes
+        if self.phase_routing is not None:
+            routes.extend(self.phase_routing.all_routes())
+        # De-duplicate: a phase route may repeat the primary or a fallback.
+        seen: set[tuple[str, str]] = set()
+        unique: list[RouteRef] = []
+        for ref in routes:
+            key = (ref.provider, ref.model)
+            if key not in seen:
+                seen.add(key)
+                unique.append(ref)
+        return unique
 
 
 @dataclass

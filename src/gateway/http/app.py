@@ -25,6 +25,7 @@ from gateway.bridge.streams import convert_stream, sse_done
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
+    PHASES,
     STATE_CONFIGURED_UNTESTED,
     STATE_CONNECTED,
     STATE_FAILED,
@@ -46,7 +47,7 @@ from gateway.http.core import Request, Response, Router as HttpRouter, StreamRes
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
 from gateway.logging import RequestLogger
-from gateway.routes import validate_alias_routes
+from gateway.routes import validate_alias_routes, validate_phase_routing
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -434,6 +435,9 @@ class GatewayApp:
         stream = bool(payload.get("stream"))
         request_id = f"req_{int(time.time() * 1000):x}"
         session_hint = self._session_hint(request)
+        # Read and strip the gateway-owned phase hint before the payload is
+        # converted or forwarded: no upstream provider ever sees it.
+        caller_phase = _extract_caller_phase(payload)
 
         routed = self.router.invoke(
             alias.name,
@@ -444,6 +448,7 @@ class GatewayApp:
             session_hint=session_hint,
             profile_id=profile.profile_id,
             client_ip=request.client_address[0],
+            caller_phase=caller_phase,
         )
 
         # The attribution is recorded on the request so the access log can
@@ -967,6 +972,9 @@ class GatewayApp:
                 primary, fallbacks = validate_alias_routes(
                     self.config, self.registry, payload.get("primary"), payload.get("fallbacks") or []
                 )
+                phase_routing = validate_phase_routing(
+                    self.config, self.registry, payload.get("phase_routing")
+                )
             except ValidationError as exc:
                 return json_response(
                     {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}},
@@ -991,6 +999,7 @@ class GatewayApp:
                     safe_classes,
                     cooldown if isinstance(cooldown, int) else 300,
                     enabled=bool(payload.get("enabled", existing.enabled if existing else False)),
+                    phase_routing=phase_routing,
                 )
             return json_response({"ok": True})
 
@@ -1188,6 +1197,32 @@ def _convert_buffered(body: bytes, source: str, target: str) -> bytes:
     return json.dumps(converted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _extract_caller_phase(payload: dict[str, Any]) -> str | None:
+    """Read and **strip** the gateway-only phase hint from a request.
+
+    The hint lives under ``metadata.personal_gateway.phase``. That namespace
+    is gateway-owned, so the whole ``personal_gateway`` block is removed from
+    the payload before the request is converted or forwarded: no upstream
+    provider ever sees any of it, now or when a future field is added there.
+    An invalid or unknown value is ignored (returns ``None``) rather than
+    refused, so a client that sends a stale phase still gets the ordinary
+    route.
+    """
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    inner = metadata.get("personal_gateway")
+    # Strip the whole gateway-owned namespace regardless of validity: none
+    # of it may ever reach a provider.
+    metadata.pop("personal_gateway", None)
+    if not metadata:
+        payload.pop("metadata", None)
+    if not isinstance(inner, dict):
+        return None
+    phase = inner.get("phase")
+    return phase if isinstance(phase, str) and phase in PHASES else None
+
+
 def _validate_systemone_request(payload: Any) -> str | None:
     """Validate the JSON-only safe subset of OpenCode Console's native contract.
 
@@ -1231,6 +1266,7 @@ def _alias_from_payload(
     safe_classes: list[str],
     cooldown: int,
     enabled: bool,
+    phase_routing=None,
 ):
     from gateway.config import Alias
 
@@ -1244,6 +1280,7 @@ def _alias_from_payload(
         fallback_confirmed_providers=confirmed,
         fallback_error_classes=safe_classes,
         cooldown_seconds=cooldown,
+        phase_routing=phase_routing,
     )
 
 
