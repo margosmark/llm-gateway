@@ -22,6 +22,7 @@ from gateway.adapters.chatgpt_codex import (
     ChatGPTCodexAdapter,
 )
 from gateway.adapters.opencode_go import OpenCodeGoAdapter, _default_snapshot_path
+from gateway.adapters.typesafe_jev import TypeSafeJevAdapter
 from gateway.adapters.http_client import UpstreamResponse
 from gateway.core.capabilities import (
     DIALECT_ANTHROPIC_MESSAGES,
@@ -194,6 +195,37 @@ class OpenCodeGoAdapterTests(unittest.TestCase):
 
     def test_a_test_without_a_credential_reports_not_configured(self) -> None:
         adapter = self._adapter()
+        result = adapter.test_connection()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.detail["reason"], "not_configured")
+
+
+class TypeSafeJevAdapterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = CredentialStore(Path(self._tmp.name))
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_catalogue_and_systemone_use_the_documented_native_contract(self) -> None:
+        upstream = FakeUpstream([
+            UpstreamResponse(200, {}, b'{"models":[{"name":"jev-latest","description":"General","release_date":"2026-09-15"}]}', None, "application/json"),
+            UpstreamResponse(200, {}, b'{"model":"jev-latest","answers":{},"usage":{"input_tokens":1,"output_tokens":1}}', None, "application/json"),
+        ])
+        self.store.provider_handle("typesafe_jev").write({"api_key": "synthetic-test-key"})
+        adapter = TypeSafeJevAdapter(self.store.provider_handle("typesafe_jev"), client=upstream)
+        models = adapter.list_models()
+        self.assertEqual(models[0].model_id, "jev-latest")
+        self.assertEqual(models[0].dialect, "systemone")
+        body = adapter.invoke_systemone({"model": "jev-latest", "state": "synthetic state", "questions": {"q": {"type": "noul"}}})
+        self.assertIn(b'"usage"', body)
+        self.assertEqual(upstream.requests[0]["url"], "https://api.typesafe.ai/v1/models")
+        self.assertEqual(upstream.requests[1]["url"], "https://api.typesafe.ai/v1/systemone")
+        self.assertEqual(upstream.requests[1]["headers"]["Authorization"], "Bearer synthetic-test-key")
+
+    def test_test_refuses_without_a_credential(self) -> None:
+        adapter = TypeSafeJevAdapter(self.store.provider_handle("typesafe_jev"), client=FakeUpstream())
         result = adapter.test_connection()
         self.assertFalse(result.ok)
         self.assertEqual(result.detail["reason"], "not_configured")

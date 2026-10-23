@@ -113,6 +113,26 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+class SystemOneAdapter:
+    provider_id = "typesafe_jev"
+    kind = "typesafe_jev"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.model_list_calls = 0
+
+    def list_models(self) -> list:
+        self.model_list_calls += 1
+        return []
+
+    def test_connection(self) -> TestResult:
+        return TestResult(ok=True, state="connected", message="synthetic Jev reachable")
+
+    def invoke_systemone(self, payload: dict[str, Any]) -> bytes:
+        self.calls.append(payload)
+        return json.dumps({"model": payload["model"], "answers": {"phase": {"type": "choice", "choice": "plan", "confidence": 0.9, "probabilities": {"plan": 0.9}}}, "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+
+
 class GatewayHarness:
     """Builds a gateway over loopback for a test."""
 
@@ -127,6 +147,8 @@ class GatewayHarness:
         self.adapter = adapter or FakeAdapter()
         self.registry.register(self.adapter)
         self.registry.register(FakeAdapter(provider_id="opencode_go", dialect="openai_chat"))
+        self.jev = SystemOneAdapter()
+        self.registry.register(self.jev)
 
         with self.config.mutate() as snapshot:
             snapshot.providers[FAKE_PROVIDER] = ProviderState(
@@ -146,6 +168,12 @@ class GatewayHarness:
                 provider_id="opencode_go",
                 kind="opencode_go",
                 state="not_configured",
+            )
+            snapshot.providers["typesafe_jev"] = ProviderState(
+                provider_id="typesafe_jev",
+                kind="typesafe_jev",
+                state="connected",
+                models={"jev-latest": ModelEntry(model_id="jev-latest", enabled=True, dialect="systemone", source="discovered")},
             )
 
         self.router = Router(self.config, self.registry, ledger=RequestLedger())
@@ -632,6 +660,43 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(classify_status(429, {"error": {"code": "rate_limit_exceeded"}}), "rate_limited")
         self.assertEqual(classify_status(429, {"error": {"code": "insufficient_quota"}}), "exhausted")
         self.assertEqual(classify_status(429, {}), "rate_limited")
+
+
+class SystemOneApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.harness = GatewayHarness()
+        self.addCleanup(self.harness.close)
+
+    def test_systemone_uses_only_enabled_native_model_and_preserves_response(self) -> None:
+        request = {"model": "jev-latest", "state": "synthetic request content", "questions": {"phase": {"type": "choice", "criteria": {"plan": "planning"}}}}
+        status, payload, _ = self.harness.request("POST", "/v1/systemone", body=request)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["answers"]["phase"]["choice"], "plan")
+        self.assertEqual(self.harness.jev.calls, [request])
+
+    def test_systemone_refuses_images_and_never_calls_provider(self) -> None:
+        status, payload, _ = self.harness.request("POST", "/v1/systemone", body={"model": "jev-latest", "state": "synthetic", "assets": {"image": {}}, "questions": {"q": {"type": "noul"}}})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["type"], "malformed_request")
+        self.assertEqual(self.harness.jev.calls, [])
+
+    def test_systemone_refuses_disabled_or_unknown_model_without_provider_call(self) -> None:
+        status, payload, _ = self.harness.request("POST", "/v1/systemone", body={"model": "not-enabled", "state": "synthetic", "questions": {"q": {"type": "noul"}}})
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["type"], "unknown_model")
+        self.assertEqual(self.harness.jev.calls, [])
+
+    def test_systemone_refuses_danger_zone_headers_without_provider_call(self) -> None:
+        status, payload, _ = self.harness.request("POST", "/v1/systemone", body={"model": "jev-latest", "state": "synthetic", "questions": {"q": {"type": "noul"}}}, headers={"TypeSafe-Danger-Zone-Long-Context": "true"})
+        self.assertEqual(status, 422)
+        self.assertEqual(payload["error"]["type"], "unsupported_capability")
+        self.assertEqual(self.harness.jev.calls, [])
+
+    def test_systemone_catalogue_is_saved_metadata_not_an_upstream_call(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/v1/systemone/models")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["models"][0]["name"], "jev-latest")
+        self.assertEqual(self.harness.jev.model_list_calls, 0)
 
 
 class ConsoleApiTests(unittest.TestCase):

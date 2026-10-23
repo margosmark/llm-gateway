@@ -10,6 +10,7 @@ Two providers are in scope:
 |---|---|---|
 | **ChatGPT / Codex** | user-operated device-code authorisation (beta) | Responses API |
 | **OpenCode Go** | API key | Responses, Chat Completions, Anthropic Messages, or Google v1beta — **per model** |
+| **TypeSafe Jev** | API key | Native System One structured decisions (`/v1/systemone`), not chat completions |
 
 ---
 
@@ -34,7 +35,7 @@ never breaks your client's configuration.
 | Surface | Address | Who can reach it | What it does |
 |---|---|---|---|
 | Owner console and configuration | `http://10.10.11.109:8765/owner/` | Trusted LAN | Full configuration, credential enrollment, provider actions, and status; no login |
-| API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/responses` |
+| API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/responses`, plus native Jev `GET /v1/systemone/models` and `POST /v1/systemone` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
 
 Trusted LAN admin mode: any device that can reach this address can configure
@@ -110,6 +111,23 @@ Two things the console tells you before it starts:
 A ChatGPT subscription is **not** a guaranteed API or custom-gateway
 entitlement. What your account can actually reach depends on your plan, and
 the console says so rather than implying otherwise.
+
+### TypeSafe Jev / System One
+
+`Providers → TypeSafe Jev` accepts a TypeSafe API key in the same write-only
+form as other key-backed providers. Use the explicit **Test** and **Refresh**
+actions before enabling a discovered Jev model. Normal console reads and model
+catalogue reads never contact TypeSafe.
+
+Jev is a structured-decision provider, not a completion model. Its native API
+is available at `POST /v1/systemone`; send a model, a state string/object/array,
+and one or more named `noul`, `choice`, or `score` questions. The gateway
+returns TypeSafe's structured response unchanged. Image assets, `box`
+questions, multipart requests, and the provider's danger-zone long-context
+mode are refused for now rather than silently forwarded. A direct System One
+call sends its supplied state and questions to TypeSafe; neither is persisted
+or written to gateway logs or the request ledger. Jev is not used to inspect
+or route chat requests in this release.
 
 ### OpenCode Go
 

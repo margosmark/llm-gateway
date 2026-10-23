@@ -33,7 +33,7 @@ CREDENTIAL_DIR_NAME = "credentials"
 
 #: Providers that may hold a credential. Anything else is rejected so a
 #: crafted provider id cannot escape the credential directory.
-KNOWN_PROVIDERS = ("chatgpt_codex", "opencode_go")
+KNOWN_PROVIDERS = ("chatgpt_codex", "opencode_go", "typesafe_jev")
 
 
 class CredentialError(Exception):
