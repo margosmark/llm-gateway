@@ -57,6 +57,7 @@ from gateway.observability import (
     RequestLedger,
     SOURCE_PUBLISHED_ESTIMATE,
     SOURCE_UNKNOWN,
+    new_request_id,
 )
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -448,7 +449,7 @@ class GatewayApp:
             )
 
         stream = bool(payload.get("stream"))
-        request_id = f"req_{int(time.time() * 1000):x}"
+        request_id = new_request_id()
         session_hint = self._session_hint(request)
         # Read and strip the gateway-owned phase hint before the payload is
         # converted or forwarded: no upstream provider ever sees it.
@@ -1074,7 +1075,7 @@ class GatewayApp:
                 },
                 source_dialect=DIALECT_OPENAI_CHAT,
                 stream=False,
-                request_id="route_test",
+                request_id=new_request_id(),
             )
         except (RoutingError, AdapterError, ConversionError) as exc:
             message = getattr(exc, "message", str(exc))
