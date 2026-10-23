@@ -1311,12 +1311,80 @@ text-only primary, uses a capable fallback, and fails closed with no capable
 route; a text-only request is unaffected; and detection agrees with the
 bridge across a dialect conversion.
 
+### R38 — A per-phase reasoning effort was stored and shown, but never reached the provider — **open**
+
+**Severity: medium contract-correctness.** *(open; the field is persisted and
+round-trips, so the defect is silent rather than lossy)*
+
+T37 lets an owner give a phase route its own reasoning effort. The field is
+part of the config model (`PhaseRoute.effort`, `src/gateway/config.py:271`),
+validated at save time (`src/gateway/routes.py:149-153`), serialised by
+`Alias.to_dict()`, and exposed by the console editor. But nothing reads it.
+The router selects a phase route by `route` alone
+(`src/gateway/core/routing.py:545-551`) and the only effort it ever
+considers is the one **in the caller's request**
+(`_requested_reasoning_effort`, `src/gateway/core/routing.py:79-88`). A
+phase route's `effort` is therefore inert: it survives every save and reload
+and never reaches an upstream provider.
+
+That is the same shape as a finding class this register already tracks: a
+control the gateway accepts, stores, and displays, but does not honour. The
+difference from R35 is that nothing is *dropped* - the request is served
+correctly - so the symptom is a configured effort that silently has no
+effect, which is exactly the "never silent" rule the phase-routing design
+was written against.
+
+**Why it was not fixed here.** The T37 backend contract was settled on
+`f7cf5a4` and the console editor was scoped to expose the config as it
+stands. Making the effort effective is a **routing** change - the effort must
+be applied when the phase route is chosen, must still obey the R19
+preference rule (a level the model does not publish is dropped *for that
+route* with the substitution recorded, not refused), and must not override an
+explicit caller effort. That is a change to the phase-resolution algorithm,
+which is outside the console card's boundary and needs its own review.
+
+**Evidence.** A focused probe on this tree: an alias whose `plan` phase route
+is `opencode_go/mimo-v2.6-flash` with `effort="high"`, on a model that
+publishes `none/low/medium/high`, was called with
+`metadata.personal_gateway.phase = "plan"`. The phase route served the
+request (`mimo-v2.6-flash`), and the upstream payload was
+`{"model": "mimo-v2.6-flash", "messages": [...]}` - **no `reasoning_effort`
+and no nested `reasoning`**. The configured effort did not appear.
+
+**Required fix.** Apply the phase route's effort to the request when that
+route serves it, under the R19 preference rule, and record the substitution
+when the model does not publish the level. Until then the console says so
+plainly rather than presenting the field as if it were in effect.
+
+### R39 — “Remove phase policy” was ignored for enabled policies — **closed**
+
+**Severity: medium UI correctness.** The save condition checked
+`phaseEnabled.checked` first, so JavaScript short-circuiting prevented the
+explicit remove checkbox from being read for an enabled policy. The editor
+reported success while preserving the policy.
+
+**Fix.** The remove checkbox is now authoritative: phase configuration is
+serialized only when removal is not checked, regardless of the enabled
+checkbox. With removal unchecked, existing disabled policies remain editable
+and can be re-enabled. Jev inference is serialized within the phase policy;
+there is no independent competing save toggle.
+
+**Regression evidence.** `tests/browser_console_test.js` now edits an enabled
+policy through the real console, checks “Remove phase policy,” saves, and
+asserts the policy is null in `/owner/api/state`. `tests/test_browser_console.py`
+seeds the enabled policy and enables that mutation flow. Verified with
+`NODE_PATH=/tmp/pwtest/node_modules GATEWAY_CHROMIUM=/usr/bin/chromium
+PYTHONPATH=src python3 -m unittest tests.test_browser_console -v` (1 test
+passed). The console source-string assertion was also updated to reject the
+old short-circuit condition.
+
 ## Recommended order
 
-Findings R0-R27 and R28-R36 are closed or superseded. **R26 and R36 are
-open**; R26 is planned in `docs/TODO.md` (T2), while R36 is the explicit
-post-deployment route replacement above. R37 is closed. The register is kept
-so the next agent can see what was already paid for in time.
+Findings R0-R27 and R28-R36 are closed or superseded. **R26, R36 and R38 are
+open**; R26 is planned in `docs/TODO.md` (T2), R36 is the explicit
+post-deployment route replacement above, and R38 is the inert per-phase
+reasoning effort, which needs a routing change. R37 and R39 are closed. The register
+is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or

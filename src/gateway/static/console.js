@@ -59,7 +59,9 @@
       }
       return response.json().then(function (data) {
         if (!response.ok) {
-          var message = (data && data.error && data.error.message) || ("request failed: " + response.status);
+          var serverError = data && data.error;
+          var message = (serverError && serverError.message) || ("request failed: " + response.status);
+          if (serverError && serverError.field) message += " (field: " + serverError.field + ")";
           var err = new Error(message);
           err.payload = data;
           throw err;
@@ -758,6 +760,77 @@
 
     var cooldown = el("input", { type: "number", value: String(editing ? editing.cooldown_seconds : 300), min: "0" });
 
+    var phasePolicy = editing && editing.phase_routing;
+    var phaseEnabled = el("input", { type: "checkbox" });
+    phaseEnabled.checked = !!(phasePolicy && phasePolicy.enabled);
+    var removePhasePolicy = el("input", { type: "checkbox" });
+    var phaseRows = {};
+
+    function routeEditor(route, title) {
+      var provider = el("select", {});
+      var model = el("select", {});
+      state.providers.forEach(function (p) {
+        provider.appendChild(el("option", { value: p.provider_id, text: providerLabel(p.provider_id) }));
+      });
+      function fillModels() {
+        model.innerHTML = "";
+        var found = state.providers.filter(function (p) { return p.provider_id === provider.value; })[0];
+        (found ? found.models.filter(function (m) { return m.enabled; }) : []).forEach(function (m) {
+          model.appendChild(el("option", { value: m.model_id, text: m.model_id }));
+        });
+      }
+      provider.addEventListener("change", fillModels);
+      if (route && route.provider) provider.value = route.provider;
+      fillModels();
+      if (route && route.model) model.value = route.model;
+      return { provider: provider, model: model, row: el("div", { class: "row" }, [
+        el("strong", { text: title }),
+        el("label", {}, [el("span", { text: "Provider" }), provider]),
+        el("label", {}, [el("span", { text: "Model" }), model])
+      ]) };
+    }
+
+    var phaseRoutes = (phasePolicy && phasePolicy.routes) || {};
+    ["plan", "implement", "validate"].forEach(function (phase) {
+      var saved = phaseRoutes[phase];
+      var route = routeEditor(saved ? saved.route : null, phase);
+      var include = el("input", { type: "checkbox" });
+      include.checked = !!saved;
+      var effort = el("input", { placeholder: "optional effort", value: saved && saved.effort || "" });
+      route.row.insertBefore(el("label", {}, [el("span", { text: "Route this phase" }), include]), route.row.children[1]);
+      route.row.appendChild(el("label", {}, [el("span", { text: "Effort (optional)" }), effort]));
+      phaseRows[phase] = { include: include, route: route, effort: effort };
+    });
+
+    var defaultRoute = routeEditor(phasePolicy && phasePolicy.default_route, "Default route");
+    var hasDefault = el("input", { type: "checkbox" });
+    hasDefault.checked = !!(phasePolicy && phasePolicy.default_route);
+    defaultRoute.row.insertBefore(el("label", {}, [el("span", { text: "Use default route" }), hasDefault]), defaultRoute.row.children[1]);
+
+    var inferenceData = (phasePolicy && phasePolicy.inference) || {};
+    var inferenceEnabled = el("input", { type: "checkbox" });
+    inferenceEnabled.checked = !!inferenceData.enabled;
+    var inferenceRoute = routeEditor({ provider: inferenceData.provider || "opencode_console", model: inferenceData.model || "" }, "");
+    var confidence = el("input", { type: "number", min: "0", max: "1", step: "0.01", value: String(inferenceData.minimum_confidence === undefined ? 0.8 : inferenceData.minimum_confidence) });
+    var onUncertain = el("select", {}, [el("option", { value: "default", text: "Use default route" })]);
+    onUncertain.value = inferenceData.on_uncertain || "default";
+
+    card.appendChild(el("h3", { text: "Per-alias phase routing" }));
+    card.appendChild(el("label", {}, [el("span", { text: "Enable phase routing" }), phaseEnabled]));
+    if (phasePolicy) card.appendChild(el("label", {}, [el("span", { text: "Remove phase policy" }), removePhasePolicy]));
+    ["plan", "implement", "validate"].forEach(function (phase) { card.appendChild(phaseRows[phase].route.row); });
+    card.appendChild(el("div", { class: "small muted" }, [
+      el("span", { text: "A per-phase effort is stored with the policy and round-trips unchanged, but the gateway does not apply it to the upstream request - the request's own reasoning effort is used instead." })
+    ]));
+    card.appendChild(defaultRoute.row);
+    card.appendChild(el("h3", { text: "Jev phase inference" }));
+    card.appendChild(el("label", {}, [el("span", { text: "Enable Jev inference" }), inferenceEnabled]));
+    card.appendChild(el("div", { class: "row" }, [
+      inferenceRoute.row,
+      el("label", {}, [el("span", { text: "Minimum confidence (0–1)" }), confidence]),
+      el("label", {}, [el("span", { text: "When uncertain" }), onUncertain])
+    ]));
+
     card.appendChild(el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "Alias name" }), nameInput]),
       el("label", {}, [el("span", { text: "Primary provider" }), primaryProvider]),
@@ -786,6 +859,36 @@
             var triggers = Object.keys(triggerBoxes).filter(function (key) { return triggerBoxes[key].checked; });
             var confirmed = Array.prototype.slice.call(confirmProviders.querySelectorAll("input:checked"))
               .map(function (box) { return box.value; });
+            var phaseRouting = null;
+            // Removal is an explicit owner action and takes precedence over
+            // the enabled toggle. Otherwise retain an existing disabled policy
+            // so it can be re-enabled without rebuilding its configuration.
+            if (!removePhasePolicy.checked && (phaseEnabled.checked || phasePolicy)) {
+              var routes = {};
+              Object.keys(phaseRows).forEach(function (phase) {
+                var item = phaseRows[phase];
+                if (!item.include.checked) return;
+                routes[phase] = {
+                  provider: item.route.provider.value,
+                  model: item.route.model.value
+                };
+                if (item.effort.value.trim()) routes[phase].effort = item.effort.value.trim();
+              });
+              phaseRouting = {
+                enabled: phaseEnabled.checked,
+                routes: routes,
+                default_route: hasDefault.checked
+                  ? { provider: defaultRoute.provider.value, model: defaultRoute.model.value }
+                  : null,
+                inference: {
+                  enabled: inferenceEnabled.checked,
+                  provider: inferenceRoute.provider.value,
+                  model: inferenceRoute.model.value,
+                  minimum_confidence: confidence.value === "" ? 0.8 : Number(confidence.value),
+                  on_uncertain: onUncertain.value
+                }
+              };
+            }
             run(api(BASE + "/api/alias", {
               method: "POST",
               body: {
@@ -799,7 +902,8 @@
                 fallback_authorized: authorizeBox.checked,
                 fallback_confirmed_providers: confirmed,
                 cooldown_seconds: parseInt(cooldown.value, 10) || 0,
-                enabled: editing ? editing.enabled : false
+                enabled: editing ? editing.enabled : false,
+                phase_routing: phaseRouting
               }
             })).then(function () {
               editingAlias = null;

@@ -304,6 +304,104 @@ class PhaseLedgerPrivacyTests(unittest.TestCase):
         self.assertNotIn("state", text)
 
 
+class PhaseRouteEffortIsInertTests(unittest.TestCase):
+    """R38: a phase route's own reasoning effort is stored but never applied.
+
+    The effort is accepted, validated, persisted and returned by the console,
+    but the router selects a phase route by its route alone and never reads
+    the effort. This test pins that observable behaviour so the finding
+    cannot be silently forgotten: when the routing change lands, this test
+    is the one that must change.
+    """
+
+    def test_a_configured_phase_effort_does_not_reach_the_provider(self) -> None:
+        harness = GatewayHarness()
+        self.addCleanup(harness.close)
+        go = FakeAdapter(provider_id="opencode_go", dialect="openai_chat")
+        harness.registry.register(go)
+        with harness.config.mutate() as config:
+            config.providers["opencode_go"] = ProviderState(
+                provider_id="opencode_go",
+                kind="opencode_go",
+                state="connected",
+                models={
+                    "mimo-v2.6-flash": ModelEntry(
+                        model_id="mimo-v2.6-flash",
+                        enabled=True,
+                        dialect="openai_chat",
+                        source="discovered",
+                        reasoning_efforts=["none", "low", "medium", "high"],
+                    )
+                },
+            )
+            config.aliases["coding"] = Alias(
+                name="coding",
+                enabled=True,
+                primary=RouteRef(FAKE_PROVIDER, "gpt-6-luna"),
+                phase_routing=PhaseRouting(
+                    enabled=True,
+                    routes={
+                        "plan": PhaseRoute(
+                            phase="plan",
+                            route=RouteRef("opencode_go", "mimo-v2.6-flash"),
+                            effort="high",
+                        )
+                    },
+                    inference=JevInference(enabled=False),
+                ),
+            )
+        status, _, _ = harness.request(
+            "POST", "/v1/chat/completions",
+            body=_chat(metadata={"personal_gateway": {"phase": "plan"}}),
+        )
+        self.assertEqual(status, 200)
+        # The phase route served the request...
+        self.assertEqual(len(go.calls), 1)
+        # ...but the configured effort never reached it. The model publishes
+        # `high`, so this is a gateway omission, not a capability drop.
+        self.assertNotIn("reasoning_effort", go.calls[0].payload)
+        self.assertNotIn("reasoning", go.calls[0].payload)
+
+    def test_the_configured_effort_is_still_persisted_and_returned(self) -> None:
+        """The defect is inertness, not loss: the value round-trips."""
+        harness = GatewayHarness()
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            config.providers["opencode_go"] = ProviderState(
+                provider_id="opencode_go",
+                kind="opencode_go",
+                state="connected",
+                models={
+                    "mimo-v2.6-flash": ModelEntry(
+                        model_id="mimo-v2.6-flash",
+                        enabled=True,
+                        dialect="openai_chat",
+                        source="discovered",
+                    )
+                },
+            )
+            config.aliases["coding"] = Alias(
+                name="coding",
+                enabled=True,
+                primary=RouteRef(FAKE_PROVIDER, "gpt-6-luna"),
+                phase_routing=PhaseRouting(
+                    enabled=True,
+                    routes={
+                        "plan": PhaseRoute(
+                            phase="plan",
+                            route=RouteRef("opencode_go", "mimo-v2.6-flash"),
+                            effort="high",
+                        )
+                    },
+                    inference=JevInference(enabled=False),
+                ),
+            )
+        saved = harness.config.snapshot().aliases["coding"].phase_routing
+        self.assertIsNotNone(saved)
+        assert saved is not None
+        self.assertEqual(saved.routes["plan"].effort, "high")
+
+
 class PhaseRoutingValidationTests(unittest.TestCase):
     """Every phase route is validated like an alias primary or fallback."""
 
