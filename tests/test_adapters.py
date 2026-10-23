@@ -366,7 +366,8 @@ class ClassificationTests(unittest.TestCase):
         body = json.dumps({"error": {"message": "secret prompt text", "code": "bad_request"}}).encode()
         error = error_from_response(400, body, "p", json.loads(body))
         self.assertNotIn("secret prompt text", error.message)
-        self.assertIn("bad_request", error.message)
+        self.assertNotIn("bad_request", error.message)
+        self.assertEqual(error.error_class, "malformed")
 
 
 if __name__ == "__main__":

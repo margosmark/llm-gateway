@@ -38,7 +38,7 @@ The following state is intentionally in-memory only and disappears on restart:
 * limit snapshots.
 
 Request outcomes are also appended asynchronously to `request-ledger.jsonl`
-under the state directory. The append-only metadata log is rotated at 5 MiB
+under the state directory. Expired records are physically pruned on load and before rotation; the append-only metadata log is rotated at 5 MiB
 with two rotated files (15 MiB maximum) and records older than 30 days are
 ignored when loading. The bounded in-memory ring remains the live hot view;
 records are restored after restart. This is operational metadata, not a
