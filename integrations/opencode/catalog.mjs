@@ -28,7 +28,12 @@ export function catalogue(data) {
       throw new Error("invalid alias metadata")
     }
     ids.add(row.id)
-    const context = row.context.known ? row.context.limit : UNKNOWN_CONTEXT_BUDGET
+    // OpenCode exposes one working input budget to the agent. The gateway
+    // keeps the provider's full window in `context.limit`; this client-side
+    // reserve turns that into the number an agent can safely use. The
+    // reserve is OpenCode's own working allocation, not a claim that the
+    // provider publishes an output limit.
+    const context = row.context.known ? row.context.limit - OUTPUT_RESERVE : UNKNOWN_CONTEXT_BUDGET - OUTPUT_RESERVE
     // Every effort is the provider's own published data, so it is forwarded
     // rather than curated: a level the gateway says the primary route
     // publishes is a level the owner may select. The grammar check is a
@@ -45,7 +50,7 @@ export function catalogue(data) {
       id: row.id,
       name: row.context.known ? row.id : `${row.id} (200k client budget; upstream unknown)`,
       context,
-      input: context - OUTPUT_RESERVE,
+      input: context,
       output: OUTPUT_RESERVE,
       tools: row.supports_function_tools === true,
       efforts,
