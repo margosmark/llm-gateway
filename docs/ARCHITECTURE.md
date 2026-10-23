@@ -103,10 +103,12 @@ that the model was explicitly enabled, sends the payload to OpenCode Console, an
 returns the native structured response. It is intentionally not an alias,
 chat-completions, or Responses route.
 
-The initial boundary refuses image assets, `box` questions, and multipart bodies. State, questions, and answers are request
-content: they are never persisted in configuration, request logs, or the
-ledger. Jev does not inspect or route completion requests; prompt-derived
-routing needs a separate explicit privacy and failure-boundary design.
+The native System One boundary accepts JSON only and refuses image assets
+and `box` questions. State, questions, and answers are request content: they
+are never persisted in configuration, request logs, or the ledger. Separately,
+Jev can infer a phase for an alias only when that alias explicitly enables the
+phase-routing policy below. This bounded inference uses request text and is
+not a general completion router.
 
 ### The upstream conversation identifier
 
@@ -199,9 +201,13 @@ not count a prompt's tokens; the provider is the authority.
 
 `GET /v1/alias-catalog` exposes that same alias-level rule to a client that
 needs it before it can offer a model: the context limit (or its Unknown
-reason), the primary route's published reasoning levels, and whether every
-route supports function tools. It carries no provider inventory, no ledger,
-no credential and no unpublished route, and it makes no provider call.
+reason), the primary route's published reasoning levels, whether every route
+supports function tools, and whether any route supports image input. The image
+flag uses an any-route rule because the router enforces the capability per
+request: for an image request, text-only routes are excluded with a recorded
+reason, and the gateway fails closed if no capable route remains. It carries
+no provider inventory, no ledger, no credential and no unpublished route, and
+it makes no provider call.
 
 `integrations/opencode/` is an OpenCode V2 provider plugin that reads it and
 publishes the aliases into `/models`. It uses a documented alias limit when
