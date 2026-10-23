@@ -117,7 +117,7 @@ provenance against the snapshot itself, the arithmetic, and the
 no-published-price case); `tests/test_end_to_end.py` (the counters on the
 buffered and the streamed path); `tests/test_request_ids.py` (identifier
 uniqueness, concurrency, the durable round trip, and per-request
-attribution). Full suite passed (448 tests, 2 skipped).
+attribution). Full suite passed (463 tests, 2 skipped) on the rebased tree.
 
 ### T3 — Enforce the capabilities that are declared but never checked — `partial`
 

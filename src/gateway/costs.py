@@ -85,10 +85,16 @@ def price_for(model: str) -> dict[str, Any] | None:
     return price
 
 
-def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | None = "opencode_go") -> dict[str, Any]:
+def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | None = "opencode_go", *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     # The published snapshot currently prices OpenCode Go models only; do not
     # transfer a matching model ID's price to another provider.
-    price = price_for(model) if provider == "opencode_go" else None
+    catalog = published_prices() if _prices is None else _prices
+    price = catalog.get(model) if provider == "opencode_go" else None
+    if (not price or not isinstance(price.get("input_per_m"), (int, float))
+            or not isinstance(price.get("output_per_m"), (int, float))
+            or not isinstance(price.get("source"), str)
+            or not isinstance(price.get("observed_at"), str)):
+        price = None
     if price is None or counters is None:
         return {"amount_usd": None, "source": price.get("source") if price else None,
                 "observed_at": price.get("observed_at") if price else None}
@@ -106,9 +112,10 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
     return {"amount_usd": amount, "source": price["source"], "observed_at": price["observed_at"]}
 
 
-def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24) -> dict[str, Any]:
-    """Aggregate successful request usage by alias, provider, and model for the window."""
+def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evicted_events: int = 0) -> dict[str, Any]:
+    """Aggregate usage from supplied events; report when the hot ring is incomplete."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    prices = published_prices()
     groups: dict[str, dict[str, Any]] = {key: {} for key in ("alias", "provider", "model")}
     for event in events:
         try:
@@ -122,7 +129,7 @@ def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24) -> dic
         if not isinstance(model, str):
             continue
         counters = raw_counters if isinstance(raw_counters, dict) else {}
-        cost = calculate_cost(counters or None, model, event.get("serving_provider"))
+        cost = calculate_cost(counters or None, model, event.get("serving_provider"), _prices=prices)
         dimensions = (("alias", event.get("requested_alias")),
                       ("provider", event.get("serving_provider")),
                       ("model", model))
@@ -141,10 +148,22 @@ def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24) -> dic
                 row["amount_usd"] += cost["amount_usd"]
     for dimension in groups.values():
         for row in dimension.values():
+            if evicted_events > 0:
+                # The ring may have evicted in-window rows; do not present a
+                # partial sum as if it were a complete window cost.
+                row["cost_unknown"] = True
             if row["cost_unknown"]:
                 row["amount_usd"] = None
             del row["cost_unknown"]
-    return {"window_hours": window_hours, **groups}
+    return {
+        "window_hours": window_hours,
+        "coverage": {
+            "source": "bounded_recent_events",
+            "events_considered": len(events),
+            "incomplete": evicted_events > 0,
+        },
+        **groups,
+    }
 
 
 def annotate_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

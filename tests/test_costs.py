@@ -42,7 +42,7 @@ class UsageCostTests(unittest.TestCase):
             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20},
         }]
         result = aggregate_usage(events, window_hours=24)
-        self.assertEqual(set(result), {"window_hours", "alias", "provider", "model"})
+        self.assertEqual(set(result), {"window_hours", "coverage", "alias", "provider", "model"})
         self.assertEqual(result["alias"]["friendly"]["requests"], 1)
         self.assertEqual(result["provider"]["opencode_go"]["input_tokens"], 100)
         self.assertAlmostEqual(result["model"]["claude-haiku-5-5"]["amount_usd"], 0.00002)
@@ -61,6 +61,30 @@ class UsageCostTests(unittest.TestCase):
         cost = calculate_cost({"prompt_tokens": 100, "completion_tokens": 20}, "claude-haiku-5-5", provider="chatgpt_codex")
         self.assertIsNone(cost["amount_usd"])
         self.assertIsNone(cost["source"])
+
+    def test_aggregate_loads_catalogue_once_for_many_events(self):
+        from unittest.mock import patch
+        events = [{
+            "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "a", "serving_provider": "opencode_go",
+            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20},
+        } for _ in range(10_000)]
+        with patch("gateway.costs.published_prices", wraps=published_prices) as prices:
+            result = aggregate_usage(events)
+        self.assertEqual(prices.call_count, 1)
+        self.assertEqual(result["model"]["claude-haiku-5-5"]["requests"], 10_000)
+        self.assertAlmostEqual(result["model"]["claude-haiku-5-5"]["amount_usd"], 0.2)
+
+    def test_evicted_events_mark_window_aggregate_incomplete(self):
+        events = [{
+            "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "a", "serving_provider": "opencode_go",
+            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20},
+        } for _ in range(10_000)]
+        result = aggregate_usage(events, window_hours=24, evicted_events=2_000)
+        row = result["model"]["claude-haiku-5-5"]
+        self.assertEqual(row["requests"], 10_000)
+        self.assertIsNone(row["amount_usd"])
+        self.assertTrue(result["coverage"]["incomplete"])
+        self.assertEqual(result["coverage"]["source"], "bounded_recent_events")
 
     def test_unknown_price_dominates_aggregate_instead_of_underreporting(self):
         events = [{
