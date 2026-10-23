@@ -172,6 +172,13 @@ check("existing phase policy is sent unchanged unless explicitly removed", funct
   assert(source.includes('text: "Remove phase policy"'));
 });
 
+check("the console states that a per-phase effort is stored but not applied upstream", function () {
+  // R38: the effort round-trips through the config, but the router never
+  // applies it. The console must not present it as if it were in effect.
+  assert(source.includes("A per-phase effort is stored with the policy"));
+  assert(source.includes("the gateway does not apply it to the upstream request"));
+});
+
 check("server refusal names the invalid field in the visible error message", function () {
   assert(source.includes('if (serverError && serverError.field) message += " (field: " + serverError.field + ")";'));
   assert(source.includes('toast(error.message || "something went wrong", "bad")'));
