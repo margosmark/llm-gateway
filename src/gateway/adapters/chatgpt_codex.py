@@ -76,6 +76,22 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CHATGPT_BASE = "https://chatgpt.com/backend-api/codex"
 MODELS_PATH = "/models"
 
+#: Image-input support, per exact model slug, from OpenAI's own model page.
+#:
+#: The Codex catalogue publishes no image or vision field, so this cannot be
+#: discovered from the endpoint - it is transcribed per *exact slug* from the
+#: model-provider documentation, exactly as the OpenCode Go snapshot does.
+#: A slug absent from this map stays false: image support is never inferred
+#: from a model family, a tier name, or the Responses dialect, because those
+#: inferences are wrong in both directions (GPT-5.6 Terra accepts images;
+#: MiMo-V2-Flash does not, while its sibling MiMo-V2.5 does).
+#:
+#: ``gpt-5.6-terra``: OpenAI lists "Input modalities: text, image" and
+#: ``image_input`` under Supported features (read 2026-10-23).
+IMAGE_INPUT_SOURCES = {
+    "gpt-5.6-terra": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+}
+
 #: The Codex client appends its own version to the model-list request, and
 #: the backend expects it. The gateway identifies itself honestly with its
 #: own version rather than impersonating the Codex client.
@@ -530,6 +546,9 @@ class ChatGPTCodexAdapter:
             visibility = entry.get("visibility")
             if isinstance(visibility, str) and visibility not in ("list", ""):
                 notes.append(f"visibility: {visibility}")
+            image_source = IMAGE_INPUT_SOURCES.get(model_id)
+            if image_source:
+                notes.append(f"image input per {image_source}")
 
             models.append(
                 ModelInfo(
@@ -540,6 +559,10 @@ class ChatGPTCodexAdapter:
                     dialect=DIALECT_OPENAI_RESPONSES,
                     supports_streaming=True,
                     supports_function_tools=True,
+                    # The Codex catalogue publishes no image field, so this
+                    # is transcribed from the model-provider documentation
+                    # per exact slug. Absent means false, never a guess.
+                    supports_image_input=image_source is not None,
                     # What an account may actually reach, and at what
                     # limits, depends on the account. Unknown.
                     context_window=context_window,

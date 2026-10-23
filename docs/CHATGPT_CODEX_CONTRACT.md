@@ -165,6 +165,18 @@ ChatGPT-Account-ID: <chatgpt_account_id>     # when known
   `min(context_window, max_context_window) × percent / 100` — 258,400 for
   `gpt-6-luna`. See `ARCHITECTURE.md` for the alias-level rule.
 
+* **The catalogue publishes no image or vision field.** The only capability
+  fields are `supported_in_api`, `supported_reasoning_levels` and
+  `visibility`. Image-input support therefore cannot be discovered from this
+  endpoint and is **transcribed per exact slug** from OpenAI's own model
+  documentation, in `IMAGE_INPUT_SOURCES` in
+  `adapters/chatgpt_codex.py`. `gpt-5.6-terra` is listed there because
+  OpenAI's model page states "Input modalities: text, image" and lists
+  `image_input` under Supported features (read 2026-10-23). A slug absent
+  from that map stays **false** — image support is never inferred from the
+  Responses dialect, a model family, or a tier name. The source URL is
+  appended to the model's `notes` so an operator can review the conclusion.
+
 ---
 
 ## 3. Inference

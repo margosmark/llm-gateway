@@ -331,6 +331,28 @@ any eligible route's limit is not published.
 The limit is **reported, not enforced**: the gateway has no tokenizer, so it
 does not count a prompt's tokens. The provider is the authority.
 
+### Image input
+
+The Codex catalogue publishes **no image or vision field** — the only
+capability fields are `supported_in_api`, `supported_reasoning_levels` and
+`visibility`. Image support therefore cannot be discovered from the
+endpoint and is **transcribed per exact slug** from OpenAI's own model
+documentation, in `IMAGE_INPUT_SOURCES` in `adapters/chatgpt_codex.py`.
+
+`gpt-5.6-terra` is listed there: OpenAI's model page states "Input
+modalities: text, image" and lists `image_input` under Supported features
+(`developers.openai.com/api/docs/models/gpt-5.6-terra`, read 2026-10-23).
+A slug absent from that map stays **false** — image support is never
+inferred from the Responses dialect, a model family, or a tier name. The
+source URL is appended to the model's `notes` so an operator can review the
+conclusion.
+
+This is a *separate* mechanism from the OpenCode Go snapshot's
+`IMAGE_INPUT_SOURCES`, which lives in `scripts/build_go_catalog_snapshot.py`
+and feeds `data/go_catalog.json`. The two providers are served by different
+adapters and reach the capability from different places; adding a model to
+one map has no effect on the other.
+
 ### What is not documented
 
 OpenAI publishes no supported third-party proxying path for a consumer

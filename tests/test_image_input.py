@@ -244,6 +244,34 @@ class AliasCatalogImagePublicationTests(unittest.TestCase):
         _, body, _ = harness.request("GET", "/v1/alias-catalog")
         self.assertFalse(body["data"][0]["supports_image_input"])
 
+    def test_a_codex_primary_with_transcribed_evidence_makes_the_alias_image_capable(self) -> None:
+        """The real `pm` shape: a ChatGPT/Codex primary, a text-only fallback.
+
+        ``gpt-5.6-terra`` carries transcribed image evidence, so the alias is
+        image-capable even though its ``mimo-v2.6-flash`` fallback is not -
+        the router excludes that fallback from an image request instead.
+        """
+        harness = GatewayHarness()
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            config.providers[FAKE_PROVIDER] = ProviderState(
+                provider_id=FAKE_PROVIDER, kind=FAKE_PROVIDER, state="connected",
+                models={"gpt-5.6-terra": ModelEntry(
+                    model_id="gpt-5.6-terra", enabled=True, dialect=DIALECT_OPENAI_RESPONSES,
+                    source="discovered", supports_image_input=True)},
+            )
+            config.providers["opencode_go"] = ProviderState(
+                provider_id="opencode_go", kind="opencode_go", state="connected",
+                models={"mimo-v2.6-flash": ModelEntry(
+                    model_id="mimo-v2.6-flash", enabled=True, dialect=DIALECT_OPENAI_CHAT,
+                    source="discovered", supports_image_input=False)},
+            )
+            config.aliases["pm"] = _alias_with_routes(
+                RouteRef(FAKE_PROVIDER, "gpt-5.6-terra"),
+                [RouteRef("opencode_go", "mimo-v2.6-flash")], name="pm")
+        _, body, _ = harness.request("GET", "/v1/alias-catalog")
+        self.assertTrue(body["data"][0]["supports_image_input"])
+
 
 class PhaseRouteImageEnforcementTests(unittest.TestCase):
     """A phase route is subject to the image rule like any other route.
