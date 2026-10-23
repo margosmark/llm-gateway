@@ -770,8 +770,8 @@ dropped *with the substitution recorded*, under the R19 preference rule.
 
 **Planned as** `docs/TODO.md` item **T4**.
 
-### R26 — The published per-token prices are never read, and no request records its usage — **open**
-**Severity: medium observability gap.** *(open)*
+### R26 — The published per-token prices are never read, and no request records its usage — **closed**
+**Severity: medium observability gap.** *(closed; request-scoped catalogue snapshot verified)*
 
 Three finished pieces are not connected:
 
@@ -796,7 +796,9 @@ streamed path, compute the cost with the price's source and observation
 date, and aggregate it on the Status page. A model with no published price
 reports Unknown, never zero and never "unlimited".
 
-**Planned as** `docs/TODO.md` item **T2**.
+**Resolution.** Usage and local estimates are now surfaced in Status. The Status handler loads the published price catalogue once and passes that immutable request snapshot to both recent-ledger annotations and aggregate usage calculation; per-row cost work performs no catalogue reads. This preserves file refresh visibility on the next Status request rather than introducing a stale global cache.
+
+**Regression evidence:** `tests/test_end_to_end.py::ConsoleApiTests.test_state_loads_published_prices_once_for_many_priced_ledger_rows` seeds 40 priced rows, exercises the real `/owner/api/state` HTTP endpoint and asserts exactly one catalogue load, while checking recent-row pricing and aggregate presence.
 
 ### R27 — Entering a model manually silently discarded its published capability metadata — **closed**
 **Severity: medium correctness/honesty risk.** *(closed)*
@@ -1380,8 +1382,8 @@ old short-circuit condition.
 
 ## Recommended order
 
-Findings R0-R27 and R28-R36 are closed or superseded. **R26, R36 and R38 are
-open**; R26 is planned in `docs/TODO.md` (T2), R36 is the explicit
+Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
+open**; R36 is the explicit
 post-deployment route replacement above, and R38 is the inert per-phase
 reasoning effort, which needs a routing change. R37 and R39 are closed. The register
 is kept so the next agent can see what was already paid for in time.
@@ -1397,8 +1399,7 @@ is kept so the next agent can see what was already paid for in time.
 6. Tighten **R4** and **R12**, then make observability truthful and complete in
    **R5**.
 7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6** and **R14** with targeted tests and runbook changes. R15 is superseded by removal of the setup surface.
-8. Complete **R36**'s explicit post-deployment route replacement, then fix
-   **R26** (no usage or cost recorded) — planned as `docs/TODO.md` T2.
+8. Complete **R36**'s explicit post-deployment route replacement.
    R25 and R27 are closed by R35 and R27's own resolutions.
 ## Trusted LAN admin-mode candidate update
 

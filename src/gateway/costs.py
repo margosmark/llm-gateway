@@ -75,8 +75,9 @@ def stream_token_counters(frames: Iterable[bytes], dialect: str) -> dict[str, in
     return total or None
 
 
-def price_for(model: str) -> dict[str, Any] | None:
-    price = published_prices().get(model)
+def price_for(model: str, *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    catalog = published_prices() if _prices is None else _prices
+    price = catalog.get(model)
     if (not price or not isinstance(price.get("input_per_m"), (int, float))
             or not isinstance(price.get("output_per_m"), (int, float))
             or not isinstance(price.get("source"), str)
@@ -112,10 +113,10 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
     return {"amount_usd": amount, "source": price["source"], "observed_at": price["observed_at"]}
 
 
-def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evicted_events: int = 0) -> dict[str, Any]:
+def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evicted_events: int = 0, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Aggregate usage from supplied events; report when the hot ring is incomplete."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    prices = published_prices()
+    prices = published_prices() if _prices is None else _prices
     groups: dict[str, dict[str, Any]] = {key: {} for key in ("alias", "provider", "model")}
     for event in events:
         try:
@@ -166,19 +167,20 @@ def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evi
     }
 
 
-def annotate_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def annotate_events(events: list[dict[str, Any]], *, _prices: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Attach calculated metadata-only costs for rendering; do not persist estimates."""
+    prices = published_prices() if _prices is None else _prices
     result = []
     for event in events:
         row = dict(event)
         model, counters = row.get("serving_model"), row.get("token_counters")
-        row["cost"] = calculate_cost(counters if isinstance(counters, dict) else None, model, row.get("serving_provider")) if isinstance(model, str) else {
+        row["cost"] = calculate_cost(counters if isinstance(counters, dict) else None, model, row.get("serving_provider"), _prices=prices) if isinstance(model, str) else {
             "amount_usd": None, "source": None, "observed_at": None
         }
         result.append(row)
     return result
 
 
-def per_request_costs(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def per_request_costs(events: list[dict[str, Any]], *, _prices: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Return safe cost annotations keyed by request ID for Status rendering."""
-    return [{"request_id": row.get("request_id"), **row["cost"]} for row in annotate_events(events)]
+    return [{"request_id": row.get("request_id"), **row["cost"]} for row in annotate_events(events, _prices=_prices)]
