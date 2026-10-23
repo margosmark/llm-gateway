@@ -208,7 +208,7 @@ routes it excluded and why. It never silently serves a different model.
 An alias may carry an optional **phase-routing** policy that picks a
 different primary route depending on what the request is *for*. A phase is
 one of a closed set - `plan`, `implement`, `validate`. The policy is off by
-default. In this release it can be configured only through the owner-console LAN administration API (`POST /api/alias` with the `phase_routing` field); it is not exposed by the console editor or `/api/state`. Treat this as owner administration on the trusted LAN, not as a public-client setup instruction. A console editor is pending its separate PR.
+default and configured per alias in the console editor. The editor stores the policy as configuration only; it does not inspect or retain request content. The accepted phase vocabulary is closed to `plan`, `implement`, and `validate`. Treat this as owner administration on the trusted LAN, not as a public-client setup instruction.
 
 The precedence is fixed and never silent:
 
