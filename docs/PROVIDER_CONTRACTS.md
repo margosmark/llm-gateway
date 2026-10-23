@@ -93,15 +93,23 @@ live `https://opencode.ai/inference/v1/models` catalogue.
 | Supported initial question types | `noul`, `choice`, `score` |
 | Response | native `{model, answers, usage}` structure |
 
-The gateway exposes Jev only through its native `GET /v1/systemone/models` and
+The gateway exposes Jev through its native `GET /v1/systemone/models` and
 `POST /v1/systemone` surfaces. It does not present Jev as an OpenAI chat or
-Responses model. The first implementation accepts JSON only and refuses
-assets, `box` questions, and multipart bodies. Catalogue refresh, connection test,
+Responses model. The native System One endpoint accepts JSON only and refuses
+image assets and `box` questions. That restriction is specific to System One:
+the OpenAI-compatible inference API is not categorically text-only. The gateway
+parses image-bearing chat and Responses requests, but a request can be served
+only by a route whose exact model has documented image-capability evidence;
+the router excludes incapable routes and fails closed if none remain. The
+capability is not inferred from a model family or wire dialect. See the
+provider-specific image evidence below. Catalogue refresh, connection test,
 and credential enrollment remain explicit owner actions.
 
 A direct System One request intentionally sends its submitted state and
-questions to OpenCode Console. That content is never stored in gateway configuration,
-logs, or the ledger. Jev is not a hidden completion-router in this release.
+questions to OpenCode Console. That content is never stored in gateway
+configuration, logs, or the ledger. Separately, the gateway supports explicit,
+per-alias Jev phase inference for phase routing; it does not use Jev to select a
+completion model outside that opt-in policy.
 
 ### Opt-in phase inference
 

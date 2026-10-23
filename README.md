@@ -122,10 +122,16 @@ catalogue reads never contact OpenCode Console.
 Jev is a structured-decision provider, not a completion model. Its native API
 is available at `POST /v1/systemone`; send a model, a state string/object/array,
 and one or more named `noul`, `choice`, or `score` questions. The gateway
-returns OpenCode Console's structured response unchanged. Image assets, `box` questions, and multipart requests are refused for now rather than silently forwarded. A direct System One
-call sends its supplied state and questions to OpenCode Console; neither is persisted
-or written to gateway logs or the request ledger. Jev is not used to inspect
-or route chat requests in this release.
+returns OpenCode Console's structured response unchanged. This native JSON
+endpoint refuses image assets, `box` questions, and multipart bodies; that
+restriction is specific to System One and does not mean the chat API is
+text-only. Image input is accepted on a route only when that exact model has
+published image-capability evidence, and the router excludes incapable routes
+for image requests (see the selector-catalogue section below). A direct System
+One call sends its supplied state and questions to OpenCode Console; neither is
+persisted or written to gateway logs or the request ledger. Separately, Jev
+inference is an explicit per-alias opt-in used only for phase selection, as
+described below.
 
 ### OpenCode Go
 
@@ -202,7 +208,7 @@ routes it excluded and why. It never silently serves a different model.
 An alias may carry an optional **phase-routing** policy that picks a
 different primary route depending on what the request is *for*. A phase is
 one of a closed set - `plan`, `implement`, `validate`. The policy is off by
-default and is configured per alias in the console.
+default and configured per alias in the console editor. The editor stores the policy as configuration only; it does not inspect or retain request content. The accepted phase vocabulary is closed to `plan`, `implement`, and `validate`. Treat this as owner administration on the trusted LAN, not as a public-client setup instruction.
 
 The precedence is fixed and never silent:
 
