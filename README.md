@@ -236,9 +236,25 @@ OpenCode configuration by hand.
 
 `GET /v1/alias-catalog` publishes, for every published alias, the
 alias-level context limit, the primary route's published reasoning levels,
-and whether every route supports function tools. It is metadata only — no
-provider inventory, no ledger, no credential, no unpublished route — and it
-makes no provider call.
+and whether every route supports function tools or whether **any** route
+accepts image input. It is metadata only — no provider inventory, no ledger,
+no credential, no unpublished route — and it makes no provider call.
+
+An alias is advertised as image-capable when **any** route that could serve
+it accepts images. This is deliberately looser than the all-routes rule the
+tools flag uses, because the router enforces image capability per request: a
+request carrying an image is routed to a route that can see it, and a
+text-only route is excluded for that request with the reason recorded —
+never silently served an image it cannot read. If no image-capable route
+remains eligible, the request fails closed at the gateway rather than at the
+provider.
+
+Image support is recorded per exact upstream model ID from official
+model-provider documentation, with the source URL kept beside it. A model
+with no such evidence is never assumed to accept images — so an alias whose
+routes are *all* unevidenced stays text-only in OpenCode until the evidence
+exists. This is the same honesty rule the gateway applies to context
+windows.
 
 `integrations/opencode/` is an OpenCode V2 provider plugin that reads that
 catalogue, registers one provider (`personal-gateway`) and refreshes every

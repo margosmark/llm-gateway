@@ -212,6 +212,19 @@ REASONING_EFFORTS = {
     "minimax-m3.1-flash": ("low", "medium", "high", "xhigh", "max"),
 }
 
+#: Image-input support is a hard capability. These entries are deliberately
+#: source-backed per *exact upstream model ID* rather than inferred from a
+#: provider name, model family, or wire dialect. A model absent from this map
+#: remains false/unknown-to-the-router and cannot be advertised for image use.
+#:
+#: MiniMax documents that MiniMax-M3.1-Flash and MiniMax-M3 accept OpenAI
+#: ``image_url`` parts; OpenCode Go's published endpoint table establishes
+#: that its exact ``minimax-m3.1-flash`` id is served over that compatibility
+#: endpoint. The model-provider page was read 2026-10-23.
+IMAGE_INPUT_SOURCES = {
+    "minimax-m3.1-flash": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+}
+
 
 def retention_for(model_id: str) -> str:
     if model_id in RETENTION_TRAINING:
@@ -268,7 +281,8 @@ def build() -> dict[str, Any]:
             "supports_streaming": True,
             "supports_function_tools": True,
             "supports_builtin_tools": False,
-            "supports_image_input": False,
+            "supports_image_input": model_id in IMAGE_INPUT_SOURCES,
+            "image_input_source": IMAGE_INPUT_SOURCES.get(model_id),
             "deprecated": model_id in DEPRECATED,
             "notes": "; ".join(notes) if notes else None,
             "source": SOURCE_URL,

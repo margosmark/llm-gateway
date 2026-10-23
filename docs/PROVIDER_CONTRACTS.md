@@ -178,6 +178,27 @@ hand-edited. **An undocumented model is refused, not guessed.**
   does not invent level variants for it. An effort that a fallback does not
   publish remains a preference: it is dropped only for the serving fallback
   and the ledger records the degradation.
+* **Image input is a hard capability, recorded per exact model ID.** MiniMax
+  documents that `MiniMax-M3.1-Flash` and `MiniMax-M3` accept OpenAI
+  `image_url` content parts over the Chat Completions compatibility
+  endpoint (`platform.minimax.io/docs/api-reference/text-openai-api`, read
+  2026-10-23), and the published Go endpoint table establishes that the
+  exact `minimax-m3.1-flash` ID is served over that endpoint. That is the
+  only Go model currently claimed as image-capable, because it is the only
+  one with this evidence. The snapshot records the flag and its source URL
+  together (`supports_image_input` / `image_input_source`), and a regression
+  test asserts the two always agree. **No capability is inferred from a
+  model name, a model family, or a wire dialect** - MiMo-V2.5 is documented
+  as omni-modal while MiMo-V2-Flash is documented as text-only, so a
+  family-level rule would have been wrong in both directions. A model
+  without evidence stays false and sourceless; `/v1/alias-catalog` reports
+  an alias as image-capable when **any** route that can serve it has the
+  evidence. That is deliberately looser than the all-routes rule the tools
+  flag uses, because the router enforces image capability per request: an
+  image is routed to a route that can see it, a text-only route is excluded
+  for that request with the reason recorded, and an image request with no
+  capable route fails closed at the gateway. An alias whose routes are all
+  unevidenced therefore stays text-only.
 * Retention: 30 days for the GPT/Luna, Grok, Claude and Beam models; 0 days
   for GLM, Kimi, MiMo, LongCat, Qwen and Hy; **training permitted** for the
   Gemini and Muse models. This is why cross-provider fallback is a privacy

@@ -23,7 +23,11 @@ export default Plugin.define({
         capabilities: {
           ...Model.Info.default(providerID, Model.ID.make(row.id)).capabilities,
           tools: row.tools,
-          input: ["text"], // Image routing is not yet enforced by the gateway.
+          // The gateway only reports image input when every route that can
+          // serve the alias has source-backed evidence for it, and it
+          // excludes an image-incapable route from an image request. So a
+          // model advertised here really can receive an attachment.
+          input: row.image ? ["text", "image"] : ["text"],
           output: ["text"],
           reasoning: { supported: row.efforts.length > 0 },
         },

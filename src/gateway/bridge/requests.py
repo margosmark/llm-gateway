@@ -89,6 +89,34 @@ def _chat_reasoning(payload: dict[str, Any]) -> str | None:
     return flat or effort
 
 
+def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> bool:
+    """Whether a request carries an image that the serving model must see.
+
+    This uses the same content parsers as dialect conversion, so routing and
+    rendering cannot disagree about which fields represent an image. Unknown
+    part shapes are not treated as images here; a converted path will still
+    refuse any shape it cannot express, rather than silently dropping it.
+    """
+    if source_dialect == DIALECT_OPENAI_CHAT:
+        messages = payload.get("messages")
+        return isinstance(messages, list) and any(
+            isinstance(message, dict)
+            and any(part.kind == IMAGE for part in _chat_content_to_parts(message.get("content")))
+            for message in messages
+        )
+    if source_dialect == DIALECT_OPENAI_RESPONSES:
+        raw_input = payload.get("input")
+        for entry in _as_list(raw_input):
+            if isinstance(entry, str):
+                continue
+            if isinstance(entry, dict) and any(
+                part.kind == IMAGE for part in _responses_content_to_parts(entry.get("content"))
+            ):
+                return True
+        return False
+    return False
+
+
 def _chat_content_to_parts(content: Any) -> list[ContentPart]:
     """Convert Chat Completions message content into content parts."""
     if content is None:

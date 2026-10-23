@@ -31,7 +31,7 @@ from typing import Any, Iterator
 
 from gateway.adapters.base import Adapter, AdapterError, ProviderRequest, ProviderResponse
 from gateway.bridge.model import ConversionError
-from gateway.bridge.requests import convert_request
+from gateway.bridge.requests import convert_request, payload_has_image_input
 from gateway.circuits import CircuitStore
 from gateway.config import (
     ERROR_AUTH,
@@ -233,6 +233,7 @@ class Router:
         source_dialect: str = DIALECT_OPENAI_CHAT,
         stream: bool = False,
         needs_tools: bool = False,
+        needs_image_input: bool = False,
         reasoning_effort: str | None = None,
     ) -> list[Candidate]:
         """Build the ordered candidate list for an alias."""
@@ -291,6 +292,10 @@ class Router:
                 continue
             if needs_tools and not capability.supports_function_tools:
                 candidate.excluded_reason = "this model does not support function tools"
+                candidates.append(candidate)
+                continue
+            if needs_image_input and not capability.supports_image_input:
+                candidate.excluded_reason = "this model does not support image input"
                 candidates.append(candidate)
                 continue
             if reasoning_effort and not capability.supports_effort(reasoning_effort):
@@ -503,6 +508,7 @@ class Router:
         alias = self.resolve_alias(alias_name)
 
         needs_tools = bool(payload.get("tools"))
+        needs_image_input = payload_has_image_input(payload, source_dialect)
         reasoning_effort = _requested_reasoning_effort(payload)
 
         candidates = self.candidates(
@@ -510,6 +516,7 @@ class Router:
             source_dialect=source_dialect,
             stream=stream,
             needs_tools=needs_tools,
+            needs_image_input=needs_image_input,
             reasoning_effort=reasoning_effort if isinstance(reasoning_effort, str) else None,
         )
         if not candidates:

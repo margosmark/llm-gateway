@@ -342,6 +342,20 @@ class GatewayApp:
                     and entry.supports_function_tools
                     for route in alias.all_routes()
                 ),
+                # An alias is image-capable when **any** route that may serve
+                # it accepts image input. This is deliberately not the
+                # all-routes rule the tools flag uses: the router enforces
+                # image capability per request, so an image is routed to a
+                # route that can see it and a text-only route is excluded for
+                # that request (recording why), never silently served the
+                # image. If no image-capable route remains eligible the
+                # request fails closed at the gateway.
+                "supports_image_input": any(
+                    config.providers.get(route.provider) is not None
+                    and (entry := config.providers[route.provider].models.get(route.model)) is not None
+                    and entry.supports_image_input
+                    for route in alias.all_routes()
+                ),
             })
         return json_response({"object": "list", "data": aliases})
 

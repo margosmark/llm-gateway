@@ -121,34 +121,40 @@ model with no published price reports **Unknown**, never `0` and never
 totals are in-memory like today's ledger, and the Status page must keep
 saying so.
 
-### T3 — Enforce the capabilities that are declared but never checked — `todo`
+### T3 — Enforce the capabilities that are declared but never checked — `partial`
 
-**Why.** `core/routing.py:311` is the **only** capability check in the
-router, and it checks `supports_function_tools` alone. But
-`supports_image_input`, `supports_builtin_tools` and
+**Why.** `core/routing.py` used to check `supports_function_tools` alone.
+But `supports_image_input`, `supports_builtin_tools` and
 `supports_previous_response_id` are carried through the config, the model
-entry, the state API and the console (`core/capabilities.py:60-64`) and are
+entry, the state API and the console (`core/capabilities.py:60-64`) and were
 then **never consulted**.
 
-So a route whose model publishes `supports_image_input: false` — which is
-most of the catalogue — can be selected for an image request and fail at the
-provider with an opaque error, instead of being excluded at the gateway
-with the clear reason the router already gives for every other mismatch.
-This is the same shape as R19: a requirement that is not checked is a
-failure that happens in the wrong place.
+So a route whose model publishes `supports_image_input: false` could be
+selected for an image request and fail at the provider with an opaque error,
+instead of being excluded at the gateway with the clear reason the router
+already gives for every other mismatch. This is the same shape as R19: a
+requirement that is not checked is a failure that happens in the wrong place.
 
 **Scope.** Decide, per capability, whether it is a hard requirement (route
 excluded, reason recorded) or is refused at the bridge:
 
-| Capability | Reading |
-|---|---|
-| `supports_image_input` | **Hard.** A model that cannot see an image cannot serve an image request. |
-| `supports_builtin_tools` | **Hard**, for the same reason tools are hard. |
-| `supports_previous_response_id` | The bridge already refuses continuation it cannot serve (`bridge/requests.py:366-370`). Decide whether the router should exclude the route earlier, and why. |
+| Capability | Reading | Status |
+|---|---|---|
+| `supports_image_input` | **Hard.** A model that cannot see an image cannot serve an image request. | **done** — excluded in `candidates()`; see R37 in [`REVIEW.md`](REVIEW.md) |
+| `supports_builtin_tools` | **Hard**, for the same reason tools are hard. | open |
+| `supports_previous_response_id` | The bridge already refuses continuation it cannot serve (`bridge/requests.py`). Decide whether the router should exclude the route earlier, and why. | open |
 
 **Done when.** Each of the three is either enforced in `candidates()` with
 its exclusion reason, or is explicitly documented as informational-only with
 a cited reason for that choice — and each has a refusal test.
+
+**Landed so far.** `payload_has_image_input()` in `bridge/requests.py`
+detects an image with the *same* content parsers conversion uses, so routing
+and rendering cannot disagree about what counts as an image. The router
+passes `needs_image_input` into `candidates()`, which excludes a route that
+cannot accept one with the reason `this model does not support image input`.
+A request with no capable route fails closed at the gateway. Evidence:
+`tests/test_image_input.py`.
 
 ### T4 — Normalised thinking levels — `done`
 
