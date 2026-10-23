@@ -12,6 +12,7 @@ import socket
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -32,7 +33,7 @@ from gateway.http.app import GatewayApp
 from gateway.logging import RequestLogger
 from gateway.http.core import Server
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
-from gateway.observability import LimitStore, RequestLedger
+from gateway.observability import LimitStore, RequestEvent, RequestLedger, utc_now_iso
 
 FAKE_PROVIDER = "chatgpt_codex"
 
@@ -405,6 +406,28 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual([entry["id"] for entry in payload["data"]], ["coding"])
 
+    def test_provider_secret_in_error_code_never_reaches_api_state_or_ledger(self) -> None:
+        secret = "sk-" + "E" * 32
+        durable_ledger_path = self.harness.data_dir / "request-ledger.jsonl"
+        durable_ledger = RequestLedger(persistence_path=durable_ledger_path)
+        self.addCleanup(durable_ledger.close)
+        self.harness.router._ledger = durable_ledger
+        self.harness.app.ledger = durable_ledger
+        self.harness.adapter.fail_with = AdapterError("auth", message=secret, upstream_code=secret)
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"].enabled = True
+        status, response, _ = self.harness.request(
+            "POST", "/v1/chat/completions",
+            body={"model": "coding", "messages": [{"role": "user", "content": "synthetic"}]},
+        )
+        self.assertEqual(status, 502)
+        state_status, state, _ = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(state_status, 200)
+        combined = json.dumps({"response": response, "state": state, "ledger": self.harness.router._ledger.recent()})
+        self.assertNotIn(secret, combined)
+        self.assertEqual(response["error"]["type"], "auth")
+        self.assertEqual(response["error"]["detail"]["attempts"][0]["error_class"], "auth")
+
     def test_completion_is_routed_and_attributed(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True
@@ -507,6 +530,9 @@ class ApiSurfaceTests(unittest.TestCase):
     def test_ledger_records_the_serving_provider(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True
+        self.harness.adapter.invoke = lambda request: ProviderResponse(
+            status=200, body=b'{"usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}}'
+        )
         self.harness.request(
             "POST",
             "/v1/chat/completions",
@@ -517,6 +543,21 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(events[0]["requested_alias"], "coding")
         self.assertEqual(events[0]["serving_provider"], FAKE_PROVIDER)
         self.assertEqual(events[0]["serving_model"], "gpt-6-luna")
+        self.assertEqual(events[0]["token_counters"], {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13})
+
+    def test_streamed_usage_is_amended_into_request_ledger(self) -> None:
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"].enabled = True
+        self.harness.adapter.stream_frames = [
+            b'data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":2}}}\n\n'
+        ]
+        self.harness.request(
+            "POST", "/v1/responses",
+            body={"model": "coding", "input": "hi", "stream": True}, raw=True,
+        )
+        event = self.harness.router._ledger.recent()[0]
+        self.assertEqual(event["token_counters"], {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9})
+        self.assertNotIn("content", event)
 
 
 def _alias():
@@ -709,6 +750,31 @@ class ConsoleApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertTrue(payload["ok"])
+
+    def test_state_loads_published_prices_once_for_many_priced_ledger_rows(self) -> None:
+        for index in range(40):
+            self.harness.router._ledger.record(RequestEvent(
+                request_id=f"price-cache-{index}", timestamp=utc_now_iso(),
+                requested_alias="sample", serving_provider="opencode_go",
+                serving_model="claude-haiku-5-5", token_counters={"prompt_tokens": 100, "completion_tokens": 10},
+            ))
+        from gateway.costs import published_prices
+        with patch("gateway.http.app.published_prices", wraps=published_prices) as load_prices:
+            status, payload, _ = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(load_prices.call_count, 1)
+        matching = [row for row in payload["ledger"] if row["request_id"].startswith("price-cache-")]
+        self.assertEqual(len(matching), 25)
+        self.assertTrue(all(row["cost"]["amount_usd"] is not None for row in matching))
+        self.assertIn("sample", payload["usage_costs"]["alias"])
+
+    def test_state_reports_usage_costs_and_durability(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["usage_costs"]["window_hours"], 24)
+        self.assertEqual(set(payload["usage_costs"]) - {"window_hours", "coverage"}, {"alias", "provider", "model"})
+        self.assertIn("enabled", payload["ledger_durability"])
+        self.assertFalse(payload["ledger_durability"]["billing_system"])
 
     def test_state_reports_the_zero_state(self) -> None:
         status, payload, _ = self.harness.request("GET", "/owner/api/state")

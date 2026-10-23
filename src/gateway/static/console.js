@@ -299,7 +299,7 @@
     var ledgerCard = el("div", { class: "card" }, [
       el("h2", { text: "Recent request outcomes" }),
       el("p", { class: "small muted", text: "Metadata only. Prompts, responses, tokens and secrets are never stored." }),
-      el("p", { class: "small muted", text: "Kept in memory only, in a bounded ring of the most recent 10,000 requests. It is not written to disk and is lost when the gateway restarts." }),
+      el("p", { class: "small muted", text: (state.ledger_durability && state.ledger_durability.enabled ? "Recent outcomes are retained on the state volume for up to 30 days, with bounded rotation; the in-memory ring is the hot view. Persistence is asynchronous and may lag briefly. This metadata ledger is not a billing system." : "Durable ledger storage is not enabled; only the bounded in-memory ring is available and is lost when the gateway restarts. This metadata ledger is not a billing system.") }),
       el("div", { class: "row" }, [
         statBox("Requests", totals.requests || 0),
         statBox("Errors", totals.errors || 0),
@@ -313,7 +313,7 @@
         el("thead", {}, [el("tr", {}, [
           el("th", { text: "When" }), el("th", { text: "Alias" }),
           el("th", { text: "Served by" }), el("th", { text: "Outcome" }),
-          el("th", { text: "Note" })
+          el("th", { text: "Cost estimate" }), el("th", { text: "Note" })
         ])])
       ]);
       var tbody = el("tbody");
@@ -323,6 +323,7 @@
           el("td", { text: event.requested_alias }),
           el("td", { class: "small", text: event.serving_provider ? providerLabel(event.serving_provider) + " → " + event.serving_model : "—" }),
           el("td", { class: "small", text: event.error_class ? event.error_class : ("status " + (event.status || "")) + (event.fallback_used ? " (fallback)" : "") }),
+          el("td", { class: "small", text: event.cost && event.cost.amount_usd != null ? "$" + Number(event.cost.amount_usd).toFixed(6) + " · " + event.cost.source + " · " + event.cost.observed_at : "Unknown" }),
           el("td", { class: "small muted", text: (event.degradations || []).map(function (d) { return d.reason; }).join("; ") })
         ]));
       });
@@ -330,6 +331,34 @@
       ledgerCard.appendChild(table);
     }
     frag.appendChild(el("section", {}, [ledgerCard]));
+
+    var costs = state.usage_costs || { window_hours: 24, alias: {}, provider: {}, model: {} };
+    var costsCard = el("div", { class: "card" }, [
+      el("h2", { text: "Local usage and estimated cost" }),
+      el("p", { class: "small muted", text: "Last " + costs.window_hours + " hours. Based on reported token counts and published prices only; estimates are not provider bills." }),
+      el("p", { class: "small muted", text: (costs.coverage && costs.coverage.incomplete ? "The bounded recent-event ring may omit older events from this window; affected cost estimates are Unknown." : "Aggregates cover the available recent-event ring for the last " + costs.window_hours + " hours.") + " " + (state.ledger_durability && state.ledger_durability.enabled ? "The metadata ledger is persisted asynchronously with bounded rotation and a 30-day retention window." : "Durable ledger storage is not enabled; the in-memory ring is lost when the gateway restarts.") + " This is not a billing system." })
+    ]);
+    [ ["Alias", costs.alias], ["Provider", costs.provider], ["Model", costs.model] ].forEach(function (group) {
+      var entries = Object.keys(group[1] || {}).sort();
+      if (!entries.length) return;
+      costsCard.appendChild(el("h3", { text: group[0] }));
+      var costTable = el("table", {}, [el("thead", {}, [el("tr", {}, [
+        el("th", { text: group[0] }), el("th", { text: "Requests" }), el("th", { text: "Input tokens" }),
+        el("th", { text: "Output tokens" }), el("th", { text: "Estimated USD" }), el("th", { text: "Price source / observed" })
+      ])])]);
+      var costBody = el("tbody");
+      entries.forEach(function (key) {
+        var row = group[1][key];
+        costBody.appendChild(el("tr", {}, [
+          el("td", { text: key }), el("td", { text: row.requests }), el("td", { text: row.input_tokens }),
+          el("td", { text: row.output_tokens }), el("td", { text: row.amount_usd == null ? "Unknown" : "$" + Number(row.amount_usd).toFixed(6) }),
+          el("td", { class: "small", text: row.source ? row.source + " · " + (row.observed_at || "date unknown") : "Unknown price source" })
+        ]));
+      });
+      costTable.appendChild(costBody);
+      costsCard.appendChild(costTable);
+    });
+    frag.appendChild(el("section", {}, [costsCard]));
 
     var limitsCard = el("div", { class: "card" }, [el("h2", { text: "Usage and limits" })]);
     if (!state.limits || !state.limits.length) {
