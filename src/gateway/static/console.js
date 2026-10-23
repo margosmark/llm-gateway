@@ -336,7 +336,7 @@
     var costsCard = el("div", { class: "card" }, [
       el("h2", { text: "Local usage and estimated cost" }),
       el("p", { class: "small muted", text: "Last " + costs.window_hours + " hours. Based on reported token counts and published prices only; estimates are not provider bills." }),
-      el("p", { class: "small muted", text: "Request metadata is retained on the state volume for up to 30 days; displayed aggregates cover the last 24 hours. This is not a billing system." })
+      el("p", { class: "small muted", text: (costs.coverage && costs.coverage.incomplete ? "The bounded recent-event ring may omit older events from this window; affected cost estimates are Unknown." : "Aggregates cover the available recent-event ring for the last " + costs.window_hours + " hours.") + " " + (state.ledger_durability && state.ledger_durability.enabled ? "The metadata ledger is persisted asynchronously with bounded rotation and a 30-day retention window." : "Durable ledger storage is not enabled; the in-memory ring is lost when the gateway restarts.") + " This is not a billing system." })
     ]);
     [ ["Alias", costs.alias], ["Provider", costs.provider], ["Model", costs.model] ].forEach(function (group) {
       var entries = Object.keys(group[1] || {}).sort();

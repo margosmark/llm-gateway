@@ -155,8 +155,11 @@ ids. The gateway substitutes the upstream model id for the chosen route and
 never sends the alias upstream, and the request ledger records both the
 alias you asked for and the provider and model that actually served it.
 Metadata-only outcomes are persisted asynchronously on the state volume with
-bounded rotation and a 30-day retention window; the Status view reports the
-current durability mode. This is not a billing system.
+bounded rotation and a 30-day retention window when durable ledger storage is
+enabled; otherwise only the bounded in-memory ring is available and is lost
+when the gateway restarts. The Status view reports the current durability
+mode and marks aggregates Unknown when evictions may omit in-window events.
+This is not a billing system.
 
 ```text
 Alias: coding

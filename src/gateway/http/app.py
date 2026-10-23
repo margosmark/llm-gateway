@@ -678,7 +678,7 @@ class GatewayApp:
                 "limits": self.limits.all(),
                 "ledger": annotate_events(self.ledger.recent(limit=25)) if self.ledger else [],
                 "totals": self.ledger.totals() if self.ledger else {},
-                "usage_costs": aggregate_usage(self.ledger.recent(limit=10_000), window_hours=24) if self.ledger else {"window_hours": 24, "alias": {}, "provider": {}, "model": {}},
+                "usage_costs": aggregate_usage(self.ledger.recent(limit=10_000), window_hours=24, evicted_events=self.ledger.evicted) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
                 "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),

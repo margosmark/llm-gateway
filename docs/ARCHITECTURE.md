@@ -49,9 +49,11 @@ for disk I/O.
 The Status view reports whether persistence is enabled and the declared
 30-day retention window. Local usage aggregates cover the last 24 hours and
 are computed from token counters and published prices, with source and
-observation date; a missing price remains Unknown. This estimate is not a
-provider bill. Totals are reconstructed from the restored ring,
-not a lifetime accounting source.
+observation date; a missing price remains Unknown. Because aggregation uses
+the bounded recent-event ring, evictions that may include in-window events
+mark cost estimates Unknown rather than presenting a partial sum. This
+estimate is not a provider bill. Totals are reconstructed from the restored
+ring, not a lifetime accounting source.
 
 The open circuits are the exception: they are written to
 `circuits.json` in the state directory, because a gateway that restarts

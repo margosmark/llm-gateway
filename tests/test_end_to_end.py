@@ -732,7 +732,7 @@ class ConsoleApiTests(unittest.TestCase):
         status, payload, _ = self.harness.request("GET", "/owner/api/state")
         self.assertEqual(status, 200)
         self.assertEqual(payload["usage_costs"]["window_hours"], 24)
-        self.assertEqual(set(payload["usage_costs"]) - {"window_hours"}, {"alias", "provider", "model"})
+        self.assertEqual(set(payload["usage_costs"]) - {"window_hours", "coverage"}, {"alias", "provider", "model"})
         self.assertIn("enabled", payload["ledger_durability"])
         self.assertFalse(payload["ledger_durability"]["billing_system"])
 
