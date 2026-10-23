@@ -151,13 +151,16 @@ class RequestLedger:
         self._persistence = LedgerPersistence(persistence_path) if persistence_path else None
         self._totals = {"requests": 0, "errors": 0, "fallbacks": 0, "rate_limited": 0, "exhausted": 0}
         if self._persistence:
+            loaded: list[RequestEvent] = []
             for row in self._persistence.load(capacity):
                 try:
-                    self._events.append(RequestEvent(**row))
+                    event = RequestEvent(**row)
                 except TypeError:
                     continue
-            for event in self._events:
+                loaded.append(event)
                 self._count(event)
+            self._evicted = max(0, len(loaded) - capacity)
+            self._events.extend(loaded[-capacity:])
 
     def _count(self, event: RequestEvent) -> None:
         self._totals["requests"] += 1

@@ -54,7 +54,10 @@ class LedgerPersistence:
                             continue
             except FileNotFoundError:
                 continue
-        return list(rows.values())[-limit:]
+        # Return every retained row so callers can restore cumulative totals
+        # and detect when the bounded in-memory ring is only a partial view.
+        # The durable input itself is bounded by MAX_BYTES * (rotations + 1).
+        return list(rows.values())
 
     def flush(self, timeout: float = 5.0) -> bool:
         deadline = time.monotonic() + timeout
