@@ -166,8 +166,8 @@ check("phase policy editor has only the three supported phases and enabled-model
   assert(source.includes('text: "When uncertain"'));
 });
 
-check("existing phase policy is sent unchanged unless explicitly removed", function () {
-  assert(source.includes("if (phaseEnabled.checked || (phasePolicy && !removePhasePolicy.checked))"));
+check("removing a phase policy overrides the enabled toggle", function () {
+  assert(source.includes("if (!removePhasePolicy.checked && (phaseEnabled.checked || phasePolicy))"));
   assert(source.includes("phase_routing: phaseRouting"));
   assert(source.includes('text: "Remove phase policy"'));
 });
