@@ -262,6 +262,13 @@ gpt-6-luna:  context_window 272,000
               effective limit 258,400       ← 272,000 less the provider's 5% headroom
 ```
 
+The gateway's catalogue reports the provider's full working window. The
+OpenCode plugin displays a **working input budget** as its context value:
+the gateway's limit minus an 8,192-token output reserve. For example, the
+ChatGPT/Codex route's 272,000-token working window is shown as 250,208 input
+tokens plus 8,192 output tokens. The reserve is an OpenCode-side allocation,
+not a claim that the provider publishes a separate output limit.
+
 At the **alias** level the same rule applies, and it matters more: an alias
 may be served by a fallback, so its limit is the **smallest limit among the
 routes that could serve it**. If any eligible route's limit is not

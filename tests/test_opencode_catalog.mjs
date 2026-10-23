@@ -10,9 +10,11 @@ const row = (id, limit, known = limit !== null, efforts = ["low", "high", "ultra
   primary_reasoning_efforts: efforts,
 })
 const [known, unknown] = catalogue({ object: "list", data: [row("chatgpt", 258400), row("pm", null)] })
-assert.equal(known.context, 258400)
+// OpenCode displays the working input budget as context; the gateway's
+// provider window is still carried in the input budget calculation.
+assert.equal(known.context, 250208)
 assert.equal(known.input, 250208)
-assert.equal(unknown.context, 200000)
+assert.equal(unknown.context, 191808)
 assert.equal(unknown.input, 191808)
 assert.match(unknown.name, /upstream unknown/)
 // Every published level is forwarded: the gateway's data, not a curated list.
