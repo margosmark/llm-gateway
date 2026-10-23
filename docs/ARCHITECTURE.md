@@ -147,9 +147,18 @@ timing at all. See `REVIEW.md` R28.
 A route's context limit is the **smallest applicable constraint**: the
 provider's working window (not the ceiling it publishes for a config
 override), less the share it reserves for its own system prompt, tool
-overhead and output. At the alias level it is the smallest limit among the
-routes that could serve the request, and **Unknown** if any eligible route's
-limit is not published - a bound that cannot be verified is not a bound.
+overhead and output where the provider publishes one. At the alias level it
+is the smallest limit among the routes that could serve the request, and
+**Unknown** if any eligible route's limit is not published - a bound that
+cannot be verified is not a bound.
+
+OpenCode Go's `/v1/models` response lists IDs only. Its official endpoint
+table identifies the exact model behind a documented route, so the snapshot
+may use a context window from that *model provider's* official documentation
+when both links are established. It currently records MiMo-V2.6-Flash at
+1,048,576 tokens (with 131,072 maximum output) and MiniMax M3.1 Flash at
+1,000,000 tokens. A Go price tier is not a window, and a model lacking this
+evidence remains Unknown.
 
 The limit is reported, not enforced. The gateway has no tokenizer, so it does
 not count a prompt's tokens; the provider is the authority.
@@ -163,11 +172,11 @@ route supports function tools. It carries no provider inventory, no ledger,
 no credential and no unpublished route, and it makes no provider call.
 
 `integrations/opencode/` is an OpenCode V2 provider plugin that reads it and
-publishes the aliases into `/models`. Where the gateway reports Unknown, the
-plugin applies an **owner-chosen 200,000-token client-side budget** and says
-so in the model's display name; that budget is OpenCode's own context
-management input, not a claim about any provider's window, and the gateway's
-answer stays Unknown.
+publishes the aliases into `/models`. It uses a documented alias limit when
+one exists. Only where the gateway still reports Unknown does it apply an
+**owner-chosen 200,000-token client-side budget** and say so in the model's
+display name; that budget is OpenCode's own context-management input, not a
+claim about a provider's window.
 
 ## Provider seam
 

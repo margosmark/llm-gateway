@@ -82,11 +82,25 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(models["deepseek-v4.1-flash"]["monthly_limit_usd"], 80.0)
         self.assertEqual(models["gpt-6-luna"]["monthly_limit_usd"], 15.0)
         self.assertEqual(models["mimo-v2.6-flash"]["monthly_limit_usd"], 60.0)
+        self.assertEqual(models["minimax-m3.1-flash"]["monthly_limit_usd"], 20.0)
+        self.assertNotIn("minimax-m3.1-flash-free", models)
+
+    def test_the_snapshot_keeps_model_provider_context_and_thinking_evidence_separate(self) -> None:
+        models = json.loads(_default_snapshot_path().read_text(encoding="utf-8"))["models"]
+        mimo = models["mimo-v2.6-flash"]
+        self.assertEqual(mimo["context_window"], 1_048_576)
+        self.assertEqual(mimo["context_limit"], 1_048_576)
+        self.assertEqual(mimo["max_output_tokens"], 131_072)
+        self.assertEqual(mimo["context_source"], "https://platform.xiaomimimo.com/docs/en-US/quick-start/model")
+        minimax = models["minimax-m3.1-flash"]
+        self.assertEqual(minimax["context_window"], 1_000_000)
+        self.assertEqual(minimax["reasoning_efforts"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(minimax["context_source"], "https://platform.minimax.io/docs/guides/text-generation")
 
     def test_the_snapshot_marks_the_free_models(self) -> None:
         snapshot = json.loads(_default_snapshot_path().read_text(encoding="utf-8"))
         models = snapshot["models"]
-        for model_id in ("beam-free", "longcat-2.5-preview-free", "minimax-m3.1-flash-free"):
+        for model_id in ("beam-free", "longcat-2.5-preview-free"):
             self.assertIsNone(models[model_id]["monthly_limit_usd"])
             self.assertEqual(models[model_id]["limits_source"], "published_estimate")
 
@@ -114,7 +128,10 @@ class OpenCodeGoAdapterTests(unittest.TestCase):
         )
 
     def test_catalogue_ids_are_joined_to_the_published_metadata(self) -> None:
-        payload = json.dumps({"data": [{"id": "gpt-6-luna"}, {"id": "mimo-v2.6-flash"}, {"id": "omen-alpha"}]}).encode()
+        payload = json.dumps({"data": [
+            {"id": "gpt-6-luna"}, {"id": "mimo-v2.6-flash"},
+            {"id": "minimax-m3.1-flash"}, {"id": "omen-alpha"},
+        ]}).encode()
         adapter = self._adapter([UpstreamResponse(200, {}, payload, None, "application/json")])
         models = adapter.list_models()
         by_id = {m.model_id: m for m in models}
@@ -122,6 +139,10 @@ class OpenCodeGoAdapterTests(unittest.TestCase):
         self.assertEqual(by_id["gpt-6-luna"].monthly_limit_usd, 15.0)
         self.assertEqual(by_id["gpt-6-luna"].retention_class, "30_days")
         self.assertEqual(by_id["mimo-v2.6-flash"].dialect, DIALECT_OPENAI_CHAT)
+        self.assertEqual(by_id["mimo-v2.6-flash"].context_limit, 1_048_576)
+        self.assertEqual(by_id["mimo-v2.6-flash"].max_output_tokens, 131_072)
+        self.assertEqual(by_id["minimax-m3.1-flash"].context_limit, 1_000_000)
+        self.assertEqual(by_id["minimax-m3.1-flash"].reasoning_efforts, ("low", "medium", "high", "xhigh", "max"))
         # A model the provider serves but does not document stays unknown.
         self.assertEqual(by_id["omen-alpha"].dialect, "")
         self.assertIsNone(by_id["omen-alpha"].monthly_limit_usd)

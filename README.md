@@ -212,13 +212,15 @@ primary route publishes is offered as a `#variant`.
 
 Two rules the plugin keeps:
 
-* **Unknown context stays honest.** OpenCode requires a number, so an alias
-  whose gateway limit is Unknown (any alias with an OpenCode Go route,
-  because Go publishes no windows) gets the **owner-chosen 200,000-token
-  OpenCode working budget** and is labelled
-  `(200k client budget; upstream unknown)`. That number is a client-side
-  budget for OpenCode's own context management — it is **not** a provider
-  guarantee, and the gateway still reports the limit as Unknown.
+* **Documented windows are used; Unknown stays honest.** The Go catalogue
+  itself returns only IDs, but its official endpoint table identifies the
+  exact model it serves. Where that model's own official documentation
+  publishes a window, the gateway records it: MiMo-V2.6-Flash is 1,048,576
+  tokens with a 131,072-token maximum completion, and MiniMax M3.1 Flash is
+  1,000,000 tokens. An alias uses the smallest documented route limit. A
+  model without that evidence still gets the **owner-chosen 200,000-token
+  OpenCode working budget**, labelled `(200k client budget; upstream
+  unknown)`. That is a client-side fallback, not a provider guarantee.
 * **A failed read invents nothing.** If the catalogue cannot be read, the
   plugin warns and lists no gateway aliases; a failed *refresh* keeps the
   last complete inventory rather than erasing the model you had selected.
@@ -248,9 +250,12 @@ At the **alias** level the same rule applies, and it matters more: an alias
 may be served by a fallback, so its limit is the **smallest limit among the
 routes that could serve it**. If any eligible route's limit is not
 published, the alias's limit is **Unknown** - a bound that cannot be
-verified is not a bound. An alias that mixes a ChatGPT route with an
-OpenCode Go route therefore reports Unknown, because the Go provider
-publishes no context windows.
+verified is not a bound. OpenCode Go's own catalogue returns only IDs, but
+its published endpoint table names the exact model served. The gateway uses
+a model-provider context window only when both pieces of official evidence
+exist; its current snapshot records MiMo-V2.6-Flash at 1,048,576 and
+MiniMax M3.1 Flash at 1,000,000 tokens. A pricing tier (for example,
+`≤ 272K`) is never treated as a context guarantee.
 
 The limit is **reported, not enforced**. The gateway has no tokenizer, so
 it does not count a prompt's tokens; the provider is the authority on what
@@ -489,10 +494,12 @@ them.
 * **The bridge is verified against a recorded corpus**, not yet against live
   provider captures. The corpus and its round-trip runner are in
   `tests/fixtures/bridge_corpus.json`.
-* **OpenCode Go publishes no context windows**, so an alias with an
-  OpenCode Go route reports an unknown context limit. That is the honest
-  answer: the Go service's own limit is what matters, and it does not
-  publish it.
+* **OpenCode Go's catalogue itself carries no context field.** A Go route
+  gets a context limit only when the Go endpoint table identifies the exact
+  model *and* that model's official documentation publishes a window. This
+  currently covers MiMo-V2.6-Flash and MiniMax M3.1 Flash; a service-side
+  cap not documented by Go would still win, and a model without both sources
+  stays Unknown rather than inheriting a price tier or a guess.
 * **Usage and cost are not yet recorded.** The bridge reads the provider's
   token counters and the catalogue publishes per-token prices, but the
   request ledger does not store either yet, so the Status page reports

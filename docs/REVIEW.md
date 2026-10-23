@@ -1164,7 +1164,9 @@ is still the provider that decides what fits.
 **Evidence:** `tests/test_opencode_catalog.py` - published aliases only, an
 unknown limit reported as unknown, the finite case reported exactly,
 no provider call on a page read, no provider inventory in the response, and
-host/forwarded-header refusals. `tests/test_opencode_catalog.mjs` - the
+host/forwarded-header refusals; it also proves that documented MiMo and
+MiniMax windows remove the client budget and that MiniMax's published effort
+levels reach the selector catalogue. `tests/test_opencode_catalog.mjs` - the
 plugin's own validator: a non-private or non-`/v1` base URL is refused, a
 duplicate or malformed alias is refused, a limit too small to be usable is
 refused, and the 200,000 budget is applied only when the limit is unknown.
@@ -1221,11 +1223,42 @@ conversion is refused rather than converted.
 
 **Planned as** `docs/TODO.md` item **T4**.
 
+### R36 — A configured Go route kept a retired MiniMax model ID — **open**
+**Severity: medium availability and metadata correctness.** *(open; owner
+approved the replacement, pending deployment and the explicit console edit)*
+
+The Go documentation and live catalogue now name `minimax-m3.1-flash`; the
+older `minimax-m3.1-flash-free` is no longer listed. Existing `coding` and
+`flash` aliases still name the retired ID. The router safely continues a
+`route_gone` failure to an authorised fallback (R32), but that is recovery,
+not a current route: the stale entry keeps the alias context Unknown and
+prevents the documented MiniMax thinking levels from reaching the selector.
+
+**Resolution in code.** The dated Go snapshot now carries the current ID,
+its official endpoint, its 1,000,000-token model window and its documented
+`low`/`medium`/`high`/`xhigh`/`max` effort levels. It deliberately does
+**not** rewrite an owner's configured alias during a catalogue refresh: a
+route change is a privacy and fallback-policy decision, so it remains an
+explicit trusted-console action.
+
+**Required owner action after deploying this change:** refresh the OpenCode
+Go catalogue, replace `minimax-m3.1-flash-free` with
+`minimax-m3.1-flash` in `coding`'s fallback and `flash`'s primary, retain the
+existing fallback-authorisation choices, save, then test each alias. This
+finding closes only after the deployed catalogue and `/v1/alias-catalog`
+show the documented limits and the routes are exercised.
+
+**Regression evidence:** `tests/test_adapters.py` asserts the current ID,
+documented context and effort metadata, and that the retired ID is absent;
+`tests/test_opencode_catalog.py` proves those windows make aliases finite
+and publishes the MiniMax effort levels.
+
 ## Recommended order
 
-Findings R0-R27 and R28-R35 are closed or superseded. **R26 is the only
-open finding**; it is planned in `docs/TODO.md` (T2). The register is kept
-so the next agent can see what was already paid for in time.
+Findings R0-R27 and R28-R35 are closed or superseded. **R26 and R36 are
+open**; R26 is planned in `docs/TODO.md` (T2), while R36 is the explicit
+post-deployment route replacement above. The register is kept so the next
+agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
 2. Fix and test **R1**, **R8**, and **R9** before presenting ChatGPT/Codex or
@@ -1238,7 +1271,8 @@ so the next agent can see what was already paid for in time.
 6. Tighten **R4** and **R12**, then make observability truthful and complete in
    **R5**.
 7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6** and **R14** with targeted tests and runbook changes. R15 is superseded by removal of the setup surface.
-8. Fix **R26** (no usage or cost recorded) — planned as `docs/TODO.md` T2.
+8. Complete **R36**'s explicit post-deployment route replacement, then fix
+   **R26** (no usage or cost recorded) — planned as `docs/TODO.md` T2.
    R25 and R27 are closed by R35 and R27's own resolutions.
 ## Trusted LAN admin-mode candidate update
 

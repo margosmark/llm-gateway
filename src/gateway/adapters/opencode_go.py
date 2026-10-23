@@ -188,6 +188,15 @@ class OpenCodeGoAdapter:
                 ModelInfo(
                     model_id=model_id,
                     dialect=dialect,
+                    context_window=published.get("context_window")
+                    if isinstance(published.get("context_window"), int)
+                    else None,
+                    context_limit=published.get("context_limit")
+                    if isinstance(published.get("context_limit"), int)
+                    else None,
+                    max_output_tokens=published.get("max_output_tokens")
+                    if isinstance(published.get("max_output_tokens"), int)
+                    else None,
                     reasoning_efforts=tuple(published.get("reasoning_efforts") or ()),
                     retention_class=str(published.get("retention_class") or "unknown"),
                     monthly_limit_usd=published.get("monthly_limit_usd")

@@ -46,6 +46,47 @@ class CatalogTests(unittest.TestCase):
         _, body, _ = self.harness.request("GET", "/v1/alias-catalog")
         self.assertEqual(body["data"], [])
 
+    def test_documented_go_windows_remove_the_client_budget_and_publish_efforts(self):
+        with self.harness.config.mutate() as config:
+            config.providers["chatgpt_codex"].models["gpt-6-luna"].context_limit = 258400
+            config.providers["opencode_go"].models["minimax-m3.1-flash"] = ModelEntry(
+                model_id="minimax-m3.1-flash",
+                dialect="openai_chat",
+                enabled=True,
+                context_window=1_000_000,
+                context_limit=1_000_000,
+                reasoning_efforts=["low", "medium", "high", "xhigh", "max"],
+            )
+            config.providers["opencode_go"].models["mimo-v2.6-flash"] = ModelEntry(
+                model_id="mimo-v2.6-flash",
+                dialect="openai_chat",
+                enabled=True,
+                context_window=1_048_576,
+                context_limit=1_048_576,
+            )
+            config.aliases["coding"] = Alias(
+                name="coding", enabled=True,
+                primary=RouteRef("chatgpt_codex", "gpt-6-luna"),
+                fallbacks=[
+                    RouteRef("opencode_go", "minimax-m3.1-flash"),
+                    RouteRef("opencode_go", "mimo-v2.6-flash"),
+                ],
+            )
+            config.aliases["flash"] = Alias(
+                name="flash", enabled=True,
+                primary=RouteRef("opencode_go", "minimax-m3.1-flash"),
+                fallbacks=[RouteRef("opencode_go", "mimo-v2.6-flash")],
+            )
+        _, body, _ = self.harness.request("GET", "/v1/alias-catalog")
+        by_id = {item["id"]: item for item in body["data"]}
+        self.assertEqual(by_id["coding"]["context"]["limit"], 258400)
+        self.assertTrue(by_id["coding"]["context"]["known"])
+        self.assertEqual(by_id["flash"]["context"]["limit"], 1_000_000)
+        self.assertEqual(
+            by_id["flash"]["primary_reasoning_efforts"],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+
     def test_host_and_forwarded_headers_are_refused(self):
         for headers in ({"Host": "evil.invalid"}, {"Forwarded": "host=evil.invalid"}):
             status, _, _ = self.harness.request("GET", "/v1/alias-catalog", headers=headers)

@@ -119,10 +119,23 @@ hand-edited. **An undocumented model is refused, not guessed.**
 * Per-model monthly limits with windows of 5-hour 20%, weekly 50%, monthly
   100%. Free models (`beam-free`, `longcat-2.5-preview-free`,
   `minimax-m3.1-flash-free`) stay usable after the allowance is exhausted.
-* **The provider publishes no context windows.** All 37 models have an
-  unknown context limit, so an alias with an OpenCode Go route reports an
-  unknown limit. That is the honest answer, not a gap to fill from a
-  vendor's site: the Go *service's* limit is what matters.
+* **The provider's catalogue publishes no context fields.** A Go route gets
+  a context window only when the Go endpoint table identifies the exact
+  model **and** that model provider's official documentation publishes the
+  window. The dated snapshot records MiMo-V2.6-Flash at 1,048,576 tokens
+  (maximum completion 131,072) and MiniMax M3.1 Flash at 1,000,000 tokens.
+  This is not inferred from a Go price tier. A model without both pieces of
+  evidence remains Unknown; a documented Go service-side cap would take
+  precedence over the model window.
+* **Thinking is model-specific.** MiniMax M3.1 Flash documents
+  `reasoning_effort` levels `low`, `medium`, `high`, `xhigh` and `max`
+  (default `max`; it cannot be turned off), so those appear as OpenCode
+  variants when it is the primary route. MiMo-V2.6-Flash documents a binary
+  `thinking.type` control (`enabled` / `disabled`) and returns
+  `reasoning_content`; it documents no effort vocabulary, so the gateway
+  does not invent level variants for it. An effort that a fallback does not
+  publish remains a preference: it is dropped only for the serving fallback
+  and the ledger records the degradation.
 * Retention: 30 days for the GPT/Luna, Grok, Claude and Beam models; 0 days
   for GLM, Kimi, MiMo, LongCat, Qwen and Hy; **training permitted** for the
   Gemini and Muse models. This is why cross-provider fallback is a privacy
