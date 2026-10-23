@@ -268,6 +268,15 @@ routes are *all* unevidenced stays text-only in OpenCode until the evidence
 exists. This is the same honesty rule the gateway applies to context
 windows.
 
+Each provider keeps its **own** evidence map, because the two reach the
+capability from different places: OpenCode Go's lives in
+`scripts/build_go_catalog_snapshot.py` and is baked into the dated
+`data/go_catalog.json`, while ChatGPT/Codex's lives in
+`src/gateway/adapters/chatgpt_codex.py` because its catalogue endpoint
+publishes no image field to transcribe. Adding a model to one has no effect
+on the other. Currently evidenced: `minimax-m3.1-flash` (MiniMax) and
+`gpt-5.6-terra` (OpenAI).
+
 `integrations/opencode/` is an OpenCode V2 provider plugin that reads that
 catalogue, registers one provider (`personal-gateway`) and refreshes every
 60 seconds. Install it in `~/.config/opencode/opencode.jsonc`:
