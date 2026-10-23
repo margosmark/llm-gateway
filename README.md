@@ -122,11 +122,16 @@ catalogue reads never contact OpenCode Console.
 Jev is a structured-decision provider, not a completion model. Its native API
 is available at `POST /v1/systemone`; send a model, a state string/object/array,
 and one or more named `noul`, `choice`, or `score` questions. The gateway
-returns OpenCode Console's structured response unchanged. Image assets, `box` questions, and multipart requests are refused for now rather than silently forwarded. A direct System One
-call sends its supplied state and questions to OpenCode Console; neither is persisted
-or written to gateway logs or the request ledger. Direct System One calls are
-separate from phase inference: Jev inference is an explicit per-alias opt-in
-used only for phase selection, as described below.
+returns OpenCode Console's structured response unchanged. This native JSON
+endpoint refuses image assets, `box` questions, and multipart bodies; that
+restriction is specific to System One and does not mean the chat API is
+text-only. Image input is accepted on a route only when that exact model has
+published image-capability evidence, and the router excludes incapable routes
+for image requests (see the selector-catalogue section below). A direct System
+One call sends its supplied state and questions to OpenCode Console; neither is
+persisted or written to gateway logs or the request ledger. Separately, Jev
+inference is an explicit per-alias opt-in used only for phase selection, as
+described below.
 
 ### OpenCode Go
 
