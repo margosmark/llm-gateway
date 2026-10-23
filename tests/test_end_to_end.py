@@ -12,6 +12,7 @@ import socket
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -32,7 +33,7 @@ from gateway.http.app import GatewayApp
 from gateway.logging import RequestLogger
 from gateway.http.core import Server
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
-from gateway.observability import LimitStore, RequestLedger
+from gateway.observability import LimitStore, RequestEvent, RequestLedger, utc_now_iso
 
 FAKE_PROVIDER = "chatgpt_codex"
 
@@ -749,6 +750,23 @@ class ConsoleApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertTrue(payload["ok"])
+
+    def test_state_loads_published_prices_once_for_many_priced_ledger_rows(self) -> None:
+        for index in range(40):
+            self.harness.router._ledger.record(RequestEvent(
+                request_id=f"price-cache-{index}", timestamp=utc_now_iso(),
+                requested_alias="sample", serving_provider="opencode_go",
+                serving_model="claude-haiku-5-5", token_counters={"prompt_tokens": 100, "completion_tokens": 10},
+            ))
+        from gateway.costs import published_prices
+        with patch("gateway.http.app.published_prices", wraps=published_prices) as load_prices:
+            status, payload, _ = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(load_prices.call_count, 1)
+        matching = [row for row in payload["ledger"] if row["request_id"].startswith("price-cache-")]
+        self.assertEqual(len(matching), 25)
+        self.assertTrue(all(row["cost"]["amount_usd"] is not None for row in matching))
+        self.assertIn("sample", payload["usage_costs"]["alias"])
 
     def test_state_reports_usage_costs_and_durability(self) -> None:
         status, payload, _ = self.harness.request("GET", "/owner/api/state")

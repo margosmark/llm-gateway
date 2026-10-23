@@ -22,7 +22,7 @@ from gateway.bridge.aggregate import aggregate_stream
 from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_chat
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import convert_stream, sse_done
-from gateway.costs import aggregate_usage, annotate_events, response_token_counters, stream_token_counters
+from gateway.costs import aggregate_usage, annotate_events, published_prices, response_token_counters, stream_token_counters
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
@@ -661,6 +661,9 @@ class GatewayApp:
                 }
             )
 
+        price_snapshot = published_prices()
+        recent_ledger = self.ledger.recent(limit=25) if self.ledger else []
+        usage_ledger = self.ledger.recent(limit=10_000) if self.ledger else []
         return json_response(
             {
                 "initialized": config.initialized,
@@ -676,9 +679,9 @@ class GatewayApp:
                 "profiles": profiles,
                 "published_models": [alias.name for alias in sorted(config.published_aliases(), key=lambda a: a.name)],
                 "limits": self.limits.all(),
-                "ledger": annotate_events(self.ledger.recent(limit=25)) if self.ledger else [],
+                "ledger": annotate_events(recent_ledger, _prices=price_snapshot),
                 "totals": self.ledger.totals() if self.ledger else {},
-                "usage_costs": aggregate_usage(self.ledger.recent(limit=10_000), window_hours=24, evicted_events=self.ledger.evicted) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
+                "usage_costs": aggregate_usage(usage_ledger, window_hours=24, evicted_events=self.ledger.evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
                 "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),
