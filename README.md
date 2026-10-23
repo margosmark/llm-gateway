@@ -10,7 +10,7 @@ Two providers are in scope:
 |---|---|---|
 | **ChatGPT / Codex** | user-operated device-code authorisation (beta) | Responses API |
 | **OpenCode Go** | API key | Responses, Chat Completions, Anthropic Messages, or Google v1beta — **per model** |
-| **TypeSafe Jev** | API key | Native System One structured decisions (`/v1/systemone`), not chat completions |
+| **OpenCode Console Jev** | API key | Native System One structured decisions (`/v1/systemone`), not chat completions |
 
 ---
 
@@ -112,20 +112,18 @@ A ChatGPT subscription is **not** a guaranteed API or custom-gateway
 entitlement. What your account can actually reach depends on your plan, and
 the console says so rather than implying otherwise.
 
-### TypeSafe Jev / System One
+### OpenCode Console Jev / System One
 
-`Providers → TypeSafe Jev` accepts a TypeSafe API key in the same write-only
+`Providers → OpenCode Console Jev` accepts an OpenCode Console API key in the same write-only
 form as other key-backed providers. Use the explicit **Test** and **Refresh**
 actions before enabling a discovered Jev model. Normal console reads and model
-catalogue reads never contact TypeSafe.
+catalogue reads never contact OpenCode Console.
 
 Jev is a structured-decision provider, not a completion model. Its native API
 is available at `POST /v1/systemone`; send a model, a state string/object/array,
 and one or more named `noul`, `choice`, or `score` questions. The gateway
-returns TypeSafe's structured response unchanged. Image assets, `box`
-questions, multipart requests, and the provider's danger-zone long-context
-mode are refused for now rather than silently forwarded. A direct System One
-call sends its supplied state and questions to TypeSafe; neither is persisted
+returns OpenCode Console's structured response unchanged. Image assets, `box` questions, and multipart requests are refused for now rather than silently forwarded. A direct System One
+call sends its supplied state and questions to OpenCode Console; neither is persisted
 or written to gateway logs or the request ledger. Jev is not used to inspect
 or route chat requests in this release.
 
