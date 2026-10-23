@@ -23,7 +23,15 @@ from pathlib import Path
 
 from gateway.adapters.base import ProviderRequest, ProviderResponse, TestResult
 from gateway.bridge.requests import convert_request, payload_has_image_input
-from gateway.config import Alias, ModelEntry, ProviderState, RouteRef
+from gateway.config import (
+    Alias,
+    JevInference,
+    ModelEntry,
+    PhaseRouting,
+    PhaseRoute,
+    ProviderState,
+    RouteRef,
+)
 from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
 from tests.test_end_to_end import FAKE_PROVIDER, GatewayHarness
 
@@ -235,6 +243,111 @@ class AliasCatalogImagePublicationTests(unittest.TestCase):
                 RouteRef(FAKE_PROVIDER, "gpt-6-luna"), [])
         _, body, _ = harness.request("GET", "/v1/alias-catalog")
         self.assertFalse(body["data"][0]["supports_image_input"])
+
+
+class PhaseRouteImageEnforcementTests(unittest.TestCase):
+    """A phase route is subject to the image rule like any other route.
+
+    The phase policy is an owner-configured *route selection*, not a
+    capability override. A phase route that cannot see an image must be
+    excluded for an image request, with the reason recorded, rather than
+    being served the image anyway.
+    """
+
+    def _harness(self, *, primary_images: bool, phase_images: bool):
+        harness = GatewayHarness()
+        primary = ImageCapableAdapter(FAKE_PROVIDER, DIALECT_OPENAI_RESPONSES)
+        phase = ImageCapableAdapter("opencode_go", DIALECT_OPENAI_CHAT)
+        harness.registry.register(primary)
+        harness.registry.register(phase)
+        with harness.config.mutate() as config:
+            config.providers[FAKE_PROVIDER] = ProviderState(
+                provider_id=FAKE_PROVIDER, kind=FAKE_PROVIDER, state="connected",
+                models={"gpt-6-luna": ModelEntry(
+                    model_id="gpt-6-luna", enabled=True, dialect=DIALECT_OPENAI_RESPONSES,
+                    source="discovered", supports_image_input=primary_images)},
+            )
+            config.providers["opencode_go"] = ProviderState(
+                provider_id="opencode_go", kind="opencode_go", state="connected",
+                models={"mimo-v2.6-flash": ModelEntry(
+                    model_id="mimo-v2.6-flash", enabled=True, dialect=DIALECT_OPENAI_CHAT,
+                    source="discovered", supports_image_input=phase_images)},
+            )
+            config.aliases["coding"] = Alias(
+                name="coding", enabled=True,
+                primary=RouteRef(FAKE_PROVIDER, "gpt-6-luna"),
+                phase_routing=PhaseRouting(
+                    enabled=True,
+                    routes={"plan": PhaseRoute(
+                        phase="plan", route=RouteRef("opencode_go", "mimo-v2.6-flash"))},
+                    inference=JevInference(),
+                ),
+            )
+        return harness, primary, phase
+
+    def _image_request(self, phase: str | None):
+        body = _image_payload()
+        if phase is not None:
+            body["metadata"] = {"personal_gateway": {"phase": phase}}
+        return body
+
+    def test_a_text_only_phase_route_is_excluded_for_an_image_request(self) -> None:
+        harness, primary, phase = self._harness(primary_images=True, phase_images=False)
+        self.addCleanup(harness.close)
+        status, _, _ = harness.request(
+            "POST", "/v1/chat/completions", body=self._image_request("plan"))
+        self.assertEqual(status, 200)
+        # The phase route could not see the image, so it was not served one.
+        self.assertEqual(phase.calls, [])
+        self.assertEqual(len(primary.calls), 1)
+        event = harness.router._ledger.recent()[0]
+        self.assertIn(
+            {"provider": "opencode_go", "model": "mimo-v2.6-flash",
+             "reason": "this model does not support image input"},
+            event["skipped"],
+        )
+
+    def test_an_image_capable_phase_route_serves_the_image_and_is_not_a_fallback(self) -> None:
+        harness, primary, phase = self._harness(primary_images=False, phase_images=True)
+        self.addCleanup(harness.close)
+        status, _, _ = harness.request(
+            "POST", "/v1/chat/completions", body=self._image_request("plan"))
+        self.assertEqual(status, 200)
+        self.assertEqual(primary.calls, [])
+        self.assertEqual(len(phase.calls), 1)
+        self.assertTrue(payload_has_image_input(phase.calls[0].payload, DIALECT_OPENAI_CHAT))
+        event = harness.router._ledger.recent()[0]
+        self.assertEqual(event["serving_provider"], "opencode_go")
+        self.assertEqual(event["phase"], "plan")
+        # The phase route is the primary for its phase, so it is not a fallback.
+        self.assertFalse(event["fallback_used"])
+
+    def test_an_image_request_with_no_capable_phase_route_fails_closed(self) -> None:
+        harness, primary, phase = self._harness(primary_images=False, phase_images=False)
+        self.addCleanup(harness.close)
+        status, payload, _ = harness.request(
+            "POST", "/v1/chat/completions", body=self._image_request("plan"))
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"]["type"], "no_eligible_route")
+        self.assertEqual(primary.calls, [])
+        self.assertEqual(phase.calls, [])
+
+    def test_a_text_only_request_still_uses_the_phase_route(self) -> None:
+        # The image rule must not change text routing: the phase route is
+        # still selected, and still not reported as a fallback.
+        harness, primary, phase = self._harness(primary_images=False, phase_images=False)
+        self.addCleanup(harness.close)
+        status, _, _ = harness.request(
+            "POST", "/v1/chat/completions",
+            body={"model": "coding", "messages": [{"role": "user", "content": "synthetic"}],
+                  "metadata": {"personal_gateway": {"phase": "plan"}}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(phase.calls), 1)
+        self.assertEqual(primary.calls, [])
+        event = harness.router._ledger.recent()[0]
+        self.assertEqual(event["phase"], "plan")
+        self.assertFalse(event["fallback_used"])
 
 
 class SnapshotImageEvidenceTests(unittest.TestCase):

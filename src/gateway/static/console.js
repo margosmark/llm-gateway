@@ -819,6 +819,9 @@
     card.appendChild(el("label", {}, [el("span", { text: "Enable phase routing" }), phaseEnabled]));
     if (phasePolicy) card.appendChild(el("label", {}, [el("span", { text: "Remove phase policy" }), removePhasePolicy]));
     ["plan", "implement", "validate"].forEach(function (phase) { card.appendChild(phaseRows[phase].route.row); });
+    card.appendChild(el("div", { class: "small muted" }, [
+      el("span", { text: "A per-phase effort is stored with the policy and round-trips unchanged, but the gateway does not apply it to the upstream request - the request's own reasoning effort is used instead." })
+    ]));
     card.appendChild(defaultRoute.row);
     card.appendChild(el("h3", { text: "Jev phase inference" }));
     card.appendChild(el("label", {}, [el("span", { text: "Enable Jev inference" }), inferenceEnabled]));
