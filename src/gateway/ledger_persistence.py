@@ -40,18 +40,28 @@ class LedgerPersistence:
 
     def load(self, limit: int) -> list[dict[str, Any]]:
         rows: dict[str, dict[str, Any]] = {}
-        for file in [self.path.with_suffix(self.path.suffix + f".{i}") for i in range(MAX_ROTATIONS, 0, -1)] + [self.path]:
+        now = time.time()
+        files = [self.path.with_suffix(self.path.suffix + f".{i}") for i in range(MAX_ROTATIONS, 0, -1)] + [self.path]
+        for file in files:
+            retained: list[str] = []
             try:
                 with file.open(encoding="utf-8") as source:
                     for line in source:
                         try:
                             row = json.loads(line)
-                            if time.time() - _timestamp(row.get("timestamp")) > RETENTION_SECONDS:
+                            if not isinstance(row, dict) or set(row) - FIELDS:
                                 continue
-                            if set(row) <= FIELDS and isinstance(row.get("request_id"), str):
-                                rows[row["request_id"]] = row
+                            if now - _timestamp(row.get("timestamp")) > RETENTION_SECONDS:
+                                continue
+                            if not isinstance(row.get("request_id"), str):
+                                continue
+                            row = _sanitize_row(row)
+                            rows[row["request_id"]] = row
+                            retained.append(json.dumps(row, separators=(",", ":"), ensure_ascii=True) + "\n")
                         except (ValueError, TypeError):
                             continue
+                # Rewrite every file, physically removing expired and unsafe legacy rows.
+                _rewrite(file, "".join(retained))
             except FileNotFoundError:
                 continue
         # Return every retained row so callers can restore cumulative totals
@@ -83,9 +93,29 @@ class LedgerPersistence:
             finally:
                 self._queue.task_done()
 
+    def _prune_rotations(self) -> None:
+        cutoff = time.time() - RETENTION_SECONDS
+        files = [self.path.with_suffix(self.path.suffix + f".{i}") for i in range(1, MAX_ROTATIONS + 1)]
+        files.append(self.path)
+        for file in files:
+            try:
+                retained = []
+                with file.open(encoding="utf-8") as source:
+                    for line in source:
+                        try:
+                            row = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        if isinstance(row, dict) and _timestamp(row.get("timestamp")) >= cutoff:
+                            retained.append(json.dumps(_sanitize_row(row), separators=(",", ":"), ensure_ascii=True) + "\n")
+                _rewrite(file, "".join(retained))
+            except FileNotFoundError:
+                continue
+
     def _append(self, row: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        encoded = (json.dumps(row, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+        self._prune_rotations()
+        encoded = (json.dumps(_sanitize_row(row), separators=(",", ":"), ensure_ascii=True) + "\n").encode()
         if self.path.exists() and self.path.stat().st_size + len(encoded) > MAX_BYTES:
             oldest = self.path.with_suffix(self.path.suffix + f".{MAX_ROTATIONS}")
             oldest.unlink(missing_ok=True)
@@ -99,6 +129,40 @@ class LedgerPersistence:
             os.write(descriptor, encoded)
         finally:
             os.close(descriptor)
+
+
+def _rewrite(path: Path, content: str) -> None:
+    if not path.exists():
+        return
+    temporary = path.with_name(path.name + ".prune")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(descriptor, content.encode("utf-8"))
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+
+
+def _sanitize_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Strip arbitrary legacy/provider detail while preserving safe metadata."""
+    clean = {key: value for key, value in row.items() if key in FIELDS}
+    attempts = clean.get("attempts")
+    if isinstance(attempts, list):
+        clean_attempts = []
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            safe = {key: item[key] for key in ("provider", "model", "outcome", "error_class") if key in item and isinstance(item[key], (str, type(None)))}
+            if "reason" in item:
+                from gateway.adapters.base import CLASS_MESSAGES
+                from gateway.config import ERROR_UNKNOWN
+                error_class = item.get("error_class", ERROR_UNKNOWN)
+                if not isinstance(error_class, str):
+                    error_class = ERROR_UNKNOWN
+                safe["reason"] = CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
+            clean_attempts.append(safe)
+        clean["attempts"] = clean_attempts
+    return clean
 
 
 def _timestamp(value: Any) -> float:

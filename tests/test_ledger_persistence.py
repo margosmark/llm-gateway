@@ -75,6 +75,33 @@ class DurableLedgerTests(unittest.TestCase):
             decoded = json.loads(path.read_text().splitlines()[0])
             self.assertNotIn("prompt", decoded)
 
+    def test_load_physically_prunes_expired_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.jsonl"
+            expired = {"request_id": "old", "timestamp": "2026-09-01T00:00:00Z", "requested_alias": "a"}
+            fresh = {"request_id": "new", "timestamp": "2026-10-22T00:00:00Z", "requested_alias": "a"}
+            path.write_text(json.dumps(expired) + "\n" + json.dumps(fresh) + "\n")
+            ledger = RequestLedger(persistence_path=path)
+            self.assertEqual([event["request_id"] for event in ledger.recent()], ["new"])
+            self.assertNotIn("old", path.read_text())
+            self.assertIn("new", path.read_text())
+            ledger.close()
+
+    def test_load_redacts_legacy_attempt_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.jsonl"
+            secret = "sk-" + "A" * 28
+            row = {
+                "request_id": "legacy", "timestamp": "2026-10-22T00:00:00Z",
+                "requested_alias": "a", "error_class": "auth",
+                "attempts": [{"provider": "p", "outcome": "error", "error_class": "auth", "reason": secret}],
+            }
+            path.write_text(json.dumps(row) + "\n")
+            ledger = RequestLedger(persistence_path=path)
+            self.assertNotIn(secret, path.read_text())
+            self.assertNotIn(secret, json.dumps(ledger.recent()))
+            ledger.close()
+
     def test_status_declares_retention_and_durability(self) -> None:
         ledger = RequestLedger()
         self.assertEqual(ledger.durability(), {"enabled": False, "retention_days": 30, "billing_system": False})

@@ -405,6 +405,28 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual([entry["id"] for entry in payload["data"]], ["coding"])
 
+    def test_provider_secret_in_error_code_never_reaches_api_state_or_ledger(self) -> None:
+        secret = "sk-" + "E" * 32
+        durable_ledger_path = self.harness.data_dir / "request-ledger.jsonl"
+        durable_ledger = RequestLedger(persistence_path=durable_ledger_path)
+        self.addCleanup(durable_ledger.close)
+        self.harness.router._ledger = durable_ledger
+        self.harness.app.ledger = durable_ledger
+        self.harness.adapter.fail_with = AdapterError("auth", message=secret, upstream_code=secret)
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"].enabled = True
+        status, response, _ = self.harness.request(
+            "POST", "/v1/chat/completions",
+            body={"model": "coding", "messages": [{"role": "user", "content": "synthetic"}]},
+        )
+        self.assertEqual(status, 502)
+        state_status, state, _ = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(state_status, 200)
+        combined = json.dumps({"response": response, "state": state, "ledger": self.harness.router._ledger.recent()})
+        self.assertNotIn(secret, combined)
+        self.assertEqual(response["error"]["type"], "auth")
+        self.assertEqual(response["error"]["detail"]["attempts"][0]["error_class"], "auth")
+
     def test_completion_is_routed_and_attributed(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True
