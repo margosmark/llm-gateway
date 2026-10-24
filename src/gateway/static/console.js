@@ -133,6 +133,7 @@
   }
 
   function providerLabel(providerId) {
+    if (providerId === "anthropic") return "Anthropic";
     if (providerId === "chatgpt_codex") return "ChatGPT / Codex";
     if (providerId === "opencode_go") return "OpenCode Go";
     if (providerId === "opencode_console") return "OpenCode Console Jev / System One";

@@ -126,7 +126,9 @@ published prices only and display their source and observation date. A model
 without published prices reports **Unknown**. This is not a billing system.
 
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
-page load or configuration save never calls a provider. Credentials are stored
+page load or configuration save never calls a provider. Anthropic uses the
+native Messages API with a separately stored API key; its catalogue is loaded
+only when **Refresh model catalog** is selected. Credentials are stored
 separately and never returned by state or status APIs.
 
 ---
