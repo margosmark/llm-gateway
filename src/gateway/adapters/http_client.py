@@ -21,7 +21,11 @@ per-origin connection pool. It is deliberately small and explicit:
   the boundary is the head of a **streamed** response: an SSE provider
   sends its status line before it generates anything, so a stream whose
   head has not arrived within the connect budget has stalled and is
-  judged by the connect budget too. A *buffered* head may legitimately
+  judged by the connect budget too. The read budget for the frames that
+  follow is armed on the socket *directly*, because ``getresponse()``
+  hands the socket to the response for any ``will_close`` response -
+  every stream has no Content-Length - and the connection no longer
+  holds it. A *buffered* head may legitimately
   follow the whole generation, so silence there is judged by the read
   budget, never the connect budget.
 * **Credentials never appear in an exception.** The failures raised here are
@@ -362,6 +366,14 @@ class UpstreamClient:
                     # anything, so a head that has not arrived is a stall
                     # and not a slow generation.
                     self._arm(connection, self.connect_timeout)
+                # Hold the socket itself across getresponse(): for a
+                # response without a Content-Length - every SSE stream -
+                # will_close is true and getresponse() passes the socket
+                # to the response by closing the connection's reference
+                # to it. The socket itself lives on inside the response's
+                # file object; this reference is what the read budget is
+                # armed on below.
+                sock = connection.sock
                 response = connection.getresponse()
             except TimeoutError:
                 raise AdapterError(
@@ -373,11 +385,21 @@ class UpstreamClient:
                     ),
                     provider_id=provider_id,
                 ) from None
-            if stream:
+            if stream and sock is not None:
                 # --- read budget: every frame that follows. The head is
                 # in, so the stream is generating, and each frame within
                 # this budget counts as progress.
-                self._arm(connection, self.timeout)
+                #
+                # The socket is armed directly, not through the
+                # connection: getresponse() has already handed the socket
+                # to the response on this path (connection.sock is None),
+                # so re-arming only the connection would be a silent
+                # no-op that leaves every frame judged by the connect
+                # budget it was armed with for the head. The socket is
+                # the reference held just above getresponse(); the guard
+                # is defensive, since a request that got this far always
+                # had one.
+                sock.settimeout(self.timeout)
         except AdapterError:
             connection.close()
             raise
