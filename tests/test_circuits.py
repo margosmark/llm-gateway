@@ -31,6 +31,7 @@ from pathlib import Path
 
 from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
+    EXHAUSTED_MAX_SECONDS,
     MAX_BACKOFF_SECONDS,
     MAX_ENTRIES,
     MAX_ENTRY_AGE_SECONDS,
@@ -214,6 +215,64 @@ class CircuitStoreTests(unittest.TestCase):
             MAX_BACKOFF_SECONDS,
         )
 
+    # --- the bounded exhaustion policy -----------------------------------
+
+    def test_an_exhausted_provider_hold_never_exceeds_the_cap(self) -> None:
+        """However many times the account reports exhaustion, the local
+        hold never grows past the configured cap: a reopened subscription
+        window must not sit behind an opaque multi-hour circuit."""
+        for _ in range(6):
+            self.store.record_failure("chatgpt_codex", "gpt-6-luna", "exhausted", base_seconds=300)
+            self.clock.advance(EXHAUSTED_BASE_SECONDS + 5)
+        self.assertLessEqual(
+            self.store.remaining("chatgpt_codex"),
+            EXHAUSTED_MAX_SECONDS,
+            "a provider-wide exhausted hold must never exceed the cap",
+        )
+        self.assertLessEqual(
+            self.store.remaining("chatgpt_codex", "gpt-6-luna"),
+            EXHAUSTED_MAX_SECONDS,
+        )
+
+    def test_the_cap_beats_a_larger_alias_cooldown_for_exhaustion(self) -> None:
+        self.store.record_failure("chatgpt_codex", "gpt-6-luna", "exhausted", base_seconds=7200)
+        remaining = self.store.remaining("chatgpt_codex", "gpt-6-luna")
+        self.assertLessEqual(
+            remaining,
+            EXHAUSTED_MAX_SECONDS,
+            "the bounded exhaustion cap wins over a larger alias cooldown",
+        )
+        self.assertGreaterEqual(remaining, EXHAUSTED_BASE_SECONDS)
+
+    def test_the_exhausted_cap_is_configurable(self) -> None:
+        store = CircuitStore(exhausted_max_seconds=600)
+        store.record_failure("chatgpt_codex", "gpt-6-luna", "exhausted", base_seconds=300)
+        self.assertLessEqual(store.remaining("chatgpt_codex", "gpt-6-luna"), 600)
+        self.assertEqual(store.exhausted_max_seconds, 600)
+
+    # --- recovery telemetry ----------------------------------------------
+
+    def test_details_expose_the_recovery_telemetry(self) -> None:
+        opened_at = self.clock.now
+        self.store.record_failure("chatgpt_codex", "gpt-6-luna", "exhausted", base_seconds=300)
+        entry = self.store.details()["chatgpt_codex/*"]
+        self.assertEqual(entry["scope"], "provider")
+        self.assertEqual(entry["error_class"], "exhausted")
+        self.assertEqual(entry["failures"], 1)
+        self.assertEqual(entry["opened_at"], opened_at)
+        self.assertEqual(entry["state"], "open")
+        self.assertFalse(entry["probe_in_flight"])
+        self.assertEqual(entry["next_probe_at"], entry["until"])
+
+        # Once the window passes and a probe is claimed, the telemetry says
+        # a probe is in flight and that the route is eligible now.
+        self.clock.advance(EXHAUSTED_MAX_SECONDS + 10)
+        self.store.check("chatgpt_codex", "gpt-6-luna")
+        entry = self.store.details()["chatgpt_codex/*"]
+        self.assertEqual(entry["state"], "half_open")
+        self.assertTrue(entry["probe_in_flight"])
+        self.assertEqual(entry["next_probe_at"], self.clock.now)
+
     # --- half open -------------------------------------------------------
 
     def test_exactly_one_probe_is_let_through(self) -> None:
@@ -235,17 +294,22 @@ class CircuitStoreTests(unittest.TestCase):
         self.assertTrue(allowed, reason)
         self.assertEqual(self.store.remaining("opencode_go", "mimo-v2.6-flash"), 0)
 
-    def test_a_failed_probe_reopens_the_circuit_for_longer(self) -> None:
+    def test_a_failed_probe_rearms_within_the_cap_and_keeps_the_reason(self) -> None:
         self.store.record_failure("opencode_go", "mimo-v2.6-flash", "exhausted", base_seconds=300)
-        first = self.store.remaining("opencode_go", "mimo-v2.6-flash")
         self.clock.advance(EXHAUSTED_BASE_SECONDS + 10)
         self.store.check("opencode_go", "mimo-v2.6-flash")
         self.store.record_failure("opencode_go", "mimo-v2.6-flash", "exhausted", base_seconds=300)
-        self.assertGreater(
-            self.store.remaining("opencode_go", "mimo-v2.6-flash"),
-            first,
-            "a failed probe must open the circuit for longer",
+        remaining = self.store.remaining("opencode_go", "mimo-v2.6-flash")
+        self.assertGreater(remaining, 0, "a failed probe must re-arm the circuit")
+        self.assertLessEqual(
+            remaining,
+            EXHAUSTED_MAX_SECONDS,
+            "a failed probe re-arms within the bounded policy, not beyond it",
         )
+        details = self.store.details()["opencode_go/*"]
+        self.assertEqual(details["error_class"], "exhausted")
+        self.assertEqual(details["failures"], 2)
+        self.assertIn("2 consecutive failures", details["reason"])
 
     def test_an_abandoned_probe_does_not_block_the_route_for_ever(self) -> None:
         self.store.record_failure("opencode_go", "mimo-v2.6-flash", "exhausted", base_seconds=300)
@@ -266,6 +330,26 @@ class CircuitStoreTests(unittest.TestCase):
         self.store.clear("opencode_go")
         allowed, _reason = self.store.check("opencode_go", "mimo-v2.6-flash")
         self.assertTrue(allowed)
+
+    def test_clearing_one_provider_returns_only_that_providers_entries(self) -> None:
+        self.store.record_failure("chatgpt_codex", "gpt-6-luna", "exhausted", base_seconds=300)
+        self.store.record_failure(
+            "opencode_go", "mimo-v2.6-flash", "rate_limited", base_seconds=300, retry_after=60
+        )
+        cleared = self.store.clear("chatgpt_codex")
+        self.assertEqual(
+            {entry["key"] for entry in cleared},
+            {"chatgpt_codex/*", "chatgpt_codex/gpt-6-luna"},
+        )
+        self.assertGreater(
+            self.store.remaining("opencode_go", "mimo-v2.6-flash"),
+            0,
+            "clearing one provider must never touch another provider's circuits",
+        )
+        for entry in cleared:
+            self.assertEqual(entry["provider"], "chatgpt_codex")
+            for field in ("token", "api_key", "credential", "secret"):
+                self.assertNotIn(field, entry)
 
 
 class RouterIntegrationTests(unittest.TestCase):
