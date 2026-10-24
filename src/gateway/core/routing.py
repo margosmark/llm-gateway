@@ -57,6 +57,7 @@ from gateway.config import (
     TRIGGER_ROUTE_INELIGIBLE,
     TRIGGER_UPSTREAM_UNAVAILABLE,
 )
+from gateway.core.abort import RouteContext, abort_upstream, register_route_context
 from gateway.core.capabilities import (
     DIALECT_OPENAI_CHAT,
     DIALECT_OPENAI_RESPONSES,
@@ -277,6 +278,7 @@ class RoutedResponse:
     response: ProviderResponse
     attribution: Attribution
     request: ProviderRequest
+    route_context: RouteContext | None = None
 
 
 class Router:
@@ -1161,6 +1163,17 @@ class Router:
                     attribution.fallback_used = True
                     continue
 
+                # T11-ANCHOR: client-abort propagation
+                route_context = RouteContext(
+                    request_id=request_id,
+                    provider=candidate.route.provider,
+                    model=candidate.route.model,
+                    adapter=candidate.adapter,
+                    request=request,
+                    stream=response.stream,
+                    ledger=self._ledger,
+                )
+                register_route_context(route_context)
                 attribution.serving_provider = candidate.route.provider
                 attribution.serving_model = candidate.route.model
                 # The route answered, so any circuit on it is closed. A success
@@ -1182,7 +1195,12 @@ class Router:
                     stream=stream,
                     profile_id=profile_id,
                 )
-                return RoutedResponse(response=response, attribution=attribution, request=request)
+                return RoutedResponse(
+                    response=response,
+                    attribution=attribution,
+                    request=request,
+                    route_context=route_context,
+                )
             finally:
                 self._circuits.release_probe(
                     candidate.route.provider, candidate.route.model, probe_owner

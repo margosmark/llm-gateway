@@ -13,6 +13,7 @@ import unittest
 from typing import Any
 
 from gateway.adapters.base import AdapterError
+from gateway.core.abort import abort_upstream, find_route_context
 from tests.test_end_to_end import FAKE_PROVIDER, FakeAdapter, GatewayHarness
 
 
@@ -62,6 +63,23 @@ class SkippedPrimaryTests(unittest.TestCase):
         self.assertTrue(event["skipped"], "the skipped route must be recorded")
         self.assertEqual(event["skipped"][0]["provider"], FAKE_PROVIDER)
         self.assertIn("cooldown", event["skipped"][0]["reason"])
+
+    def test_successful_route_exposes_registered_abort_context(self) -> None:
+        status, _, _ = self.harness.request(
+            "POST",
+            "/v1/chat/completions",
+            body={"model": "coding", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        self.assertEqual(status, 200)
+        event = self._events()[0]
+        context = find_route_context(event["request_id"])
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(context.provider, FAKE_PROVIDER)
+        self.assertEqual(context.model, "gpt-6-luna")
+        outcome = abort_upstream(context)
+        self.assertTrue(outcome.aborted)
+        self.assertEqual(outcome.request_id, event["request_id"])
 
     def test_the_fallback_counter_reflects_a_skipped_primary(self) -> None:
         self.harness.router.circuits.set(FAKE_PROVIDER, 300)
