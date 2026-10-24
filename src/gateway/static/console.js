@@ -171,7 +171,8 @@
     { id: "providers", label: "Providers" },
     { id: "models", label: "Models & Routes" },
     { id: "profiles", label: "Profiles" },
-    { id: "settings", label: "Settings" }
+    { id: "settings", label: "Settings" },
+    { id: "backup", label: "Backup" }
   ];
 
   function renderShell() {
@@ -214,7 +215,8 @@
       providers: renderProviders,
       models: renderModels,
       profiles: renderProfiles,
-      settings: renderSettings
+      settings: renderSettings,
+      backup: renderBackup
     }[tab] || renderStatus;
     main.appendChild(renderer());
   }
@@ -1128,6 +1130,46 @@
   }
 
   // --- settings ---------------------------------------------------------
+
+  function renderBackup() {
+    var frag = document.createDocumentFragment();
+    var interval = state.snapshot_interval_seconds || 0;
+    var importInput = el("input", { type: "file", accept: "application/json", "aria-label": "Configuration backup JSON" });
+    var intervalSelect = el("select", { "aria-label": "Snapshot interval" }, [
+      el("option", { value: "0", text: "Off (default)" }),
+      el("option", { value: "3600", text: "Every hour" }),
+      el("option", { value: "21600", text: "Every 6 hours" }),
+      el("option", { value: "86400", text: "Every 24 hours" })
+    ]);
+    intervalSelect.value = String(interval);
+    frag.appendChild(el("section", {}, [el("div", { class: "card" }, [
+      el("h2", { text: "Configuration backup" }),
+      el("p", { class: "small", text: "Exports contain configuration only. Credentials, caller-token hashes and secret-adjacent diagnostics are excluded. Import replaces the current configuration; provider credentials remain untouched." }),
+      el("button", { type: "button", text: "Download sanitised export", onclick: function () {
+        api(BASE + "/api/backup/export").then(function (result) {
+          var blob = new Blob([JSON.stringify(result.export, null, 2) + "\\n"], { type: "application/json" });
+          var link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "gateway-config-backup.json"; link.click();
+          setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+        }).catch(function (error) { toast(error.message, "bad"); });
+      } }),
+      importInput,
+      el("button", { type: "button", text: "Validate and import", onclick: function () {
+        if (!importInput.files || !importInput.files[0]) { toast("Choose a backup JSON file first", "bad"); return; }
+        importInput.files[0].text().then(function (text) { return JSON.parse(text); }).then(function (payload) {
+          return api(BASE + "/api/backup/import", { method: "POST", body: payload });
+        }).then(function () { return refresh(); }).then(function () { toast("Configuration imported", "ok"); draw(); })
+          .catch(function (error) { toast(error.message || "Invalid backup", "bad"); });
+      } }),
+      el("label", { class: "small", text: "Scheduled snapshot interval (stored in the state volume)" }),
+      intervalSelect,
+      el("button", { type: "button", text: "Save snapshot interval", onclick: function () {
+        api(BASE + "/api/settings", { method: "POST", body: { action: "snapshot_interval", seconds: Number(intervalSelect.value) } })
+          .then(function () { return refresh(); }).then(draw).catch(function (error) { toast(error.message, "bad"); });
+      } }),
+      el("p", { class: "small muted", text: "Snapshots are disabled by default. Enabling creates timestamped config.json copies in the state volume; no credentials or provider data are included." })
+    ])]));
+    return frag;
+  }
 
   function renderSettings() {
     var frag = document.createDocumentFragment();

@@ -207,7 +207,7 @@ candidate has passed its gates. Cut over side-by-side-safe:
 
 ## 5. Rollback
 
-The gateway's state lives in one volume. Rollback is either:
+The gateway's state lives in one volume. Before an upgrade, use Owner console → Backup → Download sanitised export. This includes configuration only; provider credentials and caller-token hashes are not included. For a local in-volume snapshot, enable a scheduled snapshot in that same panel. The manual copy commands below remain an operator fallback.
 
 **Rollback the image.** Redeploy the previous image, without rebuilding
 it, and publish that identity the same way.
@@ -221,19 +221,25 @@ GATEWAY_IMAGE=personal-llm-gateway:<previous> \
 **Rollback the configuration.** The configuration is a single JSON file on
 the volume. **Back it up before every upgrade**, and restore it explicitly.
 
+Restore a downloaded console export through Owner console → Backup → choose the JSON file → Validate and import. The gateway validates identifiers and all routes before replacing configuration; credentials remain separate. A failed import leaves the stored config unchanged.
+
+The manual in-volume copy remains available when the console is unavailable:
+
 ```sh
 # before an upgrade
 docker run --rm -v personal-llm-gateway-state:/state \
-  python:3.14-slim cp /state/config.json /state/config.json.before-upgrade
+  python:3.14-slim sh -c 'mkdir -p /state/snapshots && cp /state/config.json /state/snapshots/config.json.before-upgrade'
 ```
 
 ```sh
 # to restore
 docker compose down
 docker run --rm -v personal-llm-gateway-state:/state \
-  python:3.14-slim cp /state/config.json.before-upgrade /state/config.json
+  python:3.14-slim cp /state/snapshots/config.json.before-upgrade /state/config.json
 python3 scripts/release.py --image personal-llm-gateway:candidate
 ```
+
+The console's scheduled snapshots are disabled by default and are written to `/state/snapshots/` when enabled.
 
 Validate the restored file before starting:
 
