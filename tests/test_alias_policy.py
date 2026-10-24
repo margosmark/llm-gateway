@@ -595,6 +595,41 @@ class ConsoleSaveTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(harness.adapter.calls[0].payload["max_output_tokens"], exact)
 
+    def test_an_exponent_notation_token_rule_is_dropped_while_digits_are_stored(self) -> None:
+        # Characterisation of the trap the console's digit guard refuses
+        # to walk into (console_dom_test.js: "the save guard refuses a
+        # token value that would serialise exponentially"). A browser
+        # number input accepts "1e21" and JSON carries it as 1e+21;
+        # _policy_tokens reads that back as a float and drops the rule,
+        # while the save still reports success. The identical value in
+        # digits is server-valid and stored exactly, so the loss is a
+        # spelling problem the console must refuse visibly - not a server
+        # limit the owner has to discover.
+        harness = self._harness()
+        status, body, _ = self._save(
+            harness, policy={"defaults": {"temperature": 0.5, "max_output_tokens": 1e21}}
+        )
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "set")
+        self.assertEqual(
+            body["policy"]["after"],
+            {"defaults": {"temperature": 0.5}, "caps": None, "deny": None},
+        )
+        stored = harness.config.snapshot().aliases["coding"].policy
+        assert stored is not None and stored.defaults is not None
+        self.assertIsNone(stored.defaults.max_output_tokens)
+        # The same value as plain digits is stored digit for digit.
+        status, body, _ = self._save(
+            harness, policy={"defaults": {"temperature": 0.5, "max_output_tokens": 10 ** 21}}
+        )
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "changed")
+        stored = harness.config.snapshot().aliases["coding"].policy
+        assert stored is not None and stored.defaults is not None
+        self.assertEqual(stored.defaults.max_output_tokens, 10 ** 21)
+
     def test_a_save_of_an_alias_without_a_policy_reports_none(self) -> None:
         harness = self._harness()
         status, body, _ = self._save(harness)
