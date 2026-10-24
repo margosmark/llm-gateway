@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gateway.backup import export_config
+from gateway.backup import export_config, import_config
 from gateway.config import ConfigStore, Profile, RouteRef
 from gateway.identifiers import ValidationError
 from tests.test_end_to_end import FAKE_PROVIDER, GatewayHarness
@@ -25,6 +25,25 @@ class BackupHttpTests(unittest.TestCase):
         serialized = json.dumps(result)
         self.assertNotIn("token", serialized.lower())
         self.assertNotIn("synthetic-secret-marker", serialized)
+
+    def test_import_rejects_non_boolean_capability_flags(self):
+        # Security regression: a capability flag that is a string ("false"),
+        # an int or null must be rejected outright - never coerced to True.
+        _, result, _ = self.harness.request("GET", "/owner/api/backup/export")
+        export = result["export"]
+        clone = ConfigStore(Path(self.harness._tmp.name) / "clone-strict.json")
+        app = self.harness.app
+        for flag, value in (("supports_image_input", "false"),
+                            ("enabled", "true"),
+                            ("supports_builtin_tools", 1),
+                            ("limits_known", None)):
+            with self.subTest(flag=flag, value=value):
+                payload = json.loads(json.dumps(export))
+                provider = next(iter(payload["config"]["providers"].values()))
+                model = next(iter(provider["models"].values()))
+                model[flag] = value
+                with self.assertRaises(ValidationError):
+                    import_config(payload, clone.snapshot(), app.registry)
 
     def test_roundtrip_and_reimport_are_idempotent(self):
         with self.harness.config.mutate() as config:
