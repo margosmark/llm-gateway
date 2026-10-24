@@ -895,7 +895,14 @@
     var policyCaps = (requestPolicy && requestPolicy.caps) || {};
     var policyDeny = (requestPolicy && requestPolicy.deny) || {};
     var removeRequestPolicy = el("input", { type: "checkbox" });
-    var defaultTemperature = el("input", { type: "number", min: "0", max: "2", step: "0.1", value: policyDefaults.temperature === undefined ? "" : String(policyDefaults.temperature) });
+    // The published contract is any numeric temperature in [0, 2]
+    // (config._policy_temperature), so the editor must not impose a
+    // tighter UI grid: with a 0.1 step grid a stored 0.15 reports
+    // stepMismatch, checkValidity() fails, and the save handler refuses
+    // the WHOLE save - the owner could not save any unrelated edit
+    // without also rewriting a perfectly valid temperature (review
+    // finding, Low). The 0-2 bounds stay; the grid goes.
+    var defaultTemperature = el("input", { type: "number", min: "0", max: "2", step: "any", value: policyDefaults.temperature === undefined ? "" : String(policyDefaults.temperature) });
     var defaultTokens = el("input", { type: "number", min: "1", step: "1", value: policyDefaults.max_output_tokens === undefined ? "" : String(policyDefaults.max_output_tokens) });
     var defaultThinking = el("select", {}, [el("option", { value: "", text: "Not set" })]);
     ["none", "minimal", "low", "medium", "high", "xhigh", "max"].forEach(function (level) {
