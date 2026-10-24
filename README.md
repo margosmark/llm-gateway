@@ -758,6 +758,17 @@ no cost limit is configured. Catalogue fields such as `monthly_limit_usd`
 are reference metadata, are never loaded as budget policy, and are labelled
 "reference only, not enforced" wherever they appear.
 
+**Client disconnects are not provider failures.** If a caller hangs up
+mid-answer, the gateway aborts the upstream request instead of letting it
+run to completion for a body nobody will read. The ledger records the
+outcome as `client_abort` — the caller left, the provider did nothing
+wrong — so it never moves the `rate_limited` or `exhausted`
+provider-failure counters (the generic `errors` tally does rise by one:
+it means "ended with an error class", not "provider failed"). The owner
+console's request table shows `client_abort` in the status column. See
+[runbook §3.2](docs/RUNBOOK.md#32-verify-the-client-disconnect-abort-t11)
+for the reproduction and verification steps.
+
 See [the architecture map](docs/ARCHITECTURE.md),
 [development guide](docs/DEVELOPMENT.md), and
 [current codebase review](docs/REVIEW.md) for implementation boundaries,
