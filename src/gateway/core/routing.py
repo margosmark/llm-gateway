@@ -160,6 +160,7 @@ class RoutingError(Exception):
         detail: Any = None,
         retry_after_seconds: int | None = None,
         capability: str | None = None,
+        log_attribution: dict[str, Any] | None = None,
     ) -> None:
         # Client text (model names, aliases) is interpolated into routing
         # messages. Rewrite any lone surrogate to escape text at capture so
@@ -176,6 +177,11 @@ class RoutingError(Exception):
         #: meet, so the client is told which one without being told which
         #: provider or model it was turned away from.
         self.capability = capability
+        #: How the request was routed, including the route it failed on.
+        #: Kept off ``to_dict()``: an error *body* stays generic, while the
+        #: access log and the durable ledger may say which alias and route
+        #: were involved. Without it a 502 names nothing.
+        self.log_attribution = log_attribution
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"error": {"message": self.message, "type": self.code}}
@@ -221,7 +227,13 @@ class Candidate:
 
 @dataclass
 class Attribution:
-    """Which provider and model actually served a request."""
+    """Which provider and model actually served a request.
+
+    ``serving_provider`` / ``serving_model`` always name the *last route
+    tried*. On a request that was served that is the serving route; on a
+    request that failed it is the route the failure came from, so a 502 is
+    attributable rather than recorded as null, null.
+    """
 
     requested_alias: str
     serving_provider: str | None = None
@@ -934,6 +946,10 @@ class Router:
                         "reason": exc.message,
                     }
                 )
+                # Same as the failure path: a request that never succeeds
+                # still names the route it was refused on.
+                attribution.serving_provider = candidate.route.provider
+                attribution.serving_model = candidate.route.model
                 if is_last:
                     break
                 allowed, reason = self._fallback_permitted(
@@ -1090,21 +1106,35 @@ class Router:
                     response = candidate.adapter.invoke(request)  # type: ignore[union-attr]
                 except AdapterError as exc:
                     last_error = exc
-                    attribution.attempts.append(
-                        {
-                            "provider": candidate.route.provider,
-                            "model": candidate.route.model,
-                            "outcome": "error",
-                            "error_class": exc.error_class,
-                            # The class message would blame the provider for
-                            # a refusal the gateway itself made.
-                            "reason": (
-                                "the gateway's own in-flight cap refused this request"
-                                if isinstance(exc, ProviderConcurrencyLimit)
-                                else CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
-                            ),
-                        }
-                    )
+                    attempt: dict[str, Any] = {
+                        "provider": candidate.route.provider,
+                        "model": candidate.route.model,
+                        "outcome": "error",
+                        "error_class": exc.error_class,
+                        # The class message would blame the provider for
+                        # a refusal the gateway itself made.
+                        "reason": (
+                            "the gateway's own in-flight cap refused this request"
+                            if isinstance(exc, ProviderConcurrencyLimit)
+                            else CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
+                        ),
+                    }
+                    if exc.rejected_fields:
+                        # A shape rejection is only diagnosable from the field it
+                        # named. That name - never the body's text - is carried
+                        # into the attempt so the failure is attributable.
+                        attempt["rejected_fields"] = list(exc.rejected_fields)
+                        attempt["reason"] = (
+                            f"{attempt['reason']} (rejected fields: {', '.join(exc.rejected_fields)})"
+                        )
+                    attribution.attempts.append(attempt)
+                    # A request that never succeeds must still name the route it
+                    # failed on. The success path sets these to the serving
+                    # route; without this the durable ledger records null
+                    # serving_provider and serving_model for exactly the
+                    # failures an operator most needs to diagnose.
+                    attribution.serving_provider = candidate.route.provider
+                    attribution.serving_model = candidate.route.model
                     # A local capacity refusal is not evidence about the
                     # provider: opening a circuit here would turn "retry
                     # later" into a multi-minute bench of a route that was
@@ -1191,6 +1221,9 @@ class Router:
                 retry_after_seconds=self._circuits.retry_after_for(
                     [(c.route.provider, c.route.model) for c in eligible]
                 ),
+                # The access log still needs to know which alias and which
+                # routes were considered; the response body stays generic.
+                log_attribution=attribution.to_dict(),
             )
         # A provider failure is an upstream failure. It is reported as 502
         # even when the provider rejected its own credential, because the
@@ -1201,6 +1234,9 @@ class Router:
             code=last_error.error_class,
             status=failure_status,
             detail={"attempts": attribution.attempts},
+            # The access log and the durable ledger need the alias and the
+            # route the request died on; the response body does not.
+            log_attribution=attribution.to_dict(),
         )
 
     def _record(

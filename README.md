@@ -636,7 +636,10 @@ stream completes.
 
 Status, analytics and exports are metadata only. A request ledger records
 which alias was asked for, which provider and model actually served it, how
-long it took and how it ended — never what it said. Provider health combines
+long it took and how it ended — never what it said. A request that failed is
+recorded the same way, naming the route it failed on; when a provider
+refused a request's shape, the ledger and the error carry the **names** of
+the fields it refused and nothing else from its body. Provider health combines
 connection/test/catalogue metadata, model counts, local cooldowns and recent
 served-request success/failure rates; it performs no provider calls, and rates
 remain Unknown without observed requests. Token counters come from

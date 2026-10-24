@@ -1629,17 +1629,28 @@ class GatewayApp:
         # converted or forwarded: no upstream provider ever sees it.
         caller_phase = _extract_caller_phase(payload)
 
-        routed = self.router.invoke(
-            alias.name,
-            payload,
-            source_dialect=dialect,
-            stream=stream,
-            request_id=request_id,
-            session_hint=session_hint,
-            profile_id=profile.profile_id,
-            client_ip=request.client_address[0],
-            caller_phase=caller_phase,
-        )
+        try:
+            routed = self.router.invoke(
+                alias.name,
+                payload,
+                source_dialect=dialect,
+                stream=stream,
+                request_id=request_id,
+                session_hint=session_hint,
+                profile_id=profile.profile_id,
+                client_ip=request.client_address[0],
+                caller_phase=caller_phase,
+            )
+        except RoutingError as exc:
+            # A failed request must be just as attributable as a served one.
+            # Without this the 502 access-log line carries no alias, no
+            # provider and no model - which is how 93 malformed 502s went
+            # unnoticed on 2026-10-24.
+            if exc.log_attribution is not None:
+                request.context["attribution"] = exc.log_attribution
+            request.context["streamed"] = stream
+            request.context["request_id"] = request_id
+            raise
 
         # A streamed response holds a provider in-flight slot beyond this
         # function: the stream releases it when it finishes or is closed,

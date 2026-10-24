@@ -612,6 +612,16 @@ route is the primary for its phase, never a fallback, and needs none of this.
 The router only decides a fallback before it returns an upstream response. It
 does not retry a stream after the caller has begun receiving bytes.
 
+Every terminal path - served, failed, refused conversion - records the same
+attribution. `serving_provider` / `serving_model` name the last route tried:
+the serving route on a success, the route the failure came from otherwise, so
+a 502 is attributable in the durable ledger and in the access-log line. When
+a provider rejects a request's shape and names the fields it refused, those
+names are carried on the attempt (`rejected_fields`, and the suffix on
+`reason`) - and only those names: an upstream body is provider text and can
+echo request content, so it is never copied into an error, a log line or the
+ledger.
+
 ### Cooldowns
 
 A route that fails in a way the owner has enabled a trigger for is put
@@ -734,6 +744,16 @@ endpoint must never become a generic environment or configuration inspector.
 ## Alias groups
 
 Aliases may carry an optional validated tag for owner convenience. The owner can publish or disable all aliases with a tag in one configuration transaction. Group operations change only each alias's enabled flag; routes, fallback authorization and chains, and any per-alias policy or budget remain independent. Publishing a group refuses the whole operation if any member lacks a primary route.
+
+The two halves come from different places, so they can disagree: the source
+revision is baked into whatever image is running, while the image revision
+comes from the state volume, which a release step writes and an ordinary
+start does not. After a rollback - an old image started against a released
+state volume - `/version` reports the *old* source with the *previous*
+release's digest, and the startup warning does not fire, because neither
+field says `unknown`. The release identity therefore names an exact image
+only when the deployment was made by the release step; after any hand-rolled
+start or rollback the operator must re-run it.
 
 ## Verification boundaries
 

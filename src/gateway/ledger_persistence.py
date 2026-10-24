@@ -1455,18 +1455,34 @@ def _sanitize_row(row: dict[str, Any]) -> dict[str, Any]:
     clean = {key: value for key, value in row.items() if key in FIELDS}
     attempts = clean.get("attempts")
     if isinstance(attempts, list):
+        # Imports are local so this module stays import-light; they are
+        # hoisted above the loop because both branches need them.
+        from gateway.adapters.base import CLASS_MESSAGES, sanitize_rejected_fields
+        from gateway.config import ERROR_UNKNOWN
         clean_attempts = []
         for item in attempts:
             if not isinstance(item, dict):
                 continue
             safe = {key: item[key] for key in ("provider", "model", "outcome", "error_class") if key in item and isinstance(item[key], (str, type(None)))}
             if "reason" in item:
-                from gateway.adapters.base import CLASS_MESSAGES
-                from gateway.config import ERROR_UNKNOWN
                 error_class = item.get("error_class", ERROR_UNKNOWN)
                 if not isinstance(error_class, str):
                     error_class = ERROR_UNKNOWN
-                safe["reason"] = CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
+                # The reason is *derived*, never copied: the fixed class
+                # message plus the field names the provider refused. A row
+                # written by hand or tampered with on disk cannot smuggle
+                # arbitrary text into the ledger through this field.
+                reason = CLASS_MESSAGES.get(error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
+                fields = sanitize_rejected_fields(item.get("rejected_fields"))
+                if fields:
+                    reason = f"{reason} (rejected fields: {', '.join(fields)})"
+                safe["reason"] = reason
+            # Field *names* are the one detail a shape rejection may carry
+            # into durable state. They are re-checked here, so a hostile row
+            # cannot inject content - only identifier-shaped tokens survive.
+            fields = sanitize_rejected_fields(item.get("rejected_fields"))
+            if fields:
+                safe["rejected_fields"] = list(fields)
             clean_attempts.append(safe)
         clean["attempts"] = clean_attempts
     return clean
