@@ -78,6 +78,56 @@ class ImageDetectionTests(unittest.TestCase):
         rendered = converted["input"][0]["content"]
         self.assertIn({"type": "input_image", "image_url": "data:image/png;base64,AA"}, rendered)
 
+    def test_responses_image_renders_back_to_the_chat_shape(self) -> None:
+        """The other direction: Responses input_image -> Chat image_url.
+
+        Both the bare-string and the ``{"url": ...}`` forms the Responses API
+        accepts must land back on the Chat ``image_url`` part, so a model that
+        speaks Responses can still be reached from a Chat client and a
+        forwarded conversation keeps its image.
+        """
+        for form in ("data:image/png;base64,AA", {"url": "data:image/png;base64,AA"}):
+            with self.subTest(form=type(form).__name__):
+                responses = {"model": "alias", "input": [{"role": "user", "content": [
+                    {"type": "input_text", "text": "look"},
+                    {"type": "input_image", "image_url": form},
+                ]}]}
+                self.assertTrue(payload_has_image_input(responses, DIALECT_OPENAI_RESPONSES))
+                converted = convert_request(
+                    responses, DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_CHAT
+                )
+                self.assertTrue(payload_has_image_input(converted, DIALECT_OPENAI_CHAT))
+                content = converted["messages"][0]["content"]
+                images = [p for p in content if p.get("type") == "image_url"]
+                self.assertEqual(len(images), 1, "exactly one image, never dropped")
+                self.assertEqual(
+                    images[0]["image_url"], {"url": "data:image/png;base64,AA"}
+                )
+                texts = [p for p in content if p.get("type") == "text"]
+                self.assertEqual(len(texts), 1, "the text survives alongside the image")
+
+    def test_an_image_survives_a_full_round_trip(self) -> None:
+        """Chat -> Responses -> Chat keeps the image and the text."""
+        original = {"model": "alias", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+        ]}]}
+        as_responses = convert_request(
+            original, DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
+        )
+        back = convert_request(
+            as_responses, DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_CHAT
+        )
+        content = back["messages"][0]["content"]
+        self.assertEqual(
+            [p for p in content if p.get("type") == "image_url"][0]["image_url"],
+            {"url": "data:image/png;base64,AA"},
+            "the image URL is byte-identical after the round trip",
+        )
+        self.assertEqual(
+            [p for p in content if p.get("type") == "text"][0]["text"], "look"
+        )
+
 
 class ImageCapableAdapter:
     """A provider that answers any request; it records what it was sent."""

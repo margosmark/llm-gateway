@@ -25,16 +25,15 @@ from pathlib import Path
 
 sys.path.insert(0, os.environ.get("FIXED_SRC", "/app/src"))
 
-from gateway.adapters.base import ProviderRequest  # noqa: E402
-from gateway.adapters.chatgpt_codex import (  # noqa: E402
+from gateway.adapters.chatgpt_codex import (
     CHATGPT_BASE,
     RESPONSES_PATH,
     ChatGPTCodexAdapter,
 )
-from gateway.adapters.http_client import UpstreamClient, parse_json_body  # noqa: E402
-from gateway.bridge.requests import convert_request  # noqa: E402
-from gateway.credentials import CredentialStore  # noqa: E402
-from gateway.core.routing import _unsupported_payload_fields  # noqa: E402
+from gateway.adapters.http_client import UpstreamClient, parse_json_body
+from gateway.bridge.requests import convert_request
+from gateway.core.routing import _unsupported_payload_fields
+from gateway.credentials import CredentialStore
 
 TINY_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -142,7 +141,7 @@ def main() -> None:
 
     print()
     print("--- AFTER the fix (router strip applied) ---")
-    after, dropped = build_payload(strip=True)
+    after, _dropped = build_payload(strip=True)
     send(client, headers, after, "image + temperature stripped")
 
     print()

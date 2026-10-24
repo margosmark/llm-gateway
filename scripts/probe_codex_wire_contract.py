@@ -23,9 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, "/app/src")
 
-from gateway.adapters.http_client import UpstreamClient, parse_json_body  # noqa: E402
-from gateway.bridge.requests import convert_request  # noqa: E402
-from gateway.credentials import CredentialStore  # noqa: E402
+from gateway.adapters.http_client import UpstreamClient, parse_json_body
+from gateway.bridge.requests import convert_request
+from gateway.credentials import CredentialStore
 
 CHATGPT_BASE = "https://chatgpt.com/backend-api/codex"
 RESPONSES_PATH = "/responses"
