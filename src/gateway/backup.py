@@ -78,6 +78,13 @@ def import_config(payload: Any, current: GatewayConfig, registry: Any) -> Gatewa
             if not isinstance(model_key, str) or not isinstance(entry, dict) or entry.get("model_id") != model_key:
                 raise ValidationError("model key and model_id must match", "models")
             validate_model_id(model_key)
+            # Capability and state flags must be real JSON booleans. A string
+            # like "false" must never be coerced to True by from_dict().
+            for flag in ("enabled", "limits_known", "supports_streaming",
+                         "supports_function_tools", "supports_builtin_tools",
+                         "supports_image_input"):
+                if flag in entry and not isinstance(entry[flag], bool):
+                    raise ValidationError(f"{flag} must be a JSON boolean", flag)
         provider = ProviderState.from_dict(value)
         if provider is None:
             raise ValidationError(f"invalid provider record: {key}", "providers")

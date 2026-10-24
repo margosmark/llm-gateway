@@ -585,12 +585,15 @@ class Router:
 
         eligible = [c for c in candidates if c.eligible]
         if not eligible:
-            detail = [c.to_dict() for c in candidates]
+            # A capability refusal is a public response, so it must not
+            # disclose upstream identifiers: no provider ids, model ids,
+            # labels or dialects of the considered routes. The caller gets a
+            # generic refusal; the owner sees per-route capability facts in
+            # the console catalog and during route validation.
             raise RoutingError(
                 f"no eligible route for alias '{alias_name}'",
                 code="no_eligible_route",
                 status=503,
-                detail=detail,
             )
 
         # Phase routing is opt-in per alias and resolved before the route

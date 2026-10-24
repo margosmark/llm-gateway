@@ -224,9 +224,12 @@ class RouterImageEnforcementTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(payload["error"]["type"], "no_eligible_route")
         self.assertEqual(primary.calls, [])
-        reasons = {entry["excluded_reason"] for entry in payload["error"]["detail"]
-                   if isinstance(payload["error"].get("detail"), list)}
-        self.assertIn("this model does not support image input", reasons)
+        # The public refusal is generic: no upstream provider or model
+        # identifiers may leak into the response payload.
+        serialized = json.dumps(payload)
+        for identifier in (FAKE_PROVIDER, "gpt-6-luna", "opencode_go", "mimo-v2.6-flash"):
+            self.assertNotIn(identifier, serialized)
+        self.assertNotIn("detail", payload["error"])
 
     def test_a_text_only_request_is_unaffected_by_the_image_rule(self) -> None:
         harness, primary = self._harness(primary_images=False, fallback_images=False)

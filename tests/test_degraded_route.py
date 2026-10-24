@@ -120,9 +120,9 @@ class DegradedRouteTests(unittest.TestCase):
             },
         )
         self.assertEqual(status, 503)
-        excluded = payload["error"]["detail"][0]
-        self.assertFalse(excluded["eligible"])
-        self.assertIn("image input", excluded["excluded_reason"])
+        # The public refusal is generic: no per-route detail, no upstream
+        # identifiers (the exclusion reasons stay in the router/owner side).
+        self.assertNotIn("detail", payload["error"])
         self.assertEqual(adapter.calls, [], "an unsupported image request must not reach the provider")
 
     def test_builtin_tool_request_excludes_model_without_builtin_tools(self) -> None:
@@ -137,8 +137,19 @@ class DegradedRouteTests(unittest.TestCase):
             body={"model": "coding", "input": "search", "tools": [{"type": "web_search"}]},
         )
         self.assertEqual(status, 503)
-        self.assertIn("builtin tools", str(payload))
+        # The public refusal is generic; the exclusion reason is verified on
+        # the router side, where the owner's diagnostics live.
+        self.assertNotIn("detail", payload["error"])
         self.assertEqual(adapter.calls, [])
+        candidates = self.harness.app.router.candidates(
+            self.harness.config.snapshot().aliases["coding"],
+            source_dialect="openai_responses", stream=False,
+            needs_builtin_tools=True,
+        )
+        self.assertIn(
+            "this model does not support builtin tools",
+            [candidate.excluded_reason for candidate in candidates],
+        )
 
     def test_previous_response_id_excludes_model_without_continuation_support(self) -> None:
         adapter = FakeAdapter()
@@ -151,8 +162,17 @@ class DegradedRouteTests(unittest.TestCase):
             body={"model": "coding", "input": "continue", "previous_response_id": "resp_previous"},
         )
         self.assertEqual(status, 503)
-        self.assertIn("previous_response_id", str(payload))
+        self.assertNotIn("detail", payload["error"])
         self.assertEqual(adapter.calls, [])
+        candidates = self.harness.app.router.candidates(
+            self.harness.config.snapshot().aliases["coding"],
+            source_dialect="openai_responses", stream=False,
+            needs_previous_response_id=True,
+        )
+        self.assertIn(
+            "this model does not support previous_response_id continuation",
+            [candidate.excluded_reason for candidate in candidates],
+        )
 
     def test_a_route_that_supports_the_effort_keeps_it(self) -> None:
         failing = FakeAdapter(fail_with=AdapterError("exhausted", provider_id=FAKE_PROVIDER))
