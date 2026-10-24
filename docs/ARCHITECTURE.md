@@ -236,7 +236,13 @@ non-streaming request therefore reuses the previous connection instead of
 paying a fresh TCP and TLS handshake before the provider does any work. The
 existing guarantees are unchanged: redirects are refused, a credential never
 appears in an exception, and the configured timeout applies to a reused
-socket. A connection the peer closed while idle is discarded before the
+socket. Timeouts are **two budgets**, not one: the **connect budget** (10s)
+bounds establishing a connection - the TCP handshake and, over TLS, the
+handshake that follows it - and the head of a streamed response, whose head
+precedes generation; the generous **read budget** (120s, per read) bounds
+every wait for the provider's own bytes, so a provider that accepts and
+goes quiet is abandoned in seconds while a response that is still arriving
+is never cut. A connection the peer closed while idle is discarded before the
 request is written, so a request is never replayed. On shutdown
 `AdapterRegistry.close()` releases the pooled sockets, with an `atexit`
 backstop for a process that exits without it.

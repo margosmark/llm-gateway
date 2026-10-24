@@ -592,12 +592,17 @@ atomic and must still persist before it becomes visible.
 semantics are unchanged, and a test proves a reader never observes a
 half-applied transaction.
 
-### T20 — Separate the connect timeout from the read timeout — `todo`
+### T20 — Separate the connect timeout from the read timeout — `done`
 
-**Why.** `DEFAULT_TIMEOUT = 120.0` is used for both the connect and the
-read (`adapters/http_client.py:30,121`). A provider that accepts a
-connection and then goes quiet holds a **gateway thread for two minutes**,
-and with no concurrency cap (T10) a few such requests can exhaust the
+**Landed.** A provider that accepts a connection and then goes quiet is
+abandoned after the **connect budget** (10s), not after two minutes. A
+long-but-progressing stream is judged by the **read budget** (120s, per
+read) and runs to completion. Both are tested.
+
+**Why.** `DEFAULT_TIMEOUT = 120.0` was used for both the connect and the
+read (`adapters/http_client.py`), so a provider that accepted a
+connection and then went quiet held a **gateway thread for two minutes**,
+and with no concurrency cap (T10) a few such requests could exhaust the
 process.
 
 **Scope.** A short connect timeout and a separate, generous read timeout
@@ -606,6 +611,29 @@ the connect timeout.
 
 **Done when.** A provider that accepts and stalls is abandoned after the
 connect budget, a long-but-progressing stream is not, and both are tested.
+
+**Done.** `UpstreamClient` carries two budgets, and each phase of a
+request is judged by the one that fits it. The connect budget
+(`DEFAULT_CONNECT_TIMEOUT`, 10s) bounds establishing a connection - the
+TCP handshake and, over TLS, the handshake that follows it - and the head
+of a **streamed** response: an SSE provider sends its status line before
+it generates anything, so a head that has not arrived within the connect
+budget is a stall and not a slow generation. The read budget
+(`DEFAULT_TIMEOUT`, 120s) judges every wait for the provider's own
+bytes, per read: the buffered head and body, and every frame of a
+stream, so a response that is still arriving is never abandoned while it
+progresses. A *buffered* head is deliberately judged by the read budget,
+because on the buffered inference paths (`opencode_go` with
+`stream: false`, the System One native request) the head may follow the
+whole generation, and bounding that at the connect budget would refuse
+every non-streaming generation longer than 10 seconds. Each phase
+re-arms the socket it inherits - including a pooled connection reused
+for a later request - so neither budget can leak into the other's phase.
+Tests: `tests/test_upstream_timeouts.py` drives a provider that accepts
+and stalls (TLS handshake, and a stream head), a stream that runs
+several times longer than the connect budget without being cut, a
+dribbling buffered body, a pooled connection served under the read
+budget, and the credential-non-disclosure refusal on the connect path.
 
 ---
 

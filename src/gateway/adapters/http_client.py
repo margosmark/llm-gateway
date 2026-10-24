@@ -10,6 +10,20 @@ per-origin connection pool. It is deliberately small and explicit:
 * **Streaming is incremental.** SSE frames are yielded as they arrive, using
   line reads rather than a blocking buffered read, so a response is not held
   in memory and a slow upstream is not stalled.
+* **The connect budget and the read budget are different.** Establishing a
+  connection - the TCP handshake and, over TLS, the handshake that follows
+  it - is judged by ``DEFAULT_CONNECT_TIMEOUT``, so a provider that accepts
+  the connection and then goes quiet is abandoned in seconds instead of
+  holding a worker for the whole read timeout. Everything the provider
+  *sends* is judged by the generous ``DEFAULT_TIMEOUT``, per read: the
+  buffered body, and every frame of a stream, so a long response that is
+  still arriving is never abandoned while it progresses. The one wait on
+  the boundary is the head of a **streamed** response: an SSE provider
+  sends its status line before it generates anything, so a stream whose
+  head has not arrived within the connect budget has stalled and is
+  judged by the connect budget too. A *buffered* head may legitimately
+  follow the whole generation, so silence there is judged by the read
+  budget, never the connect budget.
 * **Credentials never appear in an exception.** The failures raised here are
   :class:`OSError` and :class:`http.client.HTTPException` subclasses, which
   name the host and the port and never carry request headers, so the API key
@@ -42,7 +56,14 @@ from typing import Any, Iterator
 from gateway.adapters.base import AdapterError
 from gateway.config import ERROR_TRANSIENT, ERROR_UNKNOWN
 
+#: The read budget: one wait for the provider's own bytes - the buffered
+#: head and body, or one frame of a stream. Generous, because a generation
+#: legitimately takes minutes and a progressing stream must never be cut.
 DEFAULT_TIMEOUT = 120.0
+#: The connect budget: establishing a connection (the TCP handshake and,
+#: over TLS, the handshake that follows it), and the head of a streamed
+#: response - an SSE provider answers before it generates anything, so
+#: silence there is a stall and not a slow generation.
 DEFAULT_CONNECT_TIMEOUT = 10.0
 #: How many idle connections one client keeps per origin. Overflow is closed
 #: immediately, so the pool is a bound and not a cache that grows without one.
@@ -118,8 +139,21 @@ class _ConnectionPool:
             return False
         return not readable
 
-    def acquire(self, key: tuple[str, str, int], timeout: float) -> tuple[http.client.HTTPConnection, bool]:
+    def acquire(
+        self,
+        key: tuple[str, str, int],
+        timeout: float,
+        connect_timeout: float | None = None,
+    ) -> tuple[http.client.HTTPConnection, bool]:
         """Return a connection for *key*, reusing a live idle one if present.
+
+        *timeout* is the **read** budget, which a reused connection is
+        re-armed with: it is already established, so every wait it makes
+        from here is a wait for the provider's own bytes. A **new**
+        connection is created with *connect_timeout* when one is given
+        (else *timeout*), so establishing it - TCP and TLS - is judged by
+        the **connect** budget; the caller re-arms the socket for the later
+        phases itself.
 
         Returns ``(connection, reused)``. Raises :class:`RuntimeError` if the
         pool has been closed by a shutdown.
@@ -141,7 +175,7 @@ class _ConnectionPool:
                         connection.sock.settimeout(timeout)
                     return connection, True
                 connection.close()
-        return self._new(key, timeout), False
+        return self._new(key, connect_timeout if connect_timeout is not None else timeout), False
 
     def _new(self, key: tuple[str, str, int], timeout: float) -> http.client.HTTPConnection:
         scheme, host, port = key
@@ -231,11 +265,35 @@ class UpstreamClient:
     two hosts keeps two pools rather than mixing them.
     """
 
-    def __init__(self, timeout: float = DEFAULT_TIMEOUT, user_agent: str = "personal-llm-gateway/2.0") -> None:
+    def __init__(
+        self,
+        timeout: float = DEFAULT_TIMEOUT,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        user_agent: str = "personal-llm-gateway/2.0",
+    ) -> None:
+        #: The read budget: one wait for the provider's own bytes.
         self.timeout = timeout
+        #: The connect budget: establishing a connection, and the head of a
+        #: streamed response (see the module docstring for why the two are
+        #: judged differently).
+        self.connect_timeout = connect_timeout
         self.user_agent = user_agent
         self._pool = _ConnectionPool()
         _LIVE_CLIENTS.add(self)
+
+    @staticmethod
+    def _arm(connection: http.client.HTTPConnection, timeout: float) -> None:
+        """Give the connection's socket the budget of its next phase.
+
+        A socket carries its own timeout from the moment it exists, and
+        that is what every later read and write inherits, so each phase
+        has to re-arm the socket itself - setting the attribute alone
+        would not reach it (the same reason :meth:`_ConnectionPool.acquire`
+        re-applies a timeout to a reused connection).
+        """
+        connection.timeout = timeout
+        if connection.sock is not None:
+            connection.sock.settimeout(timeout)
 
     def close(self) -> None:
         """Close every idle connection this client holds. Idempotent."""
@@ -260,11 +318,17 @@ class UpstreamClient:
         return (scheme, parsed.hostname, port), target, host_header
 
     def _open(
-        self, method: str, url: str, headers: dict[str, str], body: bytes | None, provider_id: str
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        provider_id: str,
+        stream: bool = False,
     ) -> tuple[tuple[str, str, int], http.client.HTTPConnection, http.client.HTTPResponse]:
         key, target, host_header = self._connection_key(url)
         try:
-            connection, _reused = self._pool.acquire(key, self.timeout)
+            connection, reused = self._pool.acquire(key, self.timeout, connect_timeout=self.connect_timeout)
         except RuntimeError as exc:  # the pool was closed by a shutdown
             raise AdapterError(ERROR_UNKNOWN, f"the gateway is shutting down ({exc})", provider_id=provider_id) from None
         request_headers = dict(headers)
@@ -272,8 +336,51 @@ class UpstreamClient:
         if self.user_agent:
             request_headers.setdefault("User-Agent", self.user_agent)
         try:
-            connection.request(method.upper(), target, body=body, headers=request_headers)
-            response = connection.getresponse()
+            if not reused:
+                # --- connect budget: the TCP handshake and, over TLS, the
+                # handshake that follows it. The connection was created
+                # with the connect timeout, so this is the phase it
+                # already carries.
+                try:
+                    connection.connect()
+                except (socket.timeout, TimeoutError):
+                    raise AdapterError(
+                        ERROR_TRANSIENT,
+                        "the provider did not accept a connection within the configured timeout",
+                        provider_id=provider_id,
+                    ) from None
+                self._arm(connection, self.timeout)
+            try:
+                # --- read budget: writing the request. Sending is the
+                # gateway's own bytes; a provider that never reads them is
+                # not worth a separate budget, and a large body on a slow
+                # uplink must not be cut short by the connect one.
+                connection.request(method.upper(), target, body=body, headers=request_headers)
+                if stream:
+                    # --- connect budget: the head of a stream. An SSE
+                    # provider sends its status line before it generates
+                    # anything, so a head that has not arrived is a stall
+                    # and not a slow generation.
+                    self._arm(connection, self.connect_timeout)
+                response = connection.getresponse()
+            except (socket.timeout, TimeoutError):
+                raise AdapterError(
+                    ERROR_TRANSIENT,
+                    (
+                        "the provider did not start a response within the connect timeout"
+                        if stream
+                        else "the provider did not respond within the configured timeout"
+                    ),
+                    provider_id=provider_id,
+                ) from None
+            if stream:
+                # --- read budget: every frame that follows. The head is
+                # in, so the stream is generating, and each frame within
+                # this budget counts as progress.
+                self._arm(connection, self.timeout)
+        except AdapterError:
+            connection.close()
+            raise
         except (OSError, http.client.HTTPException):
             connection.close()
             raise
@@ -289,10 +396,11 @@ class UpstreamClient:
         provider_id: str,
     ) -> UpstreamResponse:
         try:
-            key, connection, raw = self._open(method, url, headers, body, provider_id)
+            key, connection, raw = self._open(method, url, headers, body, provider_id, stream)
         except (socket.timeout, TimeoutError):
-            # Establishing the connection has its own wording, because
-            # "did not respond" is not what happened.
+            # Defensive: _open maps its own phase timeouts to the wording
+            # of the phase that stalled. This only sees a timeout that
+            # escaped a phase neither mapping covered.
             raise AdapterError(
                 ERROR_TRANSIENT,
                 "the provider did not accept a connection within the configured timeout",
