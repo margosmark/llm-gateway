@@ -136,6 +136,7 @@
     if (providerId === "chatgpt_codex") return "ChatGPT / Codex";
     if (providerId === "opencode_go") return "OpenCode Go";
     if (providerId === "opencode_console") return "OpenCode Console Jev / System One";
+    if (providerId === "openai_api") return "OpenAI API";
     return providerId;
   }
 
@@ -469,6 +470,9 @@
       card.appendChild(renderKeyForm(provider));
       if (provider.provider_id === "opencode_console") {
         card.appendChild(el("p", { class: "small muted", text: "Jev evaluates the state and questions sent to the native /v1/systemone endpoint. It is a structured-decision provider, not a chat-completion model." }));
+      }
+      if (provider.provider_id === "openai_api") {
+        card.appendChild(el("p", { class: "small muted", text: "A standard OpenAI platform API key. The model catalogue publishes no wire dialect, so after a refresh set each model's dialect (Chat Completions or Responses) before routing to it. Saving this key, loading the page and reading status never call OpenAI." }));
       }
     }
     return card;
