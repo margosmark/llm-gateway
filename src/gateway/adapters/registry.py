@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from gateway.adapters.base import Adapter
+from gateway.adapters.http_client import close_all_clients
 
 
 class AdapterRegistry:
@@ -28,6 +29,18 @@ class AdapterRegistry:
 
     def provider_ids(self) -> list[str]:
         return sorted(self._adapters)
+
+    def close(self) -> None:
+        """Release every upstream connection the adapters are holding.
+
+        A provider connection is a process resource, so shutting the
+        gateway down has to give it back rather than rely on the operating
+        system to notice. The clients are tracked centrally in
+        :mod:`gateway.adapters.http_client`, so this reaches every adapter
+        that made one - including an adapter added later that defines no
+        teardown of its own.
+        """
+        close_all_clients()
 
     def __contains__(self, provider_id: object) -> bool:
         return isinstance(provider_id, str) and provider_id in self._adapters

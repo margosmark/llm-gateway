@@ -230,6 +230,17 @@ claim about a provider's window.
 The routing core knows aliases, error classes, model capabilities, and fallback
 policy. Provider-specific behaviour lives in `gateway.adapters`.
 
+Every adapter owns one `UpstreamClient`, which keeps a **bounded keep-alive
+connection pool** keyed by origin (`adapters/http_client.py`). A short
+non-streaming request therefore reuses the previous connection instead of
+paying a fresh TCP and TLS handshake before the provider does any work. The
+existing guarantees are unchanged: redirects are refused, a credential never
+appears in an exception, and the configured timeout applies to a reused
+socket. A connection the peer closed while idle is discarded before the
+request is written, so a request is never replayed. On shutdown
+`AdapterRegistry.close()` releases the pooled sockets, with an `atexit`
+backstop for a process that exits without it.
+
 * **ChatGPT / Codex** uses the device-code flow and the Responses dialect.
   Its upstream is **streaming only** and expects the same request fields
   OpenAI's own client sends. See `CHATGPT_CODEX_CONTRACT.md` and

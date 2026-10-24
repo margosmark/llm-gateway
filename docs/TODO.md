@@ -516,9 +516,13 @@ together take a small response from 41ms to 0.06ms.
 **Done when.** A buffered response is written in one write, a regression
 test asserts it, and the measured stall is gone. Filed as **R28**.
 
-### T18 — Reuse upstream connections to the providers — `todo`
+### T18 — Reuse upstream connections to the providers — `done`
 
-**Why.** `UpstreamClient` uses `urllib.request` (`adapters/http_client.py`),
+**Landed.** `UpstreamClient` now speaks `http.client` behind a bounded
+per-origin keep-alive pool. 50 sequential requests to one provider open
+**1** TCP connection instead of 50.
+
+**Why.** `UpstreamClient` used `urllib.request` (`adapters/http_client.py`),
 which opens a **new connection for every request** and never keeps one
 alive. A TLS handshake to a remote provider measures **~55ms** on this
 network, so every provider request pays that before the provider does any
@@ -533,9 +537,38 @@ pool, and a clean close on shutdown. It must keep the existing guarantees:
 **no redirects followed**, no credential in an exception, and the timeout
 behaviour unchanged.
 
+**Done.** The client speaks `http.client` behind `_ConnectionPool`, which
+holds at most `DEFAULT_IDLE_CONNECTIONS` (4) idle connections per origin.
+Connections are keyed by origin, so one provider pointed at two hosts keeps
+two pools. The shared SSL context is built once per pool, so a reused
+connection does not re-read the CA store.
+
+Pooling buys one failure a connection-per-request client cannot have: the
+peer may close an idle connection while the pool still holds it. That is
+detected with a non-blocking readiness check **before** the request is
+written, so a request is never replayed on the grounds that a pooled
+connection turned out to be dead - a side effect is never duplicated. A
+connection is returned to the pool only when its body has been fully read
+or its stream has ended on its own; a stall, an interrupted read or a
+caller that stops consuming all leave bytes in flight, and a connection
+with bytes in flight is never handed to another request.
+
+Shutdown releases the sockets rather than leaving them to the operating
+system: `AdapterRegistry.close()` is called from `cli.main()`'s existing
+`finally` after `server.stop()`, and an `atexit` hook over a weak set of
+live clients is the backstop for a process that exits without it.
+
+**Kept.** Redirects are still refused and their connection is dropped
+rather than reused; a credential never appears in an exception; the
+configured timeout is re-applied to a reused socket, not just to the
+attribute; and a non-2xx answer to a streaming request is still buffered,
+because an error body is what the adapter turns into the caller's error.
+
 **Note.** This is the one performance item that changes the shape of the
 network code, so it wants its own tests: pooled reuse, exhaustion, and
-that a redirect is still refused.
+that a redirect is still refused. `tests/test_upstream_http_pool.py`
+covers all of those plus the stale-connection refusal and the shutdown
+path.
 
 ### T19 — Stop deep-copying the whole configuration on every read — `todo`
 
@@ -1032,7 +1065,7 @@ remains the only caching, and it stores no content.
 | T15 | A local provider | 3 | todo |
 | T16 | A manual model entry must merge, not replace | 1 | **done** |
 | T17 | Stop the 41ms stall on every small response | perf | **done** |
-| T18 | Reuse upstream connections to the providers | perf | todo |
+| T18 | Reuse upstream connections to the providers | perf | **done** |
 | T19 | Stop deep-copying the configuration on every read | perf | todo |
 | T20 | Separate the connect timeout from the read timeout | perf | todo |
 | T21 | A request policy per alias | 4 | todo |
@@ -1069,7 +1102,8 @@ remains the only caching, and it stores no content.
 8. **T7, T8, T9** — operational durability, then observability.
 9. **T10, T11, T12** — robustness and presentation.
 10. **T18, T19, T20** — network and CPU efficiency, once the latency
-    defect is gone.
+    defect is gone. T18 is done: upstream connections are reused, so a
+    short request no longer pays a fresh TLS handshake.
 11. **T25** — the dry run. It is the cheapest of the new capabilities and
     the best tool against this project's actual bug class: it would have
     caught R9, R18, R21 and R25 on the day they were found.
