@@ -499,6 +499,11 @@ canonical closed thinking-level vocabulary. Saving sends the editor's
 intended policy explicitly; **Remove request policy** clears it. The save
 response reports what happened (`preserved`, `set`, `changed`, `cleared` or
 `unchanged`), and the console includes that outcome in its confirmation.
+Integer token counts are carried digit for digit: the console parses and
+reserialises policy integers without routing them through a binary
+floating-point number, so a server-valid value beyond JavaScript's
+safe-integer range is stored exactly instead of being silently rounded by
+an unrelated edit.
 
 * **defaults** apply when the client specified nothing: `temperature`,
   `max_output_tokens`, `thinking_level`, `system`.

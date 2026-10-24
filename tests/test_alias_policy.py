@@ -562,6 +562,39 @@ class ConsoleSaveTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(harness.adapter.calls[0].payload["temperature"], 0.15)
 
+    def test_an_unsafe_integer_token_policy_round_trips_without_rounding(self) -> None:
+        # config._policy_tokens accepts any positive int with no upper
+        # bound, but 9007199254740993 is beyond what a JavaScript double
+        # can hold: the console used to round it to 9007199254740992 while
+        # loading state, then submit the rounded replacement during an
+        # unrelated edit (review finding, Low). The server side must keep
+        # every digit through save, report, state wire bytes, and upstream.
+        exact = 9007199254740993
+        rounded = exact - 1
+        harness = self._harness(defaults={"max_output_tokens": exact})
+        intended = {"defaults": {"max_output_tokens": exact, "temperature": 0.4}}
+        status, body, _ = self._save(harness, policy=intended)
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "changed")
+        after = body["policy"]["after"]["defaults"]["max_output_tokens"]
+        self.assertEqual(after, exact)
+        self.assertNotEqual(after, rounded)
+        self.assertEqual(
+            harness.config.snapshot().aliases["coding"].policy,
+            AliasPolicy.from_dict(intended),
+        )
+        # The raw state bytes the console parses carry the exact digits.
+        status, raw, _ = harness.request("GET", "/owner/api/state", raw=True)
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes)
+        self.assertIn(b"max_output_tokens\":%d" % exact, raw)
+        self.assertNotIn(b"max_output_tokens\":%d" % rounded, raw)
+        # And the exact value is the one in force on the next request.
+        status, _, _ = harness.request("POST", "/v1/chat/completions", body=chat_body())
+        self.assertEqual(status, 200)
+        self.assertEqual(harness.adapter.calls[0].payload["max_output_tokens"], exact)
+
     def test_a_save_of_an_alias_without_a_policy_reports_none(self) -> None:
         harness = self._harness()
         status, body, _ = self._save(harness)

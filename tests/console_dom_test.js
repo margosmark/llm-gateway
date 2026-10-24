@@ -802,7 +802,7 @@ check("alias request policy editor exposes the canonical defaults, caps, and den
   assert(source.includes('["none", "minimal", "low", "medium", "high", "xhigh", "max"]'));
   assert(source.includes('maxlength: "4000"'));
   assert(source.includes('min: "0", max: "2"'));
-  assert(source.includes('"Current policy: " + JSON.stringify(requestPolicy)'));
+  assert(source.includes('"Current policy: " + policyText(requestPolicy)'));
 });
 
 check("policy save submits explicit policy including deliberate removal and reports server outcome", function () {
@@ -861,6 +861,7 @@ function rebuildPolicy(controls) {
     "capThinking",
     "denyTools",
     "denyStore",
+    "policyInt",
     "var policy = null;\n" + rebuildSlice + "\nreturn policy;"
   )(
     controls.removeRequestPolicy,
@@ -871,7 +872,8 @@ function rebuildPolicy(controls) {
     controls.capTokens,
     controls.capThinking,
     controls.denyTools,
-    controls.denyStore
+    controls.denyStore,
+    helpers.policyInt
   );
 }
 
@@ -973,6 +975,128 @@ check("an unrelated edit keeps a valid non-tenth temperature through guard and r
   assert.strictEqual(policy.defaults.temperature, 0.15);
   assert.strictEqual(policy.defaults.thinking_level, "high");
   assert.strictEqual(policy.defaults.system, POLICY_SYSTEM);
+});
+
+// --- exact integers through the console (review finding: Low) ------------
+// A server-valid token value above Number.MAX_SAFE_INTEGER used to be
+// rounded by JSON parsing before the editor saw it, so saving any
+// unrelated edit submitted the rounded replacement.
+
+const UNSAFE_TOKEN = "9007199254740993";
+const UNSAFE_ROUNDED = "9007199254740992";
+
+check("the console reads responses and writes bodies without rounding integers", function () {
+  assert(source.includes("var data = parseJsonLossless(text);"));
+  assert(!source.includes("return response.json()"));
+  assert(source.includes("body: options.body === undefined ? undefined : emitJson(options.body)"));
+  assert(source.includes("defaults.max_output_tokens = policyInt(defaultTokens.value)"));
+  assert(source.includes("caps.max_output_tokens = policyInt(capTokens.value)"));
+  assert(!source.includes("Number(defaultTokens.value)"));
+  assert(!source.includes("Number(capTokens.value)"));
+  assert(source.includes("return parseJsonLossless(text)"));
+  assert(source.includes("emitJson(result.export, 2)"));
+});
+
+check("an unsafe integer survives the response parser digit for digit", function () {
+  const parsed = helpers.parseJsonLossless(
+    '{"policy":{"defaults":{"max_output_tokens":' + UNSAFE_TOKEN +
+      ',"temperature":0.15},"caps":{"max_output_tokens":32000}}}'
+  );
+  assert.strictEqual(parsed.policy.defaults.max_output_tokens, UNSAFE_TOKEN);
+  assert.strictEqual(parsed.policy.caps.max_output_tokens, 32000); // safe integers stay numbers
+  assert.strictEqual(parsed.policy.defaults.temperature, 0.15);
+});
+
+check("string literals that contain digits are never rewritten", function () {
+  const parsed = helpers.parseJsonLossless(
+    '{"system":"' + UNSAFE_TOKEN + '","note":"tokens: ' + UNSAFE_TOKEN +
+      ' ok","esc":"say \\"' + UNSAFE_TOKEN + '\\""}'
+  );
+  assert.strictEqual(typeof parsed.system, "string");
+  assert.strictEqual(parsed.system, UNSAFE_TOKEN);
+  assert.strictEqual(parsed.note, "tokens: " + UNSAFE_TOKEN + " ok");
+  assert.strictEqual(parsed.esc, 'say "' + UNSAFE_TOKEN + '"');
+});
+
+check("an unrelated edit resubmits an unsafe token policy with every digit", function () {
+  // Load through the real parser, drive the real editor and save guard,
+  // rebuild the policy while another control changes, and inspect the
+  // exact bytes that leave the console.
+  const loaded = helpers.parseJsonLossless(
+    '{"policy":{"defaults":{"max_output_tokens":' + UNSAFE_TOKEN +
+      ',"system":"' + POLICY_SYSTEM + '"},"caps":{"max_output_tokens":' + UNSAFE_TOKEN + "}}}"
+  ).policy;
+  const controls = buildPolicyControls({ policy: loaded });
+  assert.strictEqual(controls.defaultTokens.value, UNSAFE_TOKEN);
+  assert.strictEqual(controls.defaultTokens.checkValidity(), true);
+
+  const guardSlice = source.slice(
+    source.indexOf("var policyNumericFields ="),
+    source.indexOf("var triggers =")
+  );
+  const guard = new Function(
+    "defaultTemperature",
+    "defaultTokens",
+    "capTokens",
+    "toast",
+    guardSlice + '\nreturn "continued";'
+  );
+  const toasts = [];
+  const outcome = guard(
+    controls.defaultTemperature,
+    controls.defaultTokens,
+    { value: UNSAFE_TOKEN, checkValidity: function () { return true; } },
+    function (message) { toasts.push(message); }
+  );
+  assert.strictEqual(outcome, "continued", "the save guard refused a valid token value: " + toasts.join("; "));
+
+  const policy = rebuildPolicy({
+    removeRequestPolicy: controls.removeRequestPolicy,
+    defaultTemperature: { value: "" },
+    defaultTokens: controls.defaultTokens,
+    defaultThinking: { value: "high" },
+    defaultSystem: controls.defaultSystem,
+    capTokens: { value: UNSAFE_TOKEN },
+    capThinking: { value: "" },
+    denyTools: { checked: false },
+    denyStore: { value: "" },
+  });
+  assert.strictEqual(policy.defaults.system, POLICY_SYSTEM, "an unrelated edit must not drop other rules");
+  assert.strictEqual(policy.defaults.thinking_level, "high");
+
+  const body = helpers.emitJson({ action: "save", name: "coding", policy: policy });
+  assert(body.includes('"max_output_tokens":' + UNSAFE_TOKEN), "the exact digits must be on the wire: " + body);
+  assert.strictEqual(body.includes(UNSAFE_ROUNDED), false, "a rounded replacement was submitted: " + body);
+  assert(JSON.parse(body).name === "coding"); // still a well-formed request body
+});
+
+check("serialization keeps digit strings that really are text as strings", function () {
+  assert.strictEqual(
+    helpers.emitJson({ max_output_tokens: UNSAFE_TOKEN }),
+    '{"max_output_tokens":' + UNSAFE_TOKEN + "}"
+  );
+  assert.strictEqual(helpers.emitJson({ system: UNSAFE_TOKEN }), '{"system":"' + UNSAFE_TOKEN + '"}');
+  assert.strictEqual(helpers.emitJson({ name: "123" }), '{"name":"123"}');
+  assert.strictEqual(helpers.policyInt("32000"), 32000); // safe values stay plain numbers
+  assert.strictEqual(helpers.policyInt("007"), 7);
+  // A marker that cannot be spliced is refused rather than sent on.
+  assert.throws(
+    function () { helpers.emitJson({ max_output_tokens: { __raw_int__: "not-digits" } }); },
+    /unspliced/
+  );
+});
+
+check("the policy summary prints exact token integers, not quotes or rounded digits", function () {
+  const policy = helpers.parseJsonLossless(
+    '{"defaults":{"max_output_tokens":' + UNSAFE_TOKEN + ',"temperature":0.15,"system":"' +
+      POLICY_SYSTEM + '"}}'
+  );
+  const text = helpers.policyText(policy);
+  assert(text.includes('"max_output_tokens": ' + UNSAFE_TOKEN), text);
+  assert.strictEqual(text.includes(UNSAFE_ROUNDED), false, text);
+  assert.strictEqual(text.includes('"max_output_tokens": "' + UNSAFE_TOKEN + '"'), false, text);
+  assert(text.includes('"temperature": 0.15'));
+  assert(text.includes('"system": "' + POLICY_SYSTEM + '"'));
 });
 
 check("removing a phase policy overrides the enabled toggle", function () {
