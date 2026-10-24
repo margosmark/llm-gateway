@@ -41,6 +41,147 @@
     return node;
   }
 
+  // --- exact integers ----------------------------------------------------
+  // JSON.parse()/response.json() turn every number into a JS double, so a
+  // server-valid integer above Number.MAX_SAFE_INTEGER - a policy
+  // max_output_tokens of 9007199254740993, which config._policy_tokens
+  // accepts with no upper bound - is silently rounded to 9007199254740992
+  // before the editor ever sees it, and saving any unrelated edit then
+  // submits the rounded replacement (review finding, Low). The console
+  // therefore reads JSON losslessly and writes it back with the digits it
+  // read: unsafe integers become digit strings on the way in, and markers
+  // that emitJson() splices back to raw digits on the way out.
+  //
+  // These are the integer config fields with no bound of their own; only
+  // they are re-emitted as raw digits when a digit string is serialized.
+  // Every other digit string is genuine text (an alias named "123") and
+  // must stay a JSON string.
+  function exactIntegerKey(key) {
+    return key === "max_output_tokens" || key === "context_window" || key === "context_limit";
+  }
+
+  // An integer too large for a double: canonical digits that do not
+  // survive Number() exactly.
+  function isUnsafeInteger(text) {
+    return /^-?[1-9][0-9]*$/.test(text) && String(Number(text)) !== text;
+  }
+
+  // A marker for digits that must reach the wire unchanged. JSON.stringify
+  // rounds a Number above MAX_SAFE_INTEGER, so the exact value travels as
+  // a structurally identifiable object instead (see emitJson).
+  function rawInt(text) {
+    return { __raw_int__: text };
+  }
+
+  // Parse a JSON document without rounding its integers: an integer whose
+  // digits a double cannot hold is re-emitted as a JSON string of those
+  // digits, so it reaches the editor intact. Safe integers, floats, and
+  // every string literal are untouched - a float round-trips through a
+  // double exactly, so only integers can lose.
+  function parseJsonLossless(text) {
+    var out = "";
+    var i = 0;
+    var end = text.length;
+    while (i < end) {
+      var ch = text.charAt(i);
+      if (ch === '"') {
+        // A string literal is copied verbatim: digits inside text are
+        // never numbers.
+        var start = i;
+        i += 1;
+        while (i < end) {
+          if (text.charAt(i) === "\\") { i += 2; continue; }
+          if (text.charAt(i) === '"') { i += 1; break; }
+          i += 1;
+        }
+        out += text.slice(start, i);
+        continue;
+      }
+      if (ch === "-" || (ch >= "0" && ch <= "9")) {
+        var numberStart = i;
+        if (ch === "-") i += 1;
+        while (i < end && text.charAt(i) >= "0" && text.charAt(i) <= "9") i += 1;
+        var integerOnly = true;
+        if (text.charAt(i) === ".") {
+          integerOnly = false;
+          i += 1;
+          while (i < end && text.charAt(i) >= "0" && text.charAt(i) <= "9") i += 1;
+        }
+        if (text.charAt(i) === "e" || text.charAt(i) === "E") {
+          integerOnly = false;
+          i += 1;
+          if (text.charAt(i) === "+" || text.charAt(i) === "-") i += 1;
+          while (i < end && text.charAt(i) >= "0" && text.charAt(i) <= "9") i += 1;
+        }
+        var token = text.slice(numberStart, i);
+        out += integerOnly && isUnsafeInteger(token) ? JSON.stringify(token) : token;
+        continue;
+      }
+      out += ch;
+      i += 1;
+    }
+    return JSON.parse(out);
+  }
+
+  // Recursively turn unsafe digit strings in known integer fields into
+  // raw-int markers, so serialization can write their exact digits.
+  function exactify(value, key) {
+    if (typeof value === "string") {
+      return exactIntegerKey(key) && isUnsafeInteger(value) ? rawInt(value) : value;
+    }
+    if (Array.isArray(value)) {
+      return value.map(function (item) { return exactify(item, key); });
+    }
+    if (value && typeof value === "object") {
+      if (typeof value.__raw_int__ === "string") return value;
+      var out = {};
+      Object.keys(value).forEach(function (name) { out[name] = exactify(value[name], name); });
+      return out;
+    }
+    return value;
+  }
+
+  // Serialize a value, splicing raw-int markers back into exact digits.
+  // The pattern can only come from a marker this file minted: JSON.stringify
+  // escapes quotes inside strings, so string content can never produce an
+  // unescaped `{"__raw_int__":"<digits>"}` object in the output.
+  function emitJson(value, space) {
+    var payload = JSON.stringify(exactify(value), null, space);
+    if (payload.indexOf("__raw_int__") !== -1) {
+      payload = payload.replace(/\{"__raw_int__":"(-?[0-9]+)"\}/g, "$1");
+    }
+    if (payload.indexOf("__raw_int__") !== -1) {
+      throw new Error("refusing to send an unspliced exact-integer marker");
+    }
+    return payload;
+  }
+
+  // A token control holds digits as text; hand back a plain number when a
+  // double represents it exactly, and an exact-integer marker when it does
+  // not, so no digit is lost on the way to the server.
+  function policyInt(text) {
+    var digits = String(text).trim();
+    return isUnsafeInteger(digits) ? rawInt(digits) : Number(digits);
+  }
+
+  // The read-only policy summary. Unsafe integers are digit strings after
+  // the lossless load; JSON.stringify would quote them (reading as text),
+  // so exact-integer fields are printed as the numbers they are.
+  function policyText(value, key) {
+    if (value === null || value === undefined) return "null";
+    if (typeof value === "boolean") return value ? "true" : "false";
+    if (typeof value === "number") return String(value);
+    if (typeof value === "string") {
+      return exactIntegerKey(key) && isUnsafeInteger(value) ? value : JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+      return "[" + value.map(function (item) { return policyText(item, key); }).join(", ") + "]";
+    }
+    return "{" + Object.keys(value).map(function (name) {
+      return JSON.stringify(name) + ": " + policyText(value[name], name);
+    }).join(", ") + "}";
+  }
+
   function api(path, options) {
     options = options || {};
     var headers = options.headers || {};
@@ -48,7 +189,7 @@
     return fetch(path, {
       method: options.method || "GET",
       headers: headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body)
+      body: options.body === undefined ? undefined : emitJson(options.body)
     }).then(function (response) {
       var type = response.headers.get("content-type") || "";
       if (type.indexOf("application/json") === -1) {
@@ -57,7 +198,10 @@
           return text;
         });
       }
-      return response.json().then(function (data) {
+      // Parsed losslessly: response.json() would round any integer beyond
+      // Number.MAX_SAFE_INTEGER before this console ever reads it.
+      return response.text().then(function (text) {
+        var data = parseJsonLossless(text);
         if (!response.ok) {
           var serverError = data && data.error;
           var message = (serverError && serverError.message) || ("request failed: " + response.status);
@@ -904,6 +1048,10 @@
     // finding, Low). The 0-2 bounds stay; the grid goes.
     var defaultTemperature = el("input", { type: "number", min: "0", max: "2", step: "any", value: policyDefaults.temperature === undefined ? "" : String(policyDefaults.temperature) });
     var defaultTokens = el("input", { type: "number", min: "1", step: "1", value: policyDefaults.max_output_tokens === undefined ? "" : String(policyDefaults.max_output_tokens) });
+    // Token values arrive as digit strings when they exceed what a double
+    // holds (see parseJsonLossless). String() keeps every digit, and the
+    // input's value sanitisation keeps them too: a 16-digit integer is a
+    // valid floating-point number string, so no rounding happens here.
     var defaultThinking = el("select", {}, [el("option", { value: "", text: "Not set" })]);
     ["none", "minimal", "low", "medium", "high", "xhigh", "max"].forEach(function (level) {
       defaultThinking.appendChild(el("option", { value: level, text: level }));
@@ -1004,7 +1152,7 @@
 
     card.appendChild(el("h3", { text: "Request policy" }));
     card.appendChild(el("div", { class: "small muted", text: requestPolicy
-      ? "Current policy: " + JSON.stringify(requestPolicy)
+      ? "Current policy: " + policyText(requestPolicy)
       : "No request policy is set. A blank policy remains absent." }));
     card.appendChild(el("div", { class: "small muted", text: "An alias policy controls defaults, output ceilings, denied tools, and forced storage behavior for requests. Leave a field blank to leave that rule unset." }));
     card.appendChild(el("div", { class: "small muted", text: "Thinking level choices: none, minimal, low, medium, high, xhigh, max." }));
@@ -1065,10 +1213,14 @@
               var caps = {};
               var deny = {};
               if (defaultTemperature.value !== "") defaults.temperature = Number(defaultTemperature.value);
-              if (defaultTokens.value !== "") defaults.max_output_tokens = Number(defaultTokens.value);
+              // policyInt() keeps an unsafe token value digit for digit: a
+              // plain Number() would round it here, and the server would
+              // store the rounded replacement for an edit the owner never
+              // made (review finding, Low).
+              if (defaultTokens.value !== "") defaults.max_output_tokens = policyInt(defaultTokens.value);
               if (defaultThinking.value) defaults.thinking_level = defaultThinking.value;
               if (defaultSystem.value.trim()) defaults.system = defaultSystem.value;
-              if (capTokens.value !== "") caps.max_output_tokens = Number(capTokens.value);
+              if (capTokens.value !== "") caps.max_output_tokens = policyInt(capTokens.value);
               if (capThinking.value) caps.thinking_level = capThinking.value;
               if (denyTools.checked) deny.tools = true;
               if (denyStore.value !== "") deny.store = denyStore.value === "true";
@@ -1335,7 +1487,9 @@
       el("p", { class: "small", text: "Exports contain configuration only. Credentials, caller-token hashes and secret-adjacent diagnostics are excluded. Import replaces the current configuration; provider credentials remain untouched." }),
       el("button", { type: "button", text: "Download sanitised export", onclick: function () {
         api(BASE + "/api/backup/export").then(function (result) {
-          var blob = new Blob([JSON.stringify(result.export, null, 2) + "\\n"], { type: "application/json" });
+          // emitJson writes unsafe integers back as exact digits, so a
+          // backup round-trips them instead of quoting or rounding them.
+          var blob = new Blob([emitJson(result.export, 2) + "\\n"], { type: "application/json" });
           var link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "gateway-config-backup.json"; link.click();
           setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
         }).catch(function (error) { toast(error.message, "bad"); });
@@ -1343,7 +1497,7 @@
       importInput,
       el("button", { type: "button", text: "Validate and import", onclick: function () {
         if (!importInput.files || !importInput.files[0]) { toast("Choose a backup JSON file first", "bad"); return; }
-        importInput.files[0].text().then(function (text) { return JSON.parse(text); }).then(function (payload) {
+        importInput.files[0].text().then(function (text) { return parseJsonLossless(text); }).then(function (payload) {
           return api(BASE + "/api/backup/import", { method: "POST", body: payload });
         }).then(function () { return refresh(); }).then(function () { toast("Configuration imported", "ok"); draw(); })
           .catch(function (error) { toast(error.message || "Invalid backup", "bad"); });
@@ -1435,10 +1589,18 @@
     });
   }
 
-  // The DOM helper is exported so its behaviour can be tested without a
-  // browser. In a browser the console boots normally.
+  // The DOM helper and the JSON round-trip helpers are exported so their
+  // behaviour can be tested without a browser. In a browser the console
+  // boots normally.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { el: el, emptyState: emptyState };
+    module.exports = {
+      el: el,
+      emptyState: emptyState,
+      parseJsonLossless: parseJsonLossless,
+      emitJson: emitJson,
+      policyInt: policyInt,
+      policyText: policyText
+    };
     return;
   }
 
