@@ -1380,6 +1380,35 @@ PYTHONPATH=src python3 -m unittest tests.test_browser_console -v` (1 test
 passed). The console source-string assertion was also updated to reject the
 old short-circuit condition.
 
+### R40 — A stream failure inside a weighted pool switched route — **closed**
+
+**Severity: medium routing-correctness.** The weighted-pool implementation
+reused the configured-fallback list as the failure surface: `Router.invoke()`
+merged the remaining pool members into `alias.fallbacks`
+(`src/gateway/core/routing.py`), and `_fallback_permitted` had no stream
+check. A stream request whose sticky pool member failed therefore invoked the
+other pool member whenever the alias carried the ordinary fallback opt-ins,
+breaking the T26 hard stop ("it never happens after a stream or a
+tool-bearing request"). Reproduced by independent QA (task `t_668683b3`): a
+stream request failing on the selected pool route invoked the alternate
+provider, count 1.
+
+**Fix.** `_fallback_permitted` takes `pooled_stream`; when the serving route
+came from a weighted pool and the request is a stream, the fallback is refused
+("a pool failure never switches route") and the failure surfaces on the same
+alias. The check is pool-scoped: ordinary primary/fallback aliases keep their
+existing pre-output fallback semantics.
+
+**Regression evidence.** `tests/test_weighted_pool.py`
+(`test_stream_failure_inside_pool_never_switches_route`,
+`test_stream_failure_inside_pool_surfaces_even_with_no_opt_ins`,
+`test_stream_inside_pool_serves_from_the_sticky_member`) drives real stream
+requests through the HTTP surface: the 502 names the hard stop, the alternate
+member's call count stays 0, the error detail lists exactly one attempt, and a
+buffered request with the same failure still falls back. Without the fix the
+new tests fail (1 failure, 1 error); with it the full suite passes (487
+tests, 2 skipped).
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
