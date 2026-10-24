@@ -89,6 +89,57 @@ cooldown cannot look like a silent failover.
 
 ---
 
+## Reasoning effort: one vocabulary, per-model support, and the `none` trap
+
+**Established from** OpenAI's official reasoning guide
+(`https://developers.openai.com/api/docs/guides/reasoning`, read
+2026-10-23), MiniMax's model documentation
+(`https://platform.minimax.io/docs/guides/text-generation`, read
+2026-10-23), and the dated OpenCode Go catalogue snapshot
+(`data/go_catalog.json`, observed 2026-10-22).
+
+OpenAI publishes the whole set the gateway recognises, in one sentence:
+
+> Supported values are model-dependent and can include `none`, `minimal`,
+> `low`, `medium`, `high`, `xhigh`, and `max`.
+
+That sentence carries three contract facts the gateway is built around:
+
+1. **"Model-dependent" is literal.** The same page documents that GPT-6
+   Astra **rejects `none` with HTTP 400** in both dialects
+   (`reasoning.effort` and `reasoning_effort`), and that GPT-6.1 Sol
+   accepts neither `none` nor `minimal`. So a level is never a property of
+   a dialect: it is a property of a model, and the gateway's rule (R19) is
+   that the route stays eligible, the level is dropped *for that route*,
+   and the substitution is recorded.
+2. **The gateway's vocabulary is that published set, and nothing else.**
+   `gateway.thinking.CANONICAL_LEVELS` is
+   `none, minimal, low, medium, high, xhigh, max`; `gateway.core.capabilities.REASONING_EFFORTS`
+   *is* that tuple. `ultra` is deliberately absent — no provider this
+   gateway serves or fronts publishes it, so the gateway does not claim it.
+   A client may still ask for it: an unknown level is forwarded and the
+   router decides, because a provider may publish a level the gateway has
+   not seen.
+3. **`none` is the trap.** It is a published level *and* the gateway's
+   spelling of "off", and it is **not portable**. In the dated catalogue
+   only the two Responses-dialect models (`gpt-5.6-luna`, `gpt-6-luna`)
+   publish it; the one chat-dialect model that publishes any levels
+   (`minimax-m3.1-flash`) publishes `low..max`, and the OpenCode Go chat
+   endpoint rejected the value in practice — that is what the commit
+   `fix: strip disabled reasoning before upstream chat call` (e03eadf) was
+   written for. The bridge therefore renders "off" **per target
+   dialect**: `reasoning: {"effort": "none"}` for Responses, and the
+   control *omitted* for Chat Completions. Sending `none` to a model that
+   does not publish it is a provider 400.
+
+**Budgets.** Neither served dialect has a budget parameter; an effort
+level is the whole control. `thinking.budget_tokens` and
+`thinkingBudget` are Anthropic and Google concepts, and those dialects are
+not served yet (T5/T6), so the gateway publishes no budget table and
+invents no budget. Such a control is refused on a converted path.
+
+---
+
 ## OpenCode Console Jev / System One
 
 **Established from** OpenCode Console's official models documentation at

@@ -10,6 +10,21 @@ Two rules govern every function here:
   :class:`ConversionError` with an actionable message.
 * **Content is preserved exactly.** Text, images, tool calls and tool
   results survive a round trip, and tool-call identifiers survive with them.
+
+A third rule governs the thinking-level control specifically, because it
+is the one control that arrives in several spellings and renders in two:
+
+* **One vocabulary, rendered per dialect.** ``reasoning_effort``,
+  ``reasoning.effort``, ``reasoning.enabled`` and the disabled level
+  ``none`` all normalise to one canonical level
+  (:data:`gateway.thinking.CANONICAL_LEVELS`), which renders as
+  ``reasoning: {effort}`` for Responses and ``reasoning_effort`` for Chat
+  Completions. "Disabled" is rendered per dialect rather than dropped:
+  Responses spells it ``effort: "none"``, Chat Completions omits the
+  control because no served model publishes that level. A control that is
+  *not* portable - an Anthropic ``thinking`` budget, a Google
+  ``thinkingConfig``, a reasoning summary on a Chat Completions target -
+  is refused.
 """
 
 from __future__ import annotations
@@ -34,11 +49,21 @@ from gateway.bridge.model import (
     NormalisedRequest,
 )
 from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
+from gateway.thinking import DISABLED_LEVEL, is_disabled_level
 
 #: Parameters that exist in one dialect and have no counterpart in the other.
 #: They are carried through :attr:`NormalisedRequest.extra` only when they
 #: are safe to drop; anything lossy raises instead.
 _CHAT_ONLY = ("n", "user", "seed", "logprobs", "top_logprobs", "presence_penalty", "frequency_penalty")
+
+#: The fields the gateway models inside a ``reasoning`` object, per source
+#: dialect. ``summary`` belongs to the Responses dialect only; Chat
+#: Completions has no such control, so it is refused there rather than
+#: carried and lost.
+_REASONING_FIELDS = {
+    DIALECT_OPENAI_CHAT: ("effort", "enabled"),
+    DIALECT_OPENAI_RESPONSES: ("effort", "enabled", "summary"),
+}
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -49,21 +74,84 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _without_disabled_reasoning(payload: dict[str, Any]) -> dict[str, Any]:
-    """Copy a same-dialect payload without non-portable disabled-reasoning controls."""
+def _forward_same_dialect(payload: dict[str, Any], dialect: str) -> dict[str, Any]:
+    """Forward a same-dialect payload, normalising only the thinking control.
+
+    A same-dialect payload is the upstream's own dialect, so a control the
+    gateway does not model is forwarded untouched: the provider is the
+    party that defines what it accepts, and forwarding is not a drop.
+
+    The thinking-level control is the exception, because two of its forms
+    are not portable even inside one dialect:
+
+    * **Disabled.** ``none`` is a published level for the Responses
+      models this gateway serves, so a Responses target receives it as
+      ``reasoning: {"effort": "none"}``. No served Chat Completions model
+      publishes it - the dated catalogue (``data/go_catalog.json``,
+      observed 2026-10-22) gives the levels of only three models, and
+      none of the chat-dialect ones is ``none`` - and OpenAI documents
+      HTTP 400 for a model that does not support it, so a Chat target
+      receives the request with the control omitted.
+    * **The nested Chat Completions spelling.** Chat Completions spells a
+      level with the flat ``reasoning_effort``; the nested form is
+      normalised to it rather than forwarded in a shape the upstream may
+      reject.
+
+    Both forms are normalised *before* any other forwarding decision, so
+    the flat and the nested spelling of one request can never disagree.
+    """
     forwarded = dict(payload)
     reasoning = forwarded.get("reasoning")
-    disabled = forwarded.get("reasoning_effort") == "none"
-    if isinstance(reasoning, dict):
-        disabled = disabled or reasoning.get("enabled") is False or reasoning.get("effort") == "none"
+    nested = reasoning if isinstance(reasoning, dict) else None
+    flat = forwarded.get("reasoning_effort")
+    disabled = flat == DISABLED_LEVEL or (
+        nested is not None
+        and (nested.get("enabled") is False or nested.get("effort") == DISABLED_LEVEL)
+    )
+
+    if dialect == DIALECT_OPENAI_RESPONSES:
+        if disabled:
+            # Normalise the control rather than forward it: the Responses
+            # dialect has no `enabled` field, so the level carries the
+            # intent and any other field the client sent survives with it.
+            rendered = {key: value for key, value in (nested or {}).items() if key != "enabled"}
+            rendered["effort"] = DISABLED_LEVEL
+            forwarded.pop("reasoning_effort", None)
+            forwarded["reasoning"] = rendered
+        return forwarded
+
     if disabled:
         forwarded.pop("reasoning", None)
         forwarded.pop("reasoning_effort", None)
+        return forwarded
+    if (
+        isinstance(nested, dict)
+        and set(nested) == {"effort"}
+        and isinstance(nested.get("effort"), str)
+        and flat is None
+    ):
+        forwarded.pop("reasoning", None)
+        forwarded["reasoning_effort"] = nested["effort"]
     return forwarded
 
 
-def _chat_reasoning(payload: dict[str, Any]) -> str | None:
-    """Read both Chat Completions spellings without discarding a control."""
+def _thinking_level(payload: dict[str, Any], dialect: str) -> tuple[str | None, str | None]:
+    """Read every inbound spelling of the thinking control, or refuse.
+
+    Every spelling normalises to one canonical level from
+    :data:`gateway.thinking.CANONICAL_LEVELS` - the flat
+    ``reasoning_effort``, the nested ``reasoning.effort``, and the
+    disabled forms ``reasoning_effort: "none"``, ``reasoning.effort:
+    "none"`` and ``reasoning.enabled: false``. Returns the level and the
+    Responses-dialect summary request, if any.
+
+    A control this normalisation cannot model - an Anthropic ``thinking``
+    budget, a Google ``thinkingConfig``, an unknown field inside
+    ``reasoning``, a value of the wrong type, or two spellings that
+    contradict each other - raises :class:`ConversionError`. It is never
+    dropped: the caller is on a converted path, where the upstream will
+    never see the original shape.
+    """
     if "thinking" in payload or "thinkingConfig" in payload:
         raise ConversionError(
             "thinking budget controls cannot be expressed by this OpenAI-family route; "
@@ -71,22 +159,36 @@ def _chat_reasoning(payload: dict[str, Any]) -> str | None:
             capability="thinking",
         )
     nested = payload.get("reasoning")
-    if nested is not None:
-        if not isinstance(nested, dict) or set(nested) - {"effort", "enabled"}:
-            raise ConversionError("unsupported reasoning controls in Chat Completions", capability="reasoning")
+    if nested is not None and not isinstance(nested, dict):
+        raise ConversionError("reasoning must be an object", capability="reasoning")
+    if isinstance(nested, dict):
+        allowed = _REASONING_FIELDS.get(dialect) or _REASONING_FIELDS[DIALECT_OPENAI_CHAT]
+        unknown = sorted(set(nested) - set(allowed))
+        if unknown:
+            raise ConversionError(
+                "unsupported reasoning controls in this dialect: " + ", ".join(unknown),
+                capability="reasoning",
+            )
         if "effort" in nested and not isinstance(nested["effort"], str):
             raise ConversionError("reasoning.effort must be a string", capability="reasoning")
+        if "enabled" in nested and not isinstance(nested["enabled"], bool):
+            raise ConversionError("reasoning.enabled must be a boolean", capability="reasoning")
+        if "summary" in nested and not isinstance(nested["summary"], str):
+            raise ConversionError("reasoning.summary must be a string", capability="reasoning")
     flat = payload.get("reasoning_effort")
     if flat is not None and not isinstance(flat, str):
         raise ConversionError("reasoning_effort must be a string", capability="reasoning")
+
     effort = nested.get("effort") if isinstance(nested, dict) else None
     if flat is not None and effort is not None and flat != effort:
         raise ConversionError("conflicting reasoning effort controls", capability="reasoning")
+    summary = nested.get("summary") if isinstance(nested, dict) else None
+    summary = summary if isinstance(summary, str) else None
     if isinstance(nested, dict) and nested.get("enabled") is False:
-        if (flat or effort) not in (None, "none"):
+        if (flat or effort) not in (None, DISABLED_LEVEL):
             raise ConversionError("reasoning is disabled but an effort was requested", capability="reasoning")
-        return "none"
-    return flat or effort
+        return DISABLED_LEVEL, summary
+    return (flat if flat is not None else effort), summary
 
 
 def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> bool:
@@ -317,7 +419,7 @@ def from_chat_completions(payload: dict[str, Any]) -> NormalisedRequest:
     if max_tokens is None:
         max_tokens = payload.get("max_tokens")
 
-    effort = _chat_reasoning(payload)
+    effort, summary = _thinking_level(payload, DIALECT_OPENAI_CHAT)
     stop = [str(s) for s in _as_list(payload.get("stop")) if isinstance(s, str)]
 
     extra = {key: payload[key] for key in _CHAT_ONLY if key in payload}
@@ -330,7 +432,8 @@ def from_chat_completions(payload: dict[str, Any]) -> NormalisedRequest:
         hosted_tools=hosted,
         stream=bool(payload.get("stream", False)),
         max_output_tokens=max_tokens if isinstance(max_tokens, int) else None,
-        reasoning_effort=effort if isinstance(effort, str) else None,
+        reasoning_effort=effort,
+        reasoning_summary=summary,
         temperature=payload.get("temperature") if isinstance(payload.get("temperature"), (int, float)) else None,
         top_p=payload.get("top_p") if isinstance(payload.get("top_p"), (int, float)) else None,
         stop=stop,
@@ -391,12 +494,7 @@ def from_responses(payload: dict[str, Any]) -> NormalisedRequest:
 
     functions, hosted = _responses_tools_to_normalised(payload.get("tools"))
 
-    reasoning = payload.get("reasoning")
-    effort = None
-    if isinstance(reasoning, dict):
-        value = reasoning.get("effort")
-        if isinstance(value, str):
-            effort = value
+    effort, summary = _thinking_level(payload, DIALECT_OPENAI_RESPONSES)
 
     max_output = payload.get("max_output_tokens")
     previous = payload.get("previous_response_id")
@@ -410,6 +508,7 @@ def from_responses(payload: dict[str, Any]) -> NormalisedRequest:
         stream=bool(payload.get("stream", False)),
         max_output_tokens=max_output if isinstance(max_output, int) else None,
         reasoning_effort=effort,
+        reasoning_summary=summary,
         temperature=payload.get("temperature") if isinstance(payload.get("temperature"), (int, float)) else None,
         top_p=payload.get("top_p") if isinstance(payload.get("top_p"), (int, float)) else None,
         previous_response_id=previous if isinstance(previous, str) else None,
@@ -428,6 +527,13 @@ def to_chat_completions(request: NormalisedRequest) -> dict[str, Any]:
         raise ConversionError(
             "this request uses hosted tools, which the Chat Completions dialect cannot express",
             capability="hosted_tools",
+        )
+    if request.reasoning_summary:
+        raise ConversionError(
+            "this route cannot request a reasoning summary; the Chat Completions "
+            "dialect has no such control. Remove reasoning.summary, or use a "
+            "Responses-dialect route.",
+            capability="reasoning_summary",
         )
 
     messages: list[dict[str, Any]] = []
@@ -483,7 +589,11 @@ def to_chat_completions(request: NormalisedRequest) -> dict[str, Any]:
         payload["stream_options"] = {"include_usage": True}
     if request.max_output_tokens is not None:
         payload["max_completion_tokens"] = request.max_output_tokens
-    if request.reasoning_effort:
+    # A disabled level has no published spelling for the Chat Completions
+    # models this gateway serves, and OpenAI documents HTTP 400 when a
+    # model does not support `none`, so the control is omitted rather than
+    # sent in a form the upstream will reject.
+    if request.reasoning_effort and not is_disabled_level(request.reasoning_effort):
         payload["reasoning_effort"] = request.reasoning_effort
     if request.temperature is not None:
         payload["temperature"] = request.temperature
@@ -547,8 +657,16 @@ def to_responses(request: NormalisedRequest) -> dict[str, Any]:
         payload["stream"] = True
     if request.max_output_tokens is not None:
         payload["max_output_tokens"] = request.max_output_tokens
+    # The Responses dialect spells "off" as a level, so a disabled control
+    # renders here instead of being dropped: both published Responses
+    # models list `none` (data/go_catalog.json, observed 2026-10-22).
+    reasoning: dict[str, Any] = {}
     if request.reasoning_effort:
-        payload["reasoning"] = {"effort": request.reasoning_effort}
+        reasoning["effort"] = request.reasoning_effort
+    if request.reasoning_summary:
+        reasoning["summary"] = request.reasoning_summary
+    if reasoning:
+        payload["reasoning"] = reasoning
     if request.temperature is not None:
         payload["temperature"] = request.temperature
     if request.top_p is not None:
@@ -564,19 +682,9 @@ def convert_request(payload: dict[str, Any], source: str, target: str) -> dict[s
         # Same dialect: the upstream owns its own dialect, so a control the
         # gateway does not understand is forwarded rather than dropped or
         # refused - the provider is the party that defines what it accepts.
-        if source == DIALECT_OPENAI_CHAT:
-            nested = payload.get("reasoning")
-            if (
-                isinstance(nested, dict)
-                and set(nested) == {"effort"}
-                and isinstance(nested.get("effort"), str)
-                and "reasoning_effort" not in payload
-            ):
-                forwarded = dict(payload)
-                forwarded.pop("reasoning", None)
-                forwarded["reasoning_effort"] = nested["effort"]
-                return forwarded
-        return _without_disabled_reasoning(payload)
+        # The thinking-level control is normalised even here, so that the
+        # flat and the nested spelling of one request cannot disagree.
+        return _forward_same_dialect(payload, source)
     if source == DIALECT_OPENAI_CHAT and target == DIALECT_OPENAI_RESPONSES:
         return to_responses(from_chat_completions(payload))
     if source == DIALECT_OPENAI_RESPONSES and target == DIALECT_OPENAI_CHAT:
