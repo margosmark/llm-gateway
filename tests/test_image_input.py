@@ -220,9 +220,11 @@ class RouterImageEnforcementTests(unittest.TestCase):
     def test_image_request_with_no_capable_route_fails_closed_at_the_gateway(self) -> None:
         harness, primary = self._harness(primary_images=False, fallback_images=False)
         self.addCleanup(harness.close)
-        status, payload, _ = harness.request("POST", "/v1/chat/completions", body=_image_payload())
+        status, payload, headers = harness.request("POST", "/v1/chat/completions", body=_image_payload())
         self.assertEqual(status, 503)
         self.assertEqual(payload["error"]["type"], "no_eligible_route")
+        self.assertNotIn("retry_after_seconds", payload["error"])
+        self.assertNotIn("Retry-After", dict(headers))
         self.assertEqual(primary.calls, [])
         # The public refusal is generic: no upstream provider or model
         # identifiers may leak into the response payload.
@@ -230,6 +232,18 @@ class RouterImageEnforcementTests(unittest.TestCase):
         for identifier in (FAKE_PROVIDER, "gpt-6-luna", "opencode_go", "mimo-v2.6-flash"):
             self.assertNotIn(identifier, serialized)
         self.assertNotIn("detail", payload["error"])
+
+    def test_circuit_expiry_is_returned_as_bounded_retry_after(self) -> None:
+        harness, primary = self._harness(primary_images=False, fallback_images=False)
+        self.addCleanup(harness.close)
+        harness.router.circuits.set(FAKE_PROVIDER, 900, model="gpt-6-luna")
+        status, payload, headers = harness.request("POST", "/v1/chat/completions", body=_image_payload())
+        self.assertEqual(status, 503)
+        retry_after = int(dict(headers)["Retry-After"])
+        self.assertGreaterEqual(retry_after, 895)
+        self.assertLessEqual(retry_after, 900)
+        self.assertEqual(payload["error"]["retry_after_seconds"], retry_after)
+        self.assertEqual(primary.calls, [])
 
     def test_a_text_only_request_is_unaffected_by_the_image_rule(self) -> None:
         harness, primary = self._harness(primary_images=False, fallback_images=False)
