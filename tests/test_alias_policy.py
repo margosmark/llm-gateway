@@ -517,6 +517,30 @@ class ConsoleSaveTests(unittest.TestCase):
             AliasPolicy.from_dict({"defaults": TODO_POLICY["defaults"]}),
         )
 
+    def test_a_console_built_policy_with_a_system_rule_is_stored_and_governs(self) -> None:
+        # The console policy editor submits the full intended policy. The
+        # rule carried by the default-system textarea must survive the save
+        # round trip and stay in force on the next request (review finding:
+        # a blank editor silently deleted the configured system default).
+        harness = self._harness(defaults=TODO_POLICY["defaults"])
+        intended = {
+            "defaults": {"system": "You are a careful senior engineer.", "temperature": 0.4},
+        }
+        status, body, _ = self._save(harness, policy=intended)
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "changed")
+        self.assertEqual(
+            harness.config.snapshot().aliases["coding"].policy,
+            AliasPolicy.from_dict(intended),
+        )
+        # The edited control and the system rule are both in force upstream.
+        status, _, _ = harness.request("POST", "/v1/chat/completions", body=chat_body())
+        self.assertEqual(status, 200)
+        upstream = harness.adapter.calls[0].payload
+        self.assertEqual(upstream["temperature"], 0.4)
+        self.assertEqual(upstream["instructions"], "You are a careful senior engineer.")
+
     def test_a_save_of_an_alias_without_a_policy_reports_none(self) -> None:
         harness = self._harness()
         status, body, _ = self._save(harness)

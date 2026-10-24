@@ -19,7 +19,7 @@ const el = helpers.el;
 
 // A minimal DOM node, enough to observe attribute behaviour.
 function makeNode(tag) {
-  return {
+  const node = {
     tag: tag,
     attributes: {},
     listeners: {},
@@ -30,6 +30,14 @@ function makeNode(tag) {
     },
     setAttribute(key, value) {
       this.attributes[key] = String(value);
+      // Browser asymmetry: the `value` content attribute is an element's
+      // DEFAULT value. An <input> reflects it into .value; a <textarea>'s
+      // editable text comes from its child text, so setAttribute("value")
+      // never populates it (verified in a real browser - the review
+      // finding that motivated this).
+      if (key === "value" && tag !== "textarea" && this.value === undefined) {
+        this.value = String(value);
+      }
     },
     removeAttribute(key) {
       delete this.attributes[key];
@@ -38,6 +46,9 @@ function makeNode(tag) {
       this.listeners[name] = handler;
     },
   };
+  // A textarea's editable text starts empty, independent of attributes.
+  if (tag === "textarea") node.value = "";
+  return node;
 }
 
 // The helper builds real DOM nodes, so exercise it through a tiny stub.
@@ -164,6 +175,119 @@ check("phase policy editor has only the three supported phases and enabled-model
   assert(source.includes('text: "Enable Jev inference"'));
   assert(source.includes('text: "Minimum confidence (0–1)"'));
   assert(source.includes('text: "When uncertain"'));
+});
+
+check("alias request policy editor exposes the canonical defaults, caps, and deny controls", function () {
+  assert(source.includes('text: "Request policy"'));
+  assert(source.includes('text: "Default temperature (0–2)"'));
+  assert(source.includes('text: "Default max output tokens"'));
+  assert(source.includes('text: "Default thinking level"'));
+  assert(source.includes('text: "Default system instruction (up to 4000 characters)"'));
+  assert(source.includes('text: "Cap max output tokens"'));
+  assert(source.includes('text: "Cap thinking level"'));
+  assert(source.includes('text: "Deny requests with tools"'));
+  assert(source.includes('text: "Force store"'));
+  assert(source.includes('["none", "minimal", "low", "medium", "high", "xhigh", "max"]'));
+  assert(source.includes('maxlength: "4000"'));
+  assert(source.includes('min: "0", max: "2"'));
+  assert(source.includes('"Current policy: " + JSON.stringify(requestPolicy)'));
+});
+
+check("policy save submits explicit policy including deliberate removal and reports server outcome", function () {
+  assert(source.includes('text: "Remove request policy"'));
+  assert(source.includes('if (!removeRequestPolicy.checked)'));
+  assert(source.includes('policy: policy'));
+  assert(source.includes('result && result.policy && result.policy.state'));
+  assert(source.includes('" Request policy " + policyState + "."'));
+});
+
+// --- the alias policy editor, executed against the stub -------------------
+// The blocks below are sliced from the real console.js source, so these
+// checks exercise the shipped editor and save code, not a hand copy.
+
+const editorSlice = source.slice(
+  source.indexOf("var requestPolicy = editing && editing.policy;"),
+  source.indexOf("var capTokens =")
+);
+const rebuildStart = source.indexOf("if (!removeRequestPolicy.checked) {");
+const rebuildSlice = source.slice(
+  rebuildStart,
+  source.indexOf("if (!removePhasePolicy.checked && (phaseEnabled.checked || phasePolicy))", rebuildStart)
+);
+
+const POLICY_SYSTEM = "You are a careful senior engineer.";
+const policiedAlias = {
+  policy: {
+    defaults: { temperature: 0.1, system: POLICY_SYSTEM },
+    caps: { max_output_tokens: 32000 },
+    deny: { store: false },
+  },
+};
+
+function buildSystemTextarea(alias) {
+  return new Function("editing", "el", editorSlice + "\nreturn defaultSystem;")(alias, elWithStub);
+}
+
+function rebuildPolicy(controls) {
+  return new Function(
+    "removeRequestPolicy",
+    "defaultTemperature",
+    "defaultTokens",
+    "defaultThinking",
+    "defaultSystem",
+    "capTokens",
+    "capThinking",
+    "denyTools",
+    "denyStore",
+    "var policy = null;\n" + rebuildSlice + "\nreturn policy;"
+  )(
+    controls.removeRequestPolicy,
+    controls.defaultTemperature,
+    controls.defaultTokens,
+    controls.defaultThinking,
+    controls.defaultSystem,
+    controls.capTokens,
+    controls.capThinking,
+    controls.denyTools,
+    controls.denyStore
+  );
+}
+
+check("the policy system textarea is editable, not merely attributed", function () {
+  // Regression: the textarea was initialised with a `value` attribute,
+  // which does not populate a textarea's editable .value - the editor
+  // rendered blank while the JSON summary showed the rule.
+  const textarea = buildSystemTextarea(policiedAlias);
+  assert.strictEqual(textarea.value, POLICY_SYSTEM);
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(textarea.attributes, "value"),
+    false
+  );
+});
+
+check("editing another policy control and saving keeps the configured system rule", function () {
+  // Regression: with a blank textarea the rebuilt policy omitted `system`,
+  // and the save endpoint - correctly replacing the policy with what the
+  // editor sent - silently deleted the owner's default instruction.
+  const textarea = buildSystemTextarea(policiedAlias);
+  const policy = rebuildPolicy({
+    removeRequestPolicy: { checked: false },
+    defaultTemperature: { value: "0.4" },
+    defaultTokens: { value: "" },
+    defaultThinking: { value: "" },
+    defaultSystem: textarea,
+    capTokens: { value: "32000" },
+    capThinking: { value: "" },
+    denyTools: { checked: false },
+    denyStore: { value: "" },
+  });
+  assert.strictEqual(policy.defaults.system, POLICY_SYSTEM);
+  assert.strictEqual(policy.defaults.temperature, 0.4);
+});
+
+check("the policy editor never initialises a textarea from the value attribute", function () {
+  assert(source.includes('el("textarea", { maxlength: "4000", rows: "3" })'));
+  assert(source.includes("defaultSystem.value = policyDefaults.system || \"\";"));
 });
 
 check("removing a phase policy overrides the enabled toggle", function () {
