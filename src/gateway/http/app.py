@@ -85,6 +85,7 @@ from gateway.config import (
     STATE_CONNECTED,
     STATE_FAILED,
     STATE_NOT_CONFIGURED,
+    AliasPolicy,
     ConfigStore,
     GatewayConfig,
     ModelEntry,
@@ -3143,6 +3144,41 @@ class GatewayApp:
                 return json_response(
                     {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}}, 400
                 )
+            # A save may carry a `policy` block, parsed by the same rule
+            # as the configuration file (R40). The console form sends
+            # none, so a file-configured policy survives an unrelated
+            # edit instead of being dropped silently.
+            policy_supplied = "policy" in payload
+            submitted_policy = None
+            if policy_supplied:
+                raw_policy = payload.get("policy")
+                if raw_policy is not None and not isinstance(raw_policy, dict):
+                    return json_response(
+                        {
+                            "error": {
+                                "message": "the policy block must be an object or null",
+                                "type": "invalid_alias",
+                                "field": "policy",
+                            }
+                        },
+                        400,
+                    )
+                submitted_policy = AliasPolicy.from_dict(raw_policy)
+                if submitted_policy is None and raw_policy:
+                    # An explicit block that rules nothing after
+                    # validation is refused, never dropped quietly: a
+                    # mutation endpoint must not guess what the owner
+                    # meant by a policy that parses to nothing.
+                    return json_response(
+                        {
+                            "error": {
+                                "message": "the policy block rules nothing after validation",
+                                "type": "invalid_alias",
+                                "field": "policy",
+                            }
+                        },
+                        400,
+                    )
             triggers = [t for t in payload.get("fallback_triggers") or [] if t in FALLBACK_TRIGGERS]
             confirmed = [p for p in payload.get("fallback_confirmed_providers") or [] if isinstance(p, str)]
             safe_classes = [
@@ -3155,6 +3191,8 @@ class GatewayApp:
                 return json_response({"error": {"message": "budget must be a finite USD amount greater than 0 and at most 1000000, or null", "type": "invalid_budget"}}, 400)
             with self.config.mutate() as config:
                 existing = config.aliases.get(alias_name)
+                policy_before = existing.policy if existing else None
+                policy = submitted_policy if policy_supplied else policy_before
                 alias = _alias_from_payload(
                     alias_name,
                     primary,
@@ -3167,10 +3205,15 @@ class GatewayApp:
                     enabled=bool(payload.get("enabled", existing.enabled if existing else False)),
                     phase_routing=phase_routing,
                     tag=tag,
+                    policy=policy,
                 )
                 config.aliases[alias_name] = alias
                 config.aliases[alias_name].budget = budget
-            return json_response(_with_warning({"ok": True}, alias))
+            # What the save did to the request policy is reported on
+            # every response: a change is never silent (R40).
+            return json_response(
+                _with_warning({"ok": True, "policy": _policy_save_outcome(policy_before, policy)}, alias)
+            )
 
         if action == "publish":
             # Publishing is the last chance to refuse an alias that cannot
@@ -3509,6 +3552,7 @@ def _alias_from_payload(
     enabled: bool,
     phase_routing=None,
     tag: str = "",
+    policy=None,
 ):
     from gateway.config import Alias
 
@@ -3524,7 +3568,29 @@ def _alias_from_payload(
         cooldown_seconds=cooldown,
         phase_routing=phase_routing,
         tag=tag,
+        policy=policy,
     )
+
+
+def _policy_save_outcome(before, after) -> dict:
+    """What an alias save did to the request policy - reported, never silent.
+
+    ``preserved`` means an existing policy was carried across an edit the
+    owner made to other fields (the console form never submits one, so
+    this is the common case and the R40 guarantee); ``unchanged`` means
+    an explicitly resubmitted block matched the one already stored.
+    """
+    if before is None:
+        if after is None:
+            return {"state": "none"}
+        return {"state": "set", "after": after.to_dict()}
+    if after is None:
+        return {"state": "cleared", "before": before.to_dict()}
+    if before is after:
+        return {"state": "preserved"}
+    if before.to_dict() == after.to_dict():
+        return {"state": "unchanged"}
+    return {"state": "changed", "before": before.to_dict(), "after": after.to_dict()}
 
 
 def _new_provider_state(provider_id: str, kind: str):
