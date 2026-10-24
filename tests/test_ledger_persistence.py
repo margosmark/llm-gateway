@@ -102,6 +102,66 @@ class DurableLedgerTests(unittest.TestCase):
             self.assertNotIn(secret, json.dumps(ledger.recent()))
             ledger.close()
 
+    def test_load_keeps_only_field_names_in_an_attempt(self) -> None:
+        # A durable row is only as trustworthy as the gate that reads it.
+        # Field names ride along; everything else in the attempt - the
+        # reason text and any value smuggled in as a "field name" - does not.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.jsonl"
+            secret = "sk-" + "B" * 28
+            row = {
+                "request_id": "hostile",
+                "timestamp": "2026-10-24T00:00:00Z",
+                "requested_alias": "a",
+                "error_class": "malformed",
+                "attempts": [
+                    {
+                        "provider": "p",
+                        "outcome": "error",
+                        "error_class": "malformed",
+                        "reason": f"the provider rejected the request: {secret}",
+                        "rejected_fields": ["temperature", "prompt=" + secret, "x" * 200, "temperature", 7],
+                    }
+                ],
+            }
+            path.write_text(json.dumps(row) + "\n")
+            ledger = RequestLedger(persistence_path=path)
+            attempt = ledger.recent()[0]["attempts"][0]
+            self.assertEqual(attempt["rejected_fields"], ["temperature"])
+            # The reason is derived from the class and the validated names,
+            # never copied from the row.
+            self.assertEqual(
+                attempt["reason"],
+                "the provider rejected the request as malformed (rejected fields: temperature)",
+            )
+            self.assertNotIn(secret, path.read_text())
+            ledger.close()
+
+    def test_round_trip_preserves_rejected_field_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.jsonl"
+            ledger = RequestLedger(persistence_path=path)
+            event = RequestEvent(
+                "req-field", "2026-10-24T00:00:00Z", "coding",
+                serving_provider="chatgpt_codex", serving_model="gpt-6-luna",
+                status=502, error_class="malformed",
+                attempts=[{
+                    "provider": "chatgpt_codex", "model": "gpt-6-luna",
+                    "outcome": "error", "error_class": "malformed",
+                    "reason": "the provider rejected the request as malformed (rejected fields: temperature)",
+                    "rejected_fields": ["temperature"],
+                }],
+            )
+            ledger.record(event)
+            self.assertTrue(ledger.flush())
+            ledger.close()
+            restarted = RequestLedger(persistence_path=path)
+            attempt = restarted.recent()[0]["attempts"][0]
+            self.assertEqual(attempt["rejected_fields"], ["temperature"])
+            self.assertIn("temperature", attempt["reason"])
+            self.assertEqual(restarted.recent()[0]["serving_provider"], "chatgpt_codex")
+            restarted.close()
+
     def test_status_declares_retention_and_durability(self) -> None:
         ledger = RequestLedger()
         self.assertEqual(ledger.durability(), {"enabled": False, "retention_days": 30, "billing_system": False})

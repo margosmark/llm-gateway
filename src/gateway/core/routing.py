@@ -138,12 +138,18 @@ def _unsupported_payload_fields(adapter: Adapter | None) -> frozenset[str]:
 class RoutingError(Exception):
     """A routing failure that the caller turns into an HTTP response."""
 
-    def __init__(self, message: str, code: str = "routing_error", status: int = 400, detail: Any = None) -> None:
+    def __init__(self, message: str, code: str = "routing_error", status: int = 400, detail: Any = None,
+                 log_attribution: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.status = status
         self.detail = detail
+        #: How the request was routed, including the route it failed on.
+        #: Kept off ``to_dict()``: an error *body* stays generic, while the
+        #: access log and the durable ledger may say which alias and route
+        #: were involved. Without it a 502 names nothing.
+        self.log_attribution = log_attribution
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"error": {"message": self.message, "type": self.code}}
@@ -184,7 +190,13 @@ class Candidate:
 
 @dataclass
 class Attribution:
-    """Which provider and model actually served a request."""
+    """Which provider and model actually served a request.
+
+    ``serving_provider`` / ``serving_model`` always name the *last route
+    tried*. On a request that was served that is the serving route; on a
+    request that failed it is the route the failure came from, so a 502 is
+    attributable rather than recorded as null, null.
+    """
 
     requested_alias: str
     serving_provider: str | None = None
@@ -677,6 +689,10 @@ class Router:
                         "reason": exc.message,
                     }
                 )
+                # Same as the failure path: a request that never succeeds
+                # still names the route it was refused on.
+                attribution.serving_provider = candidate.route.provider
+                attribution.serving_model = candidate.route.model
                 if is_last:
                     break
                 allowed, reason = self._fallback_permitted(
@@ -758,15 +774,29 @@ class Router:
                 response = candidate.adapter.invoke(request)  # type: ignore[union-attr]
             except AdapterError as exc:
                 last_error = exc
-                attribution.attempts.append(
-                    {
-                        "provider": candidate.route.provider,
-                        "model": candidate.route.model,
-                        "outcome": "error",
-                        "error_class": exc.error_class,
-                        "reason": CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN]),
-                    }
-                )
+                attempt: dict[str, Any] = {
+                    "provider": candidate.route.provider,
+                    "model": candidate.route.model,
+                    "outcome": "error",
+                    "error_class": exc.error_class,
+                    "reason": CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN]),
+                }
+                if exc.rejected_fields:
+                    # A shape rejection is only diagnosable from the field it
+                    # named. That name - never the body's text - is carried
+                    # into the attempt so the failure is attributable.
+                    attempt["rejected_fields"] = list(exc.rejected_fields)
+                    attempt["reason"] = (
+                        f"{attempt['reason']} (rejected fields: {', '.join(exc.rejected_fields)})"
+                    )
+                attribution.attempts.append(attempt)
+                # A request that never succeeds must still name the route it
+                # failed on. The success path sets these to the serving
+                # route; without this the durable ledger records null
+                # serving_provider and serving_model for exactly the
+                # failures an operator most needs to diagnose.
+                attribution.serving_provider = candidate.route.provider
+                attribution.serving_model = candidate.route.model
                 self._maybe_open_circuit(alias, candidate, exc)
 
                 if is_last:
@@ -821,6 +851,9 @@ class Router:
                 f"no eligible route for alias '{alias_name}'",
                 code="no_eligible_route",
                 status=503,
+                # The access log still needs to know which alias and which
+                # routes were considered; the response body stays generic.
+                log_attribution=attribution.to_dict(),
             )
         # A provider failure is an upstream failure. It is reported as 502
         # even when the provider rejected its own credential, because the
@@ -830,6 +863,9 @@ class Router:
             code=last_error.error_class,
             status=502,
             detail={"attempts": attribution.attempts},
+            # The access log and the durable ledger need the alias and the
+            # route the request died on; the response body does not.
+            log_attribution=attribution.to_dict(),
         )
 
     def _record(
