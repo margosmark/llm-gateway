@@ -327,7 +327,7 @@
           el("td", { class: "small", text: event.serving_provider ? providerLabel(event.serving_provider) + " → " + event.serving_model : "—" }),
           el("td", { class: "small", text: event.error_class ? event.error_class : ("status " + (event.status || "")) + (event.fallback_used ? " (fallback)" : "") }),
           el("td", { class: "small", text: event.cost && event.cost.amount_usd != null ? "$" + Number(event.cost.amount_usd).toFixed(6) + " · " + event.cost.source + " · " + event.cost.observed_at : "Unknown" }),
-          el("td", { class: "small muted", text: (event.degradations || []).map(function (d) { return d.reason; }).join("; ") })
+          el("td", { class: "small muted", text: ledgerNote(event) })
         ]));
       });
       table.appendChild(tbody);
@@ -401,6 +401,77 @@
     ]);
   }
 
+  // The note column names *why* a request was not served by its primary:
+  // a configured phase route picked a different primary (not a fallback),
+  // a local circuit held a route, or the upstream failed. Each reason is
+  // labelled so a circuit fallback is never read as a phase choice.
+  function ledgerNote(event) {
+    var parts = [];
+    (event.degradations || []).forEach(function (d) { parts.push(d.reason); });
+    if (event.phase) {
+      parts.push("phase route: " + event.phase + (event.phase_source ? " (" + event.phase_source + ")" : ""));
+    }
+    if (event.fallback_used && event.fallback_reason) {
+      parts.push("fallback: " + event.fallback_reason);
+    }
+    (event.skipped || []).forEach(function (s) {
+      var why = s.reason || "";
+      var kind = why.indexOf("cooldown") !== -1 || why.indexOf("recovery probe") !== -1
+        ? "held by local circuit"
+        : "not eligible";
+      parts.push("skipped " + s.provider + "/" + s.model + " (" + kind + "): " + why);
+    });
+    return parts.join("; ");
+  }
+
+  function cooldownPolicyText() {
+    var policy = state.cooldown_policy || {};
+    if (policy.exhausted_max_seconds == null) return "unknown";
+    return "a confirmed provider exhaustion holds for at most " + policy.exhausted_max_seconds +
+      "s (floor " + policy.exhausted_base_seconds + "s); when the window ends exactly one recovery" +
+      " probe is let through, and a concurrent request falls back until it answers";
+  }
+
+  // The cooldown table is the operator's view of a held provider: when the
+  // exhaustion was seen, how long the hold runs, when the next automatic
+  // probe may run, and whether one is in flight right now.
+  function cooldownTable() {
+    var details = state.cooldown_details || {};
+    var keys = Object.keys(details).sort();
+    var card = el("div", {}, [el("h3", { text: "Local cooldowns" })]);
+    if (!keys.length) {
+      card.appendChild(el("p", { class: "small muted", text: "No local cooldowns are open. A fallback may still be caused by a configured phase route; the request ledger below names the reason for every request." }));
+      return card;
+    }
+    var table = el("table", {}, [
+      el("thead", {}, [el("tr", {}, [
+        el("th", { text: "Route" }), el("th", { text: "Scope" }),
+        el("th", { text: "Failure" }), el("th", { text: "Failures" }),
+        el("th", { text: "Opened" }), el("th", { text: "Hold left" }),
+        el("th", { text: "Next probe" }), el("th", { text: "State" }),
+        el("th", { text: "Why" })
+      ])])
+    ]);
+    var tbody = el("tbody");
+    keys.forEach(function (key) {
+      var entry = details[key] || {};
+      tbody.appendChild(el("tr", {}, [
+        el("td", { class: "small", text: key }),
+        el("td", { class: "small", text: entry.scope === "provider" ? "whole provider" : "this route only" }),
+        el("td", { class: "small", text: entry.error_class || "unknown" }),
+        el("td", { class: "small", text: String(entry.failures || 0) }),
+        el("td", { class: "small", text: when(entry.opened_at ? new Date(entry.opened_at * 1000).toISOString() : null) }),
+        el("td", { class: "small", text: (entry.remaining_seconds || 0) + "s" }),
+        el("td", { class: "small", text: entry.next_probe_at ? when(new Date(entry.next_probe_at * 1000).toISOString()) : "Unknown" }),
+        el("td", { class: "small", text: (entry.state || "unknown") + (entry.probe_in_flight ? " · probe in flight" : "") }),
+        el("td", { class: "small muted", text: entry.reason || "" })
+      ]));
+    });
+    table.appendChild(tbody);
+    card.appendChild(table);
+    return card;
+  }
+
   function renderChecklist() {
     var list = el("ul", { class: "checklist" });
     (state.checklist || []).forEach(function (item) {
@@ -451,6 +522,33 @@
               run(api(BASE + "/api/provider", { method: "POST", body: { action: "refresh", provider_id: provider.provider_id } }))
                 .then(function (result) {
                   toast("Catalog refreshed: " + result.model_count + " models.", "ok");
+                  return refresh();
+                })
+                .catch(function () {});
+            }
+          })
+        ]),
+        el("div", { class: "narrow" }, [
+          el("button", {
+            type: "button", text: "Clear cooldowns",
+            onclick: function () {
+              // A deliberate recovery action: the owner confirms the
+              // subscription/reset window is open before the local
+              // circuits for this provider are cleared.
+              if (!window.confirm(
+                "Clear the local cooldowns for " + providerLabel(provider.provider_id) + "?\n\n" +
+                "Only do this after you have confirmed the subscription or reset window has reopened. " +
+                "The next request to this provider will be the single recovery probe."
+              )) return;
+              run(api(BASE + "/api/provider", { method: "POST", body: { action: "clear_cooldowns", provider_id: provider.provider_id } }))
+                .then(function (result) {
+                  var message = "Cleared " + result.cleared_count + " cooldown(s) for " + providerLabel(provider.provider_id) + ".";
+                  if (result.probe) {
+                    message += result.probe.ok
+                      ? " Recovery probe served by " + providerLabel(result.probe.serving_provider) + " → " + result.probe.serving_model + "."
+                      : " Recovery probe failed: " + (result.probe.error && result.probe.error.message ? result.probe.error.message : "unknown error") + ".";
+                  }
+                  toast(message, result.probe && !result.probe.ok ? "bad" : "ok");
                   return refresh();
                 })
                 .catch(function () {});
@@ -1216,9 +1314,9 @@
         el("h2", { text: "Runtime" }),
         el("dl", { class: "kv" }, [
           el("dt", { text: "Request timeouts" }), el("dd", { text: "read-only safe runtime limits" }),
-          el("dt", { text: "Local cooldowns" }), el("dd", { text: JSON.stringify(state.cooldowns || {}) })
+          el("dt", { text: "Local cooldown policy" }), el("dd", { text: cooldownPolicyText() })
         ]),
-
+        cooldownTable()
       ])
     ]));
 
