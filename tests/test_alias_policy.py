@@ -541,6 +541,27 @@ class ConsoleSaveTests(unittest.TestCase):
         self.assertEqual(upstream["temperature"], 0.4)
         self.assertEqual(upstream["instructions"], "You are a careful senior engineer.")
 
+    def test_a_console_built_policy_with_a_non_tenth_temperature_is_accepted(self) -> None:
+        # The published temperature range is any numeric value in [0, 2]
+        # (config._policy_temperature) - not a 0.1 grid. A console-built
+        # policy carrying 0.15 must save and then govern upstream, so the
+        # editor never forces the owner to rewrite a valid stored
+        # temperature just to complete an unrelated edit (review finding
+        # on the policy editor: a UI-only step grid refused it).
+        harness = self._harness(defaults=TODO_POLICY["defaults"])
+        intended = {"defaults": {"temperature": 0.15}}
+        status, body, _ = self._save(harness, policy=intended)
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "changed")
+        self.assertEqual(
+            harness.config.snapshot().aliases["coding"].policy,
+            AliasPolicy.from_dict(intended),
+        )
+        status, _, _ = harness.request("POST", "/v1/chat/completions", body=chat_body())
+        self.assertEqual(status, 200)
+        self.assertEqual(harness.adapter.calls[0].payload["temperature"], 0.15)
+
     def test_a_save_of_an_alias_without_a_policy_reports_none(self) -> None:
         harness = self._harness()
         status, body, _ = self._save(harness)

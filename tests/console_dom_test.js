@@ -48,6 +48,30 @@ function makeNode(tag) {
   };
   // A textarea's editable text starts empty, independent of attributes.
   if (tag === "textarea") node.value = "";
+  // Browser-faithful constraint validation for number inputs, so the save
+  // guard's checkValidity() call behaves here exactly as it does in a real
+  // browser: min/max bounds plus the step grid anchored at `min` (default
+  // step 1; step="any" disables the grid). stepMismatch on a valid 0.15 is
+  // the review finding this mirrors.
+  if (tag === "input") {
+    node.checkValidity = function () {
+      if (this.value === undefined || this.value === "") return true; // no value, no constraint
+      const number = Number(this.value);
+      if (!Number.isFinite(number)) return true; // a bad value is reported as no value
+      const min = this.attributes.min === undefined ? null : Number(this.attributes.min);
+      const max = this.attributes.max === undefined ? null : Number(this.attributes.max);
+      if (min !== null && number < min) return false;
+      if (max !== null && number > max) return false;
+      const step = this.attributes.step === undefined ? 1 : Number(this.attributes.step);
+      if (Number.isFinite(step) && step > 0) {
+        const base = min === null ? 0 : min;
+        const offset = (number - base) / step;
+        // Browsers forgive floating-point representation error on the grid.
+        if (Math.abs(offset - Math.round(offset)) > 1e-6) return false;
+      }
+      return true;
+    };
+  }
   return node;
 }
 
@@ -224,8 +248,18 @@ const policiedAlias = {
   },
 };
 
+function buildPolicyControls(alias) {
+  return new Function(
+    "editing",
+    "el",
+    editorSlice +
+      "\nreturn { removeRequestPolicy: removeRequestPolicy, defaultTemperature: defaultTemperature," +
+      " defaultTokens: defaultTokens, defaultThinking: defaultThinking, defaultSystem: defaultSystem };"
+  )(alias, elWithStub);
+}
+
 function buildSystemTextarea(alias) {
-  return new Function("editing", "el", editorSlice + "\nreturn defaultSystem;")(alias, elWithStub);
+  return buildPolicyControls(alias).defaultSystem;
 }
 
 function rebuildPolicy(controls) {
@@ -288,6 +322,69 @@ check("editing another policy control and saving keeps the configured system rul
 check("the policy editor never initialises a textarea from the value attribute", function () {
   assert(source.includes('el("textarea", { maxlength: "4000", rows: "3" })'));
   assert(source.includes("defaultSystem.value = policyDefaults.system || \"\";"));
+});
+
+check("the temperature control keeps the server's bounds but adds no tighter step grid", function () {
+  // Regression: `step: "0.1"` made checkValidity() report stepMismatch for
+  // a stored 0.15, which the server accepts (config._policy_temperature:
+  // any numeric temperature in [0, 2]). The save handler refuses the whole
+  // save on any invalid policy number, so an unrelated edit was blocked.
+  assert(source.includes('min: "0", max: "2", step: "any"'));
+  assert(!source.includes('step: "0.1"'));
+});
+
+check("an unrelated edit keeps a valid non-tenth temperature through guard and rebuild", function () {
+  // Executed against the real editor and save code: an alias configured
+  // with temperature 0.15 must load into the control, pass the save
+  // guard's checkValidity() sweep, and be rebuilt into the submitted
+  // policy while another control is edited.
+  const controls = buildPolicyControls({
+    policy: { defaults: { temperature: 0.15, system: POLICY_SYSTEM } },
+  });
+  assert.strictEqual(controls.defaultTemperature.value, "0.15");
+  assert.strictEqual(controls.defaultTemperature.checkValidity(), true);
+
+  // The real save guard, sliced from console.js and run against the
+  // built controls; "continued" means the guard did not refuse the save.
+  const guardSlice = source.slice(
+    source.indexOf("var policyNumericFields ="),
+    source.indexOf("var triggers =")
+  );
+  const guard = new Function(
+    "defaultTemperature",
+    "defaultTokens",
+    "capTokens",
+    "toast",
+    guardSlice + '\nreturn "continued";'
+  );
+  const toasts = [];
+  const outcome = guard(
+    controls.defaultTemperature,
+    controls.defaultTokens,
+    { value: "", checkValidity: function () { return true; } },
+    function (message) { toasts.push(message); }
+  );
+  assert.strictEqual(
+    outcome,
+    "continued",
+    "the save guard refused a valid temperature of 0.15: " + toasts.join("; ")
+  );
+
+  // The rebuilt policy still carries 0.15 while another control changes.
+  const policy = rebuildPolicy({
+    removeRequestPolicy: controls.removeRequestPolicy,
+    defaultTemperature: controls.defaultTemperature,
+    defaultTokens: controls.defaultTokens,
+    defaultThinking: { value: "high" },
+    defaultSystem: controls.defaultSystem,
+    capTokens: { value: "32000" },
+    capThinking: { value: "" },
+    denyTools: { checked: false },
+    denyStore: { value: "" },
+  });
+  assert.strictEqual(policy.defaults.temperature, 0.15);
+  assert.strictEqual(policy.defaults.thinking_level, "high");
+  assert.strictEqual(policy.defaults.system, POLICY_SYSTEM);
 });
 
 check("removing a phase policy overrides the enabled toggle", function () {
