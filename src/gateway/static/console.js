@@ -176,10 +176,24 @@
 
   // A token control holds digits as text; hand back a plain number when a
   // double represents it exactly, and an exact-integer marker when it does
-  // not, so no digit is lost on the way to the server.
+  // not, so no digit is lost on the way to the server. The save guard
+  // admits only plain digit strings (isExactDigits below), so the Number()
+  // branch here can never see an exponent form such as "1e21".
   function policyInt(text) {
     var digits = String(text).trim();
     return isUnsafeInteger(digits) ? rawInt(digits) : Number(digits);
+  }
+
+  // A token count must be plain digits. checkValidity() accepts any valid
+  // floating-point number string ("1e21" is one), and Number() would put
+  // such a value on the wire in exponential form; the server's integer
+  // rule (config._policy_tokens) reads that back as a float and drops the
+  // token rule while still reporting the save a success - the identical
+  // value typed as digits is stored exactly, so the loss would be
+  // client-caused and silent. The save handler refuses the value visibly
+  // instead of letting the rule vanish on the far side.
+  function isExactDigits(text) {
+    return /^[0-9]+$/.test(String(text).trim());
   }
 
   // The read-only policy summary. Unsafe integers are digit strings after
@@ -1218,6 +1232,17 @@
               toast("Request policy numbers are outside their allowed ranges.", "bad");
               return;
             }
+            // checkValidity() accepts any valid floating-point number
+            // string, and an exponent form ("1e21") would serialise as
+            // JSON exponential notation, which the server's integer rule
+            // drops while reporting the save a success (review finding,
+            // Low). Plain digits are the only lossless spelling, so refuse
+            // the value here, visibly, instead.
+            var tokenFields = [defaultTokens, capTokens];
+            if (tokenFields.some(function (field) { return field.value !== "" && !isExactDigits(field.value); })) {
+              toast("Token counts must be whole numbers written as plain digits - no exponent like 1e21.", "bad");
+              return;
+            }
             var triggers = Object.keys(triggerBoxes).filter(function (key) { return triggerBoxes[key].checked; });
             var confirmed = Array.prototype.slice.call(confirmProviders.querySelectorAll("input:checked"))
               .map(function (box) { return box.value; });
@@ -1249,6 +1274,17 @@
               if (denyStore.value !== "") deny.store = denyStore.value === "true";
               if (Object.keys(defaults).length || Object.keys(caps).length || Object.keys(deny).length) {
                 policy = { defaults: defaults, caps: caps, deny: deny };
+              } else {
+                // Every policy field is blank: the editor shows no rules,
+                // so the empty rebuild must never fall through to the
+                // stored policy - that would resubmit the old block
+                // verbatim, the server would report "unchanged", and
+                // every rule the owner had just cleared would stay in
+                // force while the editor showed nothing (review finding,
+                // Low). An explicit null is the deliberate clear the
+                // endpoint understands, the same wire form the Remove
+                // control submits.
+                policy = null;
               }
             }
             // Removal is an explicit owner action and takes precedence over
@@ -1622,6 +1658,7 @@
       parseJsonLossless: parseJsonLossless,
       emitJson: emitJson,
       policyInt: policyInt,
+      isExactDigits: isExactDigits,
       policyText: policyText
     };
     return;
