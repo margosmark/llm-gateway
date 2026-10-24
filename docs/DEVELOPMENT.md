@@ -34,7 +34,7 @@ Before changing code, identify the boundary being touched:
 
 | Change | Required checks |
 |---|---|
-| HTTP/browser surface | canonical Host, Origin and forwarded-header tests; direct same-origin mutation and cross-origin refusal |
+| HTTP/browser surface | canonical Host, Origin and forwarded-header tests; direct same-origin mutation and cross-origin refusal; bounded worker and local rate-limit refusal tests |
 | Credential/auth path | no secret in config/state/log/error; private-file permissions; one-time caller-token behavior |
 | Adapter | explicit connection/catalog action; safe error classification; no redirect/credential leak; fixture-based tests |
 | Router/bridge | capability compatibility; fallback hard stops; stream and tool-bearing behavior |
