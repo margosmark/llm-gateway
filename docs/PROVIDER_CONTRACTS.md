@@ -49,7 +49,13 @@ The rule now is:
 | `reasoning_effort` | **A preference.** The route stays eligible, the effort is dropped *for that route*, and the substitution is recorded. Never silent. |
 
 Image input is detected in both Chat Completions (`image_url`) and Responses
-(`input_image`) request content. Non-function tool types require
+(`input_image`) request content. Image URLs are validated without fetching
+anything: only absolute HTTP(S) URLs without embedded userinfo, or base64 data
+URLs for PNG/JPEG/GIF/WebP, are accepted. Data URLs are limited to 4 MiB of
+decoded image bytes (and a 6 MiB encoded URL ceiling). The gateway never
+dereferences image URLs, so URL validation does not create a gateway-side
+fetch or SSRF path. Unsupported/malformed content parts fail with a safe 4xx
+instead of being silently discarded or downgraded to text. Non-function tool types require
 `supports_builtin_tools`; function tools continue to require
 `supports_function_tools`. A `previous_response_id` requires
 `supports_previous_response_id`. That metadata is not currently represented
