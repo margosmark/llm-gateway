@@ -64,6 +64,16 @@ administrative access, and do not reintroduce one.
   tests, and device authorization are explicit owner actions.
 - Provider entitlement, limits, reset times, and undocumented model
   capabilities are **Unknown** unless backed by official evidence.
+- **The deployed production gateway is not a test fixture.** The running
+  container on devbox serves every Hermes profile and kanban worker on this
+  LAN; cycling it takes down the workers themselves mid-run. Never run
+  lifecycle commands (compose `up`/`down`/`stop`/`restart`, `docker
+  stop`/`kill`, image swaps, bind or port changes) against the production
+  stack — not for release rehearsal, rollback drills, or test runs.
+  Lifecycle, abort, and rollback tests start their own instance on a
+  separate port with a distinct compose project name and tear down only
+  that instance. If production genuinely needs a cycle, the operator does
+  it by hand.
 
 ## Engineering rules
 
