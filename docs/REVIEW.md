@@ -1411,17 +1411,29 @@ than adding a bootstrap race fix. Regression evidence: `test_login_and_passphras
 `tests/test_cli.py`. The formerly listed R15 setup-surface host-only message is
 also removed with the setup UI; the console no longer presents that claim.
 
-This candidate does not resolve unrelated R1/R8/R9/R2/R3/R7/R11 findings.
+This historical note does not resolve unrelated R1/R8/R9/R2/R3/R7/R11 findings.
 R4-R6, R10, R12-R14 remain open unless independently evidenced elsewhere.
-The focused suite currently exercises the direct console, same-origin mutation,
-cross-origin refusal, hostile Host/forwarded-header rejection, anonymous fresh
-API behavior, and write-only credential state. Deployment/image/volume claims
-remain unverified here.
+Later changes and their current evidence are recorded below.
 
-The retired setup-port reuse finding is fixed in `gateway.cli`: `--port` and
-`GATEWAY_PORT` both reject `8766` during argument parsing with an actionable
-error, before application construction or listener startup. Regression tests
-`test_reserved_setup_port_is_rejected_from_cli_before_startup`,
-`test_reserved_setup_port_is_rejected_from_environment_before_startup`, and
-`test_allowed_explicit_private_port_remains_configurable` cover refusal and
-the valid configurable-port path.
+### R24 — Configuration backup import/export and optional snapshots — **closed**
+
+The owner previously needed manual volume commands to copy `config.json`; an
+import path did not exist. A backup must never carry credentials or
+caller-token hashes, and import must not persist permissively parsed or
+unroutable data.
+
+**Resolution.** `gateway.backup.export_config` emits a sanitized config-only
+export and excludes credential/token and secret-adjacent metadata. Import
+builds a candidate, validates identifiers through `gateway.identifiers` and
+routes through `gateway.routes`, then uses a disk-first atomic replacement.
+Optional timestamped snapshots write only configuration into the state
+volume and are disabled by default. The console exposes download, validated
+import, and the interval. The runbook retains an updated manual-volume
+fallback and documents the console path.
+
+**Evidence:** `tests/test_backup.py` verifies secret exclusion, successful
+round-trip/idempotent re-import, byte-identical config after bad identifier
+and unroutable-route refusals, default-off interval visibility, and snapshot
+worker enabled/disabled behavior. Full suite passed on the implementation
+candidate (339 tests, 2 skipped); compileall and console DOM checks passed.
+Independent candidate QA is tracked by the dependent QA card.

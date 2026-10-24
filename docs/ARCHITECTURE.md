@@ -24,7 +24,7 @@ retired setup port cannot be reused.
 `gateway.config.ConfigStore` persists the non-secret configuration as
 `config.json`, with atomic replace, mode `0600`, and a monotonic revision.
 It contains provider state, model metadata, aliases/routes, profile metadata,
-and access mode. It must never contain a credential or caller-token hash.
+and access mode. It must never contain a credential or caller-token hash. Owner-console exports use a strict allowlist-style sanitization, and imports build and validate a complete candidate through `gateway.identifiers` and `gateway.routes` before one atomic replace. Optional timestamped snapshots live under the state volume's `snapshots/` directory and are disabled by default; the setting is read live.
 
 `gateway.credentials.CredentialStore` persists separate JSON files under a
 private `credentials/` directory. Provider adapters receive a handle scoped to
