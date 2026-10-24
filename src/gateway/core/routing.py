@@ -57,6 +57,7 @@ from gateway.core.capabilities import (
     Capability,
 )
 from gateway.observability import RequestEvent, utc_now_iso
+from gateway.policy import PolicyChange, PolicyViolation, apply_alias_policy
 from gateway.session import derive_session
 
 #: Maps an error class onto the fallback trigger it satisfies. A route the
@@ -338,6 +339,33 @@ class Router:
             )
         return alias
 
+    # --- the alias request policy (T21) ---------------------------------
+
+    def _apply_policy(
+        self,
+        alias: Alias,
+        payload: dict[str, Any],
+        source_dialect: str,
+    ) -> tuple[dict[str, Any], list[PolicyChange]]:
+        """Apply the alias's request policy, refusing what it denies.
+
+        The policy is the owner's, so a refusal is an actionable 4xx
+        that names the rule, not a provider failure and not a silently
+        stripped request. It is applied here, in the router, on the same
+        seam the session derivation lives on: one place every path that
+        reaches a provider passes through - the API surface, the alias
+        test, and any future caller - never a handler.
+        """
+        try:
+            return apply_alias_policy(alias, payload, source_dialect)
+        except PolicyViolation as exc:
+            raise RoutingError(
+                exc.message,
+                code=exc.code,
+                status=exc.status,
+                detail={"alias": alias.name, "rule": exc.rule},
+            ) from exc
+
     # --- invocation ------------------------------------------------------
 
     def _fallback_permitted(
@@ -507,6 +535,15 @@ class Router:
         """
         alias = self.resolve_alias(alias_name)
 
+        # The owner's request policy is applied here, at the top of the
+        # invocation: before the request facts (tools, images, thinking
+        # level) are read for candidate selection, and before phase
+        # inference can call a provider. A denied request is therefore
+        # refused with nothing spent, and an owner default or cap is
+        # part of what every route is judged against - on every path
+        # that reaches a provider, because they all enter here.
+        payload, policy_changes = self._apply_policy(alias, payload, source_dialect)
+
         needs_tools = bool(payload.get("tools"))
         needs_image_input = payload_has_image_input(payload, source_dialect)
         reasoning_effort = _requested_reasoning_effort(payload)
@@ -632,6 +669,14 @@ class Router:
             upstream_payload = dict(upstream_payload)
             upstream_payload["model"] = candidate.route.model
 
+            for changed in policy_changes:
+                if changed.field == "store":
+                    # A forced retention value is dialect-neutral and the
+                    # bridge does not model it, so it is re-asserted after
+                    # conversion: `store` reaches the provider on a
+                    # converted route exactly as it would same-dialect.
+                    upstream_payload["store"] = changed.value
+
             degradation: dict[str, Any] | None = None
             if candidate.degraded_reason:
                 # Drop what this route cannot honour, and say so.
@@ -702,6 +747,22 @@ class Router:
                 # Only the route that actually served the request records a
                 # substitution. A route that failed did not serve anything.
                 attribution.degradations.append(degradation)
+            for changed in policy_changes:
+                # The owner's policy changed this request, and the change is
+                # recorded against the route that actually served it - the
+                # same ledger form a dropped reasoning effort takes, so a
+                # clamped value is never invisible.
+                attribution.degradations.append(
+                    {
+                        "provider": candidate.route.provider,
+                        "model": candidate.route.model,
+                        "kind": changed.kind,
+                        "field": changed.field,
+                        "from": changed.previous,
+                        "to": changed.value,
+                        "reason": changed.reason,
+                    }
+                )
             self._record(
                 request_id=request_id,
                 alias_name=alias_name,

@@ -645,7 +645,35 @@ the rest of the project already lives by:
 * **A policy that cannot be honoured refuses.** "Tools denied" on an alias
   is an actionable 4xx, not a silently stripped tool list.
 
-### T21 — A request policy per alias — `todo`
+### T21 — A request policy per alias — `done`
+
+**Landed.** A `policy` block on `Alias` (`src/gateway/config.py`) with
+three sub-blocks - `defaults`, `caps`, `deny` - applied in one place,
+`src/gateway/policy.py`, by the router on every path that reaches a
+provider, before dialect conversion, in the order above: the client's
+value, the owner's default if the client gave none, the owner's cap if
+it clamps the value now standing, then the deny rules. The owner writes
+one vocabulary: `temperature`, `max_output_tokens`, `thinking_level`
+(the canonical `gateway.thinking` set, enforced at parse time - a level
+outside it is dropped from the configuration, never honoured twice) and
+`system`. The thinking level is read from and written to the source
+dialect's own spelling, so the flat and nested spellings can never
+disagree; the cap is ordinal in the canonical order, and a level the
+gateway cannot order does not pass the ceiling (with no cap configured
+an unknown level still forwards, as T4 requires). `deny.tools` refuses
+with a 403 naming the rule - before any provider work, never a silently
+stripped tool list - and `deny.store` forces the value on every
+upstream payload, re-asserted after conversion because the bridge does
+not model `store`. Every change (tagged `defaulted`, `clamped` or
+`forced`) is recorded in the attribution and the ledger against the
+route that actually served the request, in the same form as a dropped
+reasoning effort; the `system` instruction is recorded as its length in
+characters, never its text. Regression tests: `tests/test_alias_policy.py`
+(34 tests, both dialects, allowed and refused cases, ledger assertions).
+**Not in this landing:** console editing of the policy, and preservation
+of a file-configured policy across a console alias save - the console
+save path rebuilds the alias and drops the block; tracked as
+`docs/REVIEW.md` R40.
 
 **Why.** `Alias` (`config.py:243-312`) carries a primary route, fallbacks,
 a fallback policy and a cooldown. It carries **no parameters**: the client
