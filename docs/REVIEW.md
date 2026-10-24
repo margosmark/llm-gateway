@@ -1419,7 +1419,7 @@ PYTHONPATH=src python3 -m unittest tests.test_browser_console -v` (1 test
 passed). The console source-string assertion was also updated to reject the
 old short-circuit condition.
 
-### R40 — A console alias save silently drops a file-configured request policy — **open**
+### R40 — A console alias save silently drops a file-configured request policy — **closed**
 
 **Found:** 2026-10-24, during T21 (a request policy per alias).
 
@@ -1445,13 +1445,29 @@ console editor, or preserve the existing alias's policy on save.
 Whichever is chosen, a save that drops a policy must report it.
 `tests/test_alias_policy.py` should gain the regression.
 
+**Closed:** 2026-10-24. `handle_alias_action` (`save`,
+`src/gateway/http/app.py`) now carries the existing alias's `policy`
+across a save whose payload omits the block - which is every save the
+console form makes - and also accepts an explicit `policy` in the save
+payload under the same parse-time validation as the configuration file
+(`AliasPolicy.from_dict`). A block that is not an object or null, or
+that rules nothing after validation, is refused with 400
+(`invalid_alias`, field `policy`) rather than dropped: on a mutation
+endpoint an invalid policy must never disappear quietly. Every save
+response reports what happened to the policy (`_policy_save_outcome`:
+`preserved`, `set`, `changed`, `cleared` or `unchanged`, with
+`before`/`after` when they differ), so a change is never silent.
+Regression: `tests/test_alias_policy.py`, `ConsoleSaveTests` - six
+tests, including a save through `POST /owner/api/alias` that asserts
+the policy survives and still governs the next upstream request. A
+console *editor* for the block remains a separate, unlanded piece.
+
 ## Recommended order
 
-Findings R0-R27 and R28-R36 are closed or superseded. **R36, R38 and
-R40 are open**; R36 is the explicit
+Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38
+are open**; R36 is the explicit
 post-deployment route replacement above, R38 is the inert per-phase
-reasoning effort, which needs a routing change, and R40 is the console
-alias save dropping a file-configured request policy. R37 and R39 are closed. The register
+reasoning effort, which needs a routing change. R37, R39 and R40 are closed. The register
 is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
