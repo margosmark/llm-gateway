@@ -138,17 +138,20 @@ def _unsupported_payload_fields(adapter: Adapter | None) -> frozenset[str]:
 class RoutingError(Exception):
     """A routing failure that the caller turns into an HTTP response."""
 
-    def __init__(self, message: str, code: str = "routing_error", status: int = 400, detail: Any = None) -> None:
+    def __init__(self, message: str, code: str = "routing_error", status: int = 400, detail: Any = None, retry_after_seconds: int | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.status = status
         self.detail = detail
+        self.retry_after_seconds = retry_after_seconds
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"error": {"message": self.message, "type": self.code}}
         if self.detail is not None:
             payload["error"]["detail"] = self.detail
+        if self.retry_after_seconds is not None:
+            payload["error"]["retry_after_seconds"] = self.retry_after_seconds
         return payload
 
 
@@ -165,6 +168,7 @@ class Candidate:
     #: asked for has to be dropped to do it. It is never silent: the
     #: substitution is recorded and reported.
     degraded_reason: str | None = None
+    circuit_blocked: bool = False
 
     @property
     def eligible(self) -> bool:
@@ -310,9 +314,10 @@ class Router:
                 candidate.excluded_reason = "model is not enabled for exposure"
                 candidates.append(candidate)
                 continue
-            allowed, circuit_reason = self._circuits.check(route.provider, route.model)
+            allowed, circuit_reason = self._circuits.preview(route.provider, route.model)
             if not allowed:
                 candidate.excluded_reason = circuit_reason
+                candidate.circuit_blocked = True
                 candidates.append(candidate)
                 continue
 
@@ -594,6 +599,9 @@ class Router:
                 f"no eligible route for alias '{alias_name}'",
                 code="no_eligible_route",
                 status=503,
+                retry_after_seconds=self._circuits.retry_after_for(
+                    [(c.route.provider, c.route.model) for c in candidates if c.circuit_blocked]
+                ),
             )
 
         # Phase routing is opt-in per alias and resolved before the route
@@ -754,55 +762,113 @@ class Router:
             if needs_tools:
                 request.with_side_effects_possible()
 
-            try:
-                response = candidate.adapter.invoke(request)  # type: ignore[union-attr]
-            except AdapterError as exc:
-                last_error = exc
-                attribution.attempts.append(
+            # The route is claimed **here**, immediately before the provider
+            # is invoked, and only after every local check that could
+            # decline this route has passed. Claiming earlier - while the
+            # candidates were still being assembled - let a route that was
+            # never invoked hold a half-open probe for
+            # ``PROBE_TIMEOUT_SECONDS``, which pinned the primary to its
+            # fallback long after the provider had recovered.
+            claimed, circuit_reason, probe_owner = self._circuits.claim(
+                candidate.route.provider, candidate.route.model
+            )
+            if not claimed:
+                # Another request is probing this route right now, or the
+                # circuit is in cooldown again. The route is skipped, the
+                # same way an ineligible candidate is.
+                attribution.skipped.append(
                     {
                         "provider": candidate.route.provider,
                         "model": candidate.route.model,
-                        "outcome": "error",
-                        "error_class": exc.error_class,
-                        "reason": CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN]),
+                        "reason": circuit_reason,
                     }
                 )
-                self._maybe_open_circuit(alias, candidate, exc)
-
                 if is_last:
                     break
-                allowed, reason = self._fallback_permitted(
-                    alias, exc.error_class, eligible[index + 1], needs_tools
-                )
-                if not allowed:
-                    exc.message = f"{CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN])} (fallback not used: {reason})"
-                    break
-                attribution.fallback_reason = reason
-                attribution.fallback_used = True
+                if (
+                    not attribution.fallback_used
+                    and alias.primary is not None
+                    and candidate.route == alias.primary
+                ):
+                    # The primary could not be probed, so a later route is
+                    # about to serve the request. The record says why.
+                    attribution.fallback_used = True
+                    attribution.fallback_reason = (
+                        f"the primary route was skipped: {circuit_reason}"
+                    )
                 continue
 
-            attribution.serving_provider = candidate.route.provider
-            attribution.serving_model = candidate.route.model
-            # The route answered, so any circuit on it is closed. A success
-            # resets the failure count, so a route that recovers is not
-            # benched again by an old failure.
-            self._circuits.record_success(candidate.route.provider, candidate.route.model)
-            if degradation is not None:
-                # Only the route that actually served the request records a
-                # substitution. A route that failed did not serve anything.
-                attribution.degradations.append(degradation)
-            self._record(
-                request_id=request_id,
-                alias_name=alias_name,
-                payload=payload,
-                attribution=attribution,
-                status=response.status,
-                error_class=None,
-                latency_ms=int((time.monotonic() - started) * 1000),
-                stream=stream,
-                profile_id=profile_id,
-            )
-            return RoutedResponse(response=response, attribution=attribution, request=request)
+            # Everything this candidate does after a successful claim runs
+            # under this one guard, and the guard releases **this claim's
+            # owner token** on every exit path: success, a failure that
+            # falls back, and any exception. ``release_probe`` ignores an
+            # owner token that does not match, so a live probe claimed by
+            # another request is never cleared here, and releasing an
+            # already-released claim is a no-op, so the paths that released
+            # explicitly before are unchanged.
+            #
+            # The guard has to be this wide because an exception raised
+            # inside the ``except AdapterError`` handler below - while
+            # ``_maybe_open_circuit()`` is processing the failure - is not
+            # caught by a sibling ``except``, and neither is one raised by
+            # the post-claim recording that follows the invocation. Either
+            # one used to escape with the claim still held, so the route
+            # refused every probe until the probe timeout passed while
+            # nothing was probing it.
+            try:
+                try:
+                    response = candidate.adapter.invoke(request)  # type: ignore[union-attr]
+                except AdapterError as exc:
+                    last_error = exc
+                    attribution.attempts.append(
+                        {
+                            "provider": candidate.route.provider,
+                            "model": candidate.route.model,
+                            "outcome": "error",
+                            "error_class": exc.error_class,
+                            "reason": CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN]),
+                        }
+                    )
+                    self._maybe_open_circuit(alias, candidate, exc)
+
+                    if is_last:
+                        break
+                    allowed, reason = self._fallback_permitted(
+                        alias, exc.error_class, eligible[index + 1], needs_tools
+                    )
+                    if not allowed:
+                        exc.message = f"{CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN])} (fallback not used: {reason})"
+                        break
+                    attribution.fallback_reason = reason
+                    attribution.fallback_used = True
+                    continue
+
+                attribution.serving_provider = candidate.route.provider
+                attribution.serving_model = candidate.route.model
+                # The route answered, so any circuit on it is closed. A success
+                # resets the failure count, so a route that recovers is not
+                # benched again by an old failure.
+                self._circuits.record_success(candidate.route.provider, candidate.route.model)
+                if degradation is not None:
+                    # Only the route that actually served the request records a
+                    # substitution. A route that failed did not serve anything.
+                    attribution.degradations.append(degradation)
+                self._record(
+                    request_id=request_id,
+                    alias_name=alias_name,
+                    payload=payload,
+                    attribution=attribution,
+                    status=response.status,
+                    error_class=None,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    stream=stream,
+                    profile_id=profile_id,
+                )
+                return RoutedResponse(response=response, attribution=attribution, request=request)
+            finally:
+                self._circuits.release_probe(
+                    candidate.route.provider, candidate.route.model, probe_owner
+                )
 
         # Every eligible route failed.
         self._record(
@@ -821,6 +887,9 @@ class Router:
                 f"no eligible route for alias '{alias_name}'",
                 code="no_eligible_route",
                 status=503,
+                retry_after_seconds=self._circuits.retry_after_for(
+                    [(c.route.provider, c.route.model) for c in eligible]
+                ),
             )
         # A provider failure is an upstream failure. It is reported as 502
         # even when the provider rejected its own credential, because the

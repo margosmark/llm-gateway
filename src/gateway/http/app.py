@@ -188,7 +188,9 @@ class GatewayApp:
             self._log_request(request, result, started)
             return result
         except RoutingError as exc:
-            result = json_response(exc.to_dict(), exc.status)
+            headers = ([("Retry-After", str(exc.retry_after_seconds))]
+                       if exc.status == 503 and exc.retry_after_seconds is not None else [])
+            result = json_response(exc.to_dict(), exc.status, headers)
             self._log_request(request, result, started)
             return result
         except ConversionError as exc:
