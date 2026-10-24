@@ -76,6 +76,64 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CHATGPT_BASE = "https://chatgpt.com/backend-api/codex"
 MODELS_PATH = "/models"
 
+#: Image-input support, per exact model slug, from OpenAI's own model page.
+#:
+#: The Codex catalogue publishes no image or vision field, so this cannot be
+#: discovered from the endpoint - it is transcribed per *exact slug* from the
+#: model-provider documentation, exactly as the OpenCode Go snapshot does.
+#: A slug absent from this map stays false: image support is never inferred
+#: from a model family, a tier name, or the Responses dialect, because those
+#: inferences are wrong in both directions (GPT-5.6 Terra accepts images;
+#: MiMo-V2-Flash does not, while its sibling MiMo-V2.5 does).
+#:
+#: ``gpt-5.6-terra``: OpenAI lists "Input modalities: text, image" and
+#: ``image_input`` under Supported features (read 2026-10-23).
+IMAGE_INPUT_SOURCES = {
+    "gpt-5.6-terra": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+}
+
+#: Request fields the ChatGPT-authenticated Codex backend rejects with a 400.
+#:
+#: Every field below was confirmed against the live backend, one at a time,
+#: each added to an otherwise-accepted body. Each returns
+#: ``400 {"detail": [{"msg": "Unsupported parameter: <field>"}]}``, while the
+#: identical body without that field returns the account allowance error -
+#: which proves validation ran *before* the allowance check, so a 400 here is
+#: a genuine shape rejection rather than an exhausted account.
+#:
+#: The rejection is independent of image input: the same sweep run with an
+#: ``input_image`` item present produces the identical set. This is the
+#: single most common cause of the "malformed" failure class on this
+#: provider, because OpenAI's own Chat Completions dialect accepts all of
+#: them, so a client that sets ``temperature`` is doing nothing unusual -
+#: the field simply has no place in this dialect and must be dropped, with
+#: the substitution recorded, rather than forwarded.
+#:
+#: Sampling controls have no effect on a reasoning model served through this
+#: backend, so dropping them loses nothing the client can observe.
+CODEX_UNSUPPORTED_PAYLOAD_FIELDS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "n",
+        "stop",
+        "stop_sequences",
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "seed",
+        "user",
+        "metadata",
+        "response_format",
+        "service_tier",
+        "max_tokens",
+        "max_completion_tokens",
+        "suffix",
+    }
+)
+
 #: The Codex client appends its own version to the model-list request, and
 #: the backend expects it. The gateway identifies itself honestly with its
 #: own version rather than impersonating the Codex client.
@@ -187,6 +245,14 @@ class ChatGPTCodexAdapter:
 
     provider_id = PROVIDER_ID
     kind = KIND
+
+    #: Top-level request fields this provider's upstream answers with a 400
+    #: "Unsupported parameter" for. The router reads these off the adapter and
+    #: drops them for this route, recording the substitution - the fields are
+    #: all part of OpenAI's Chat dialect, so a caller setting one is behaving
+    #: normally and should not be failed for it. See the constant's comment
+    #: for the live evidence behind each entry.
+    UNSUPPORTED_PAYLOAD_FIELDS = CODEX_UNSUPPORTED_PAYLOAD_FIELDS
 
     def __init__(
         self,
@@ -530,6 +596,9 @@ class ChatGPTCodexAdapter:
             visibility = entry.get("visibility")
             if isinstance(visibility, str) and visibility not in ("list", ""):
                 notes.append(f"visibility: {visibility}")
+            image_source = IMAGE_INPUT_SOURCES.get(model_id)
+            if image_source:
+                notes.append(f"image input per {image_source}")
 
             models.append(
                 ModelInfo(
@@ -540,6 +609,10 @@ class ChatGPTCodexAdapter:
                     dialect=DIALECT_OPENAI_RESPONSES,
                     supports_streaming=True,
                     supports_function_tools=True,
+                    # The Codex catalogue publishes no image field, so this
+                    # is transcribed from the model-provider documentation
+                    # per exact slug. Absent means false, never a guess.
+                    supports_image_input=image_source is not None,
                     # What an account may actually reach, and at what
                     # limits, depends on the account. Unknown.
                     context_window=context_window,

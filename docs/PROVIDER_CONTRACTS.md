@@ -45,8 +45,19 @@ The rule now is:
 
 | Requirement | Treatment |
 |---|---|
-| wire dialect, streaming, function tools | **Hard.** The route is excluded. Dropping tools would change the API contract. |
+| wire dialect, streaming, function tools, built-in tools, image input, previous-response continuation | **Hard.** The route is excluded with a capability-specific reason. Dropping tools, images, or continuation would change the request contract. |
 | `reasoning_effort` | **A preference.** The route stays eligible, the effort is dropped *for that route*, and the substitution is recorded. Never silent. |
+
+Image input is detected in both Chat Completions (`image_url`) and Responses
+(`input_image`) request content. Non-function tool types require
+`supports_builtin_tools`; function tools continue to require
+`supports_function_tools`. A `previous_response_id` requires
+`supports_previous_response_id`. That metadata is not currently represented
+on `ModelEntry`, so it defaults to unsupported and fails closed; continuation
+also remains untranslatable to Chat Completions and is refused by the bridge.
+When no route is eligible, the gateway returns each excluded route and its
+reason in the routing error detail; when a fallback serves, skipped-route
+reasons are retained in attribution/ledger.
 
 A degradation is recorded only for the route that **actually served** the
 request. A route that failed did not serve anything, so it does not get to
@@ -127,6 +138,19 @@ The `choice` response may carry a `probabilities` distribution; the gateway
 reads only `choice` and `confidence` and never forwards or stores the rest.
 
 ---
+
+## Anthropic Messages API
+
+The native API-key adapter uses Anthropic's documented `POST /v1/messages`
+endpoint and `GET /v1/models` catalogue. Requests carry `x-api-key`,
+`anthropic-version: 2023-06-01`, JSON content type, and an event-stream Accept
+header for streaming. Messages streaming uses SSE; the adapter passes complete
+frames from the shared upstream client without translating their event shape.
+The exact available model identifiers depend on the account and catalogue
+response. Context limits, quotas, retention, and model-specific features are
+left Unknown unless separately established; the adapter makes no inferred
+capability claims. Calls occur only on explicit provider test, model refresh,
+or inference actions.
 
 ## OpenCode Go
 
@@ -330,6 +354,28 @@ any eligible route's limit is not published.
 
 The limit is **reported, not enforced**: the gateway has no tokenizer, so it
 does not count a prompt's tokens. The provider is the authority.
+
+### Image input
+
+The Codex catalogue publishes **no image or vision field** — the only
+capability fields are `supported_in_api`, `supported_reasoning_levels` and
+`visibility`. Image support therefore cannot be discovered from the
+endpoint and is **transcribed per exact slug** from OpenAI's own model
+documentation, in `IMAGE_INPUT_SOURCES` in `adapters/chatgpt_codex.py`.
+
+`gpt-5.6-terra` is listed there: OpenAI's model page states "Input
+modalities: text, image" and lists `image_input` under Supported features
+(`developers.openai.com/api/docs/models/gpt-5.6-terra`, read 2026-10-23).
+A slug absent from that map stays **false** — image support is never
+inferred from the Responses dialect, a model family, or a tier name. The
+source URL is appended to the model's `notes` so an operator can review the
+conclusion.
+
+This is a *separate* mechanism from the OpenCode Go snapshot's
+`IMAGE_INPUT_SOURCES`, which lives in `scripts/build_go_catalog_snapshot.py`
+and feeds `data/go_catalog.json`. The two providers are served by different
+adapters and reach the capability from different places; adding a model to
+one map has no effect on the other.
 
 ### What is not documented
 

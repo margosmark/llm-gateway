@@ -1411,13 +1411,32 @@ than adding a bootstrap race fix. Regression evidence: `test_login_and_passphras
 `tests/test_cli.py`. The formerly listed R15 setup-surface host-only message is
 also removed with the setup UI; the console no longer presents that claim.
 
-This candidate does not resolve unrelated R1/R8/R9/R2/R3/R7/R11 findings.
+This historical note does not resolve unrelated R1/R8/R9/R2/R3/R7/R11 findings.
 R4-R6, R10, R12-R14 remain open unless independently evidenced elsewhere.
-The focused suite currently exercises the direct console, same-origin mutation,
-cross-origin refusal, hostile Host/forwarded-header rejection, anonymous fresh
-API behavior, and write-only credential state. Deployment/image/volume claims
-remain unverified here.
+Later changes and their current evidence are recorded below.
 
+### R24 — Configuration backup import/export and optional snapshots — **closed**
+
+The owner previously needed manual volume commands to copy `config.json`; an
+import path did not exist. A backup must never carry credentials or
+caller-token hashes, and import must not persist permissively parsed or
+unroutable data.
+
+**Resolution.** `gateway.backup.export_config` emits a sanitized config-only
+export and excludes credential/token and secret-adjacent metadata. Import
+builds a candidate, validates identifiers through `gateway.identifiers` and
+routes through `gateway.routes`, then uses a disk-first atomic replacement.
+Optional timestamped snapshots write only configuration into the state
+volume and are disabled by default. The console exposes download, validated
+import, and the interval. The runbook retains an updated manual-volume
+fallback and documents the console path.
+
+**Evidence:** `tests/test_backup.py` verifies secret exclusion, successful
+round-trip/idempotent re-import, byte-identical config after bad identifier
+and unroutable-route refusals, default-off interval visibility, and snapshot
+worker enabled/disabled behavior. Full suite passed on the implementation
+candidate (339 tests, 2 skipped); compileall and console DOM checks passed.
+Independent candidate QA is tracked by the dependent QA card.
 The retired setup-port reuse finding is fixed in `gateway.cli`: `--port` and
 `GATEWAY_PORT` both reject `8766` during argument parsing with an actionable
 error, before application construction or listener startup. Regression tests
@@ -1425,3 +1444,64 @@ error, before application construction or listener startup. Regression tests
 `test_reserved_setup_port_is_rejected_from_environment_before_startup`, and
 `test_allowed_explicit_private_port_remains_configurable` cover refusal and
 the valid configurable-port path.
+
+
+## Bind-policy follow-up (SEC-2–SEC-4) — closed in current worktree
+
+The bind predicate now uses explicit allowlists: RFC1918 IPv4, IPv6 ULA
+(`fc00::/7`), and loopback. It rejects RFC 5737 TEST-NET, other public
+addresses, multicast, link-local, and unspecified addresses instead of
+relying on Python's version-dependent `ipaddress.is_private`. The local-address
+probe selects `AF_INET` or `AF_INET6` from the parsed address, so an assigned
+ULA can proceed through startup validation. Bind policy documentation now
+states these same supported classes.
+
+Evidence: `tests/test_cli.py` — `test_public_addresses_are_refused` covers all
+three TEST-NET examples and forbidden address classes;
+`test_test_net_addresses_are_refused_before_startup` verifies `main()` refuses
+all three before application construction; `test_owned_ipv6_ula_uses_startup_path`
+verifies ULA is accepted by startup validation when locally owned. The HTTP
+server now selects AF_INET6 for colon-containing addresses, and security
+policy formats IPv6 URL/Host/Origin authorities with brackets. Regression
+evidence: `test_ipv6_loopback_server_serves_canonical_mutation` traverses a real
+IPv6 listener and successful same-origin mutation; `test_ipv6_authorities_are_bracketed_for_host_and_origin`
+checks allowed Host and Origin forms. `test_ipv6_ula_listener_binds_when_host_owns_address`
+is skipped when the test machine does not own the ULA. Focused suites pass;
+full suite: 340 passed, 3 skipped.
+
+### R40 — The integrated candidate carried stale claims and three leak paths — **closed**
+
+The first integrated release candidate (`db7d349`, tree `3662365f`) drew two
+CHANGES_REQUIRED verdicts. Each finding is closed here on the re-dispatch
+candidate, with its regression:
+
+1. **Stale Anthropic limitation** (QA `t_81ce92d9`): the Known Limitations
+   claimed Anthropic support remained planned while the native Anthropic
+   provider shipped in the same tree. The bullet now separates the
+   implemented outbound Anthropic Messages provider from the unimplemented
+   inbound `/v1/messages` surface (T5).
+2. **Overstated exposure claim** (security `t_f4994f65` #1): the README
+   asserted the gateway is "never publicly exposed". It binds private/loopback
+   addresses and creates no firewall/NAT rule; exposure beyond the LAN is the
+   operator's responsibility. Reworded in `README.md`.
+3. **Imported capability coercion** (security #2): a config import accepted
+   the string `"false"` for `supports_image_input` and `ModelEntry.from_dict`
+   coerced it to True. `gateway.backup.import_config` now rejects any
+   non-boolean capability/state flag, and `ModelEntry.from_dict` restores the
+   declared default instead of coercing. Evidence:
+   `tests/test_backup.py::test_import_rejects_non_boolean_capability_flags`,
+   `tests/test_config.py::ModelEntryFlagTests`.
+4. **Upstream identifiers in public refusals** (security #3): the
+   `no_eligible_route` 503 serialized every considered route's provider id,
+   model id, label and dialect to the API caller. The public refusal is now
+   generic; per-route exclusion reasons stay on the router/owner side
+   (catalog capabilities and route validation). Evidence:
+   `tests/test_image_input.py::test_image_request_with_no_capable_route_fails_closed_at_the_gateway`,
+   `tests/test_degraded_route.py`.
+5. **Anthropic error-code/credential echo** (security #4): upstream error
+   codes and key-shaped values must never reach the console, state or
+   `last_error`. The shared `error_from_response` keeps only allowlisted
+   classification codes and fixed class messages with credential shapes
+   redacted; an Anthropic-specific regression drives a fake transport whose
+   error body echoes the key in both `error.code` and the message.
+   Evidence: `tests/test_anthropic_adapter.py::test_upstream_error_codes_and_credentials_never_echo`.

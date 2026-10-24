@@ -70,6 +70,16 @@ docker compose up -d
 docker compose logs -f gateway
 ```
 
+The HTTP server uses a bounded worker pool (default 32 concurrent requests) and
+a per-client rolling limit of 120 requests per 60 seconds. Configure them with
+`GATEWAY_MAX_WORKERS`, `GATEWAY_RATE_LIMIT_REQUESTS`, and
+`GATEWAY_RATE_LIMIT_WINDOW_SECONDS` (or the corresponding `--max-workers`,
+`--rate-limit-requests`, and `--rate-limit-window-seconds` options). Over-cap
+requests receive HTTP 429 with error type `rate_limited`. This is local capacity
+protection, not an access-control boundary or protection against an on-path LAN
+attacker; it does not authenticate or authorize clients. Client identity is the
+peer IP observed by the socket, not a request header.
+
 The gateway binds one listener at `GATEWAY_BIND:GATEWAY_PORT` (default port
 `8765`), serving `/owner/`, `/v1/`, `/health`, and `/version`. It refuses
 wildcard binds. There is no setup listener, second port, owner passphrase, or
@@ -116,7 +126,9 @@ published prices only and display their source and observation date. A model
 without published prices reports **Unknown**. This is not a billing system.
 
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
-page load or configuration save never calls a provider. Credentials are stored
+page load or configuration save never calls a provider. Anthropic uses the
+native Messages API with a separately stored API key; its catalogue is loaded
+only when **Refresh model catalog** is selected. Credentials are stored
 separately and never returned by state or status APIs.
 
 ---
@@ -207,7 +219,7 @@ candidate has passed its gates. Cut over side-by-side-safe:
 
 ## 5. Rollback
 
-The gateway's state lives in one volume. Rollback is either:
+The gateway's state lives in one volume. Before an upgrade, use Owner console → Backup → Download sanitised export. This includes configuration only; provider credentials and caller-token hashes are not included. For a local in-volume snapshot, enable a scheduled snapshot in that same panel. The manual copy commands below remain an operator fallback.
 
 **Rollback the image.** Redeploy the previous image, without rebuilding
 it, and publish that identity the same way.
@@ -221,19 +233,25 @@ GATEWAY_IMAGE=personal-llm-gateway:<previous> \
 **Rollback the configuration.** The configuration is a single JSON file on
 the volume. **Back it up before every upgrade**, and restore it explicitly.
 
+Restore a downloaded console export through Owner console → Backup → choose the JSON file → Validate and import. The gateway validates identifiers and all routes before replacing configuration; credentials remain separate. A failed import leaves the stored config unchanged.
+
+The manual in-volume copy remains available when the console is unavailable:
+
 ```sh
 # before an upgrade
 docker run --rm -v personal-llm-gateway-state:/state \
-  python:3.14-slim cp /state/config.json /state/config.json.before-upgrade
+  python:3.14-slim sh -c 'mkdir -p /state/snapshots && cp /state/config.json /state/snapshots/config.json.before-upgrade'
 ```
 
 ```sh
 # to restore
 docker compose down
 docker run --rm -v personal-llm-gateway-state:/state \
-  python:3.14-slim cp /state/config.json.before-upgrade /state/config.json
+  python:3.14-slim cp /state/snapshots/config.json.before-upgrade /state/config.json
 python3 scripts/release.py --image personal-llm-gateway:candidate
 ```
+
+The console's scheduled snapshots are disabled by default and are written to `/state/snapshots/` when enabled.
 
 Validate the restored file before starting:
 
@@ -258,8 +276,8 @@ if you want the gateway to try every route immediately.
 
 | Symptom | Cause | Action |
 |---|---|---|
-| `refusing to start: a wildcard bind...` | `GATEWAY_BIND` is `0.0.0.0` | Set it to the explicit private LAN address |
-| The owner console will not load | The configured private address is not assigned to the host, or the listener is unavailable | Use the configured private address and port; login/bootstrap is not part of this product mode |
+| `refusing to start: a wildcard bind...` | `GATEWAY_BIND` is `0.0.0.0` | Set it to an explicit local RFC1918 IPv4, IPv6 ULA, or loopback address |
+| The owner console will not load | The configured private address is not assigned to the host, or the listener is unavailable | Use the configured private address and port; IPv6 URLs need brackets, e.g. `http://[fd12::1]:8765/owner/`; login/bootstrap is not part of this product mode |
 | A provider shows *Failed* | The credential was rejected or the provider is unreachable | **Test connection** and read the message; the stored credential is never displayed |
 | A model shows an empty dialect | The provider serves it but does not document the endpoint | Enter it manually and set the dialect, or use an OpenAI-dialect model |
 | A route says the dialect cannot be translated | The model is served over Anthropic Messages or Google v1beta | The gateway refuses rather than guessing; publish an OpenAI-dialect route |

@@ -31,7 +31,7 @@ from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
 from gateway.logging import RequestLogger
-from gateway.http.core import Server
+from gateway.http.core import Response, Server
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
 from gateway.observability import LimitStore, RequestEvent, RequestLedger, utc_now_iso
 
@@ -108,9 +108,11 @@ class FakeAdapter:
         )
 
 
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
+def free_port(host: str = "127.0.0.1") -> int:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    endpoint = (host, 0, 0, 0) if family == socket.AF_INET6 else (host, 0)
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.bind(endpoint)
         return int(sock.getsockname()[1])
 
 
@@ -137,10 +139,12 @@ class SystemOneAdapter:
 class GatewayHarness:
     """Builds a gateway over loopback for a test."""
 
-    def __init__(self, adapter: FakeAdapter | None = None) -> None:
+    def __init__(self, adapter: FakeAdapter | None = None, host: str = "127.0.0.1") -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmp.name)
-        self.port = free_port()
+        self.host = host
+        self.authority = f"[{host}]" if ":" in host else host
+        self.port = free_port(host)
 
         self.config = ConfigStore(self.data_dir / "config.json")
         self.credentials = CredentialStore(self.data_dir)
@@ -182,8 +186,8 @@ class GatewayHarness:
         self.profile_auth = ProfileAuth(self.config, self.credentials)
 
         policy = SecurityPolicy(
-            allowed_hosts=build_allowed_hosts("127.0.0.1", self.port),
-            canonical_origins=build_canonical_origins("127.0.0.1", self.port),
+            allowed_hosts=build_allowed_hosts(self.host, self.port),
+            canonical_origins=build_canonical_origins(self.host, self.port),
         )
         self.app = GatewayApp(
             config=self.config,
@@ -200,12 +204,12 @@ class GatewayHarness:
                 "source_tree": "testtree",
                 "image_revision": "sha256:" + "a" * 64,
             },
-            base_url=f"http://127.0.0.1:{self.port}",
+            base_url=f"http://{self.authority}:{self.port}",
             mounts=("/owner",),
             logger=RequestLogger(enabled=False),
         )
 
-        self.server = Server("127.0.0.1", self.port, self.app.handle)
+        self.server = Server(self.host, self.port, self.app.handle)
         self.server.start_background()
 
     def close(self) -> None:
@@ -223,10 +227,10 @@ class GatewayHarness:
         port: int | None = None,
         raw: bool = False,
     ):
-        url = f"http://127.0.0.1:{port or self.port}{path}"
+        url = f"http://{self.authority}:{port or self.port}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url=url, data=data, method=method)
-        request.add_header("Host", f"127.0.0.1:{port or self.port}")
+        request.add_header("Host", f"{self.authority}:{port or self.port}")
         if data is not None:
             request.add_header("Content-Type", "application/json")
         for key, value in (headers or {}).items():
@@ -237,7 +241,7 @@ class GatewayHarness:
         if path.startswith("/owner/") and not any(
             key.lower() == "origin" for key in (headers or {})
         ):
-            request.add_header("Origin", f"http://127.0.0.1:{port or self.port}")
+            request.add_header("Origin", f"http://{self.authority}:{port or self.port}")
         def collect(response) -> dict[str, Any]:
             headers = {key: value for key, value in response.headers.items()}
             # Preserve cookie headers for any response under test.
@@ -262,6 +266,44 @@ class GatewayHarness:
 
 
 class MetadataTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.harness = GatewayHarness()
+        self.addCleanup(self.harness.close)
+
+    def test_ipv6_loopback_server_serves_canonical_mutation(self) -> None:
+        try:
+            harness = GatewayHarness(host="::1")
+        except OSError as exc:
+            self.skipTest(f"IPv6 loopback unavailable: {exc}")
+        self.addCleanup(harness.close)
+        self.harness = harness
+        status, payload, _ = harness.request(
+            "GET", "/version",
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(harness.app.base_url, f"http://[::1]:{harness.port}")
+        status, payload, _ = harness.request(
+            "POST", "/owner/api/model",
+            body={"action": "enable", "provider_id": "chatgpt_codex", "model_id": "gpt-6-luna"},
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ok"])
+
+    def test_ipv6_ula_listener_binds_when_host_owns_address(self) -> None:
+        host = "fd12:3456::1"
+        try:
+            port = free_port(host)
+        except OSError as exc:
+            self.skipTest(f"test host does not own ULA: {exc}")
+        server = Server(host, port, lambda request: Response(200))
+        try:
+            server.start_background()
+        except OSError as exc:
+            self.skipTest(f"IPv6 ULA bind unavailable: {exc}")
+        self.addCleanup(server.stop)
+        self.assertEqual(server.actual_port, port)
+
+class MetadataDetailsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = GatewayHarness()
         self.addCleanup(self.harness.close)

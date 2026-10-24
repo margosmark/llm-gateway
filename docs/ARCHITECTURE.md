@@ -13,18 +13,27 @@ The gateway starts one standard-library HTTP server from `gateway.cli`:
 | Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version` | direct owner console/configuration and anonymous OpenAI-compatible API |
 
 The owner console, credential forms, provider actions, and client API share the
-same listener. `cli.py` refuses wildcard and non-private binds. No setup
+same listener. `cli.py` refuses wildcard and unsupported binds. Supported classes are
+RFC1918 IPv4, IPv6 unique-local (`fc00::/7`), and loopback, subject to the
+address being assigned locally. The HTTP server selects an IPv4 or IPv6
+listener by address family; IPv6 authorities are bracketed for URLs, `Host`,
+and `Origin`. Public (including RFC 5737 TEST-NET),
+multicast, link-local, and unspecified addresses are refused. No setup
 listener or setup-port setting exists. Forwarded headers are rejected rather
 than trusted.
 The gateway port is configurable, but `8766` is reserved and rejected so the
-retired setup port cannot be reused.
+retired setup port cannot be reused. HTTP request handling is bounded to 32
+worker threads by default; a full pool returns 429 `rate_limited` instead of
+creating unbounded workers. A process-local rolling window allows 120 requests
+per peer IP per 60 seconds by default. These are local capacity protections,
+not an access-control boundary or defense against an on-path LAN attacker.
 
 ## State boundaries
 
 `gateway.config.ConfigStore` persists the non-secret configuration as
 `config.json`, with atomic replace, mode `0600`, and a monotonic revision.
 It contains provider state, model metadata, aliases/routes, profile metadata,
-and access mode. It must never contain a credential or caller-token hash.
+and access mode. It must never contain a credential or caller-token hash. Owner-console exports use a strict allowlist-style sanitization, and imports build and validate a complete candidate through `gateway.identifiers` and `gateway.routes` before one atomic replace. Optional timestamped snapshots live under the state volume's `snapshots/` directory and are disabled by default; the setting is read live.
 
 `gateway.credentials.CredentialStore` persists separate JSON files under a
 private `credentials/` directory. Provider adapters receive a handle scoped to
@@ -225,6 +234,7 @@ policy. Provider-specific behaviour lives in `gateway.adapters`.
   Its upstream is **streaming only** and expects the same request fields
   OpenAI's own client sends. See `CHATGPT_CODEX_CONTRACT.md` and
   `PROVIDER_CONTRACTS.md` for the exact contract.
+* **Anthropic** uses the native Messages dialect and a provider-scoped API-key credential file. Model capabilities and limits are not inferred; catalogue refresh and connection tests are explicit actions.
 * **OpenCode Go** discovers model IDs from its explicit catalogue endpoint.
   The checked-in `data/go_catalog.json` supplies the dated, published mapping
   from model ID to wire dialect. An undocumented dialect is refused rather

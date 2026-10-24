@@ -102,6 +102,78 @@ class DegradedRouteTests(unittest.TestCase):
             "the unsupported effort must be dropped for the route that cannot honour it",
         )
 
+    def test_image_request_excludes_model_without_image_input_before_provider_call(self) -> None:
+        adapter = FakeAdapter()
+        self.harness.registry.register(adapter)
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"].fallbacks = []
+            config.providers[FAKE_PROVIDER].models["gpt-6-luna"].supports_image_input = False
+        status, payload, _ = self.harness.request(
+            "POST",
+            "/v1/chat/completions",
+            body={
+                "model": "coding",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_url", "image_url": {"url": "https://example.invalid/image"}},
+                ]}],
+            },
+        )
+        self.assertEqual(status, 503)
+        # The public refusal is generic: no per-route detail, no upstream
+        # identifiers (the exclusion reasons stay in the router/owner side).
+        self.assertNotIn("detail", payload["error"])
+        self.assertEqual(adapter.calls, [], "an unsupported image request must not reach the provider")
+
+    def test_builtin_tool_request_excludes_model_without_builtin_tools(self) -> None:
+        adapter = FakeAdapter()
+        self.harness.registry.register(adapter)
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"].fallbacks = []
+            config.providers[FAKE_PROVIDER].models["gpt-6-luna"].supports_builtin_tools = False
+        status, payload, _ = self.harness.request(
+            "POST",
+            "/v1/responses",
+            body={"model": "coding", "input": "search", "tools": [{"type": "web_search"}]},
+        )
+        self.assertEqual(status, 503)
+        # The public refusal is generic; the exclusion reason is verified on
+        # the router side, where the owner's diagnostics live.
+        self.assertNotIn("detail", payload["error"])
+        self.assertEqual(adapter.calls, [])
+        candidates = self.harness.app.router.candidates(
+            self.harness.config.snapshot().aliases["coding"],
+            source_dialect="openai_responses", stream=False,
+            needs_builtin_tools=True,
+        )
+        self.assertIn(
+            "this model does not support builtin tools",
+            [candidate.excluded_reason for candidate in candidates],
+        )
+
+    def test_previous_response_id_excludes_model_without_continuation_support(self) -> None:
+        adapter = FakeAdapter()
+        self.harness.registry.register(adapter)
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"].fallbacks = []
+        status, payload, _ = self.harness.request(
+            "POST",
+            "/v1/responses",
+            body={"model": "coding", "input": "continue", "previous_response_id": "resp_previous"},
+        )
+        self.assertEqual(status, 503)
+        self.assertNotIn("detail", payload["error"])
+        self.assertEqual(adapter.calls, [])
+        candidates = self.harness.app.router.candidates(
+            self.harness.config.snapshot().aliases["coding"],
+            source_dialect="openai_responses", stream=False,
+            needs_previous_response_id=True,
+        )
+        self.assertIn(
+            "this model does not support previous_response_id continuation",
+            [candidate.excluded_reason for candidate in candidates],
+        )
+
     def test_a_route_that_supports_the_effort_keeps_it(self) -> None:
         failing = FakeAdapter(fail_with=AdapterError("exhausted", provider_id=FAKE_PROVIDER))
         self.harness.registry.register(failing)
