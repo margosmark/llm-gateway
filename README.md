@@ -45,7 +45,9 @@ curl http://10.10.11.109:8765/v1/chat/completions \
 `coding` is an alias you defined in the console. It resolves either to a
 primary route or a weighted pool selected consistently for each conversation;
 if you explicitly allow it, other pool members and ordered configured routes
-are failure fallbacks. Provider churn never breaks your client's configuration.
+are failure fallbacks — but never after a stream: a stream failure inside a
+pool member fails on the same alias rather than switching route. Provider
+churn never breaks your client's configuration.
 
 ---
 

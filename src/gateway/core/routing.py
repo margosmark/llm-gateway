@@ -487,12 +487,13 @@ class Router:
         failed_class: str,
         next_candidate: Candidate,
         side_effects_possible: bool,
+        pooled_stream: bool = False,
     ) -> tuple[bool, str]:
         """Decide whether the next candidate may be tried after a failure.
 
         Returns ``(allowed, reason)``. The reason explains a refusal.
         """
-        allowed, reason = self._switch_preflight(alias, next_candidate, side_effects_possible)
+        allowed, reason = self._switch_preflight(alias, next_candidate, side_effects_possible, pooled_stream)
         if not allowed:
             return allowed, reason
 
@@ -546,6 +547,7 @@ class Router:
         alias: Alias,
         next_candidate: Candidate,
         side_effects_possible: bool,
+        pooled_stream: bool = False,
     ) -> tuple[bool, str]:
         """The gate for a switch away from a route this request **tried**.
 
@@ -555,6 +557,14 @@ class Router:
         """
         if side_effects_possible:
             return False, "the request carried tools, so a provider switch could repeat a side effect"
+        if pooled_stream:
+            # A weighted pool is a deliberate distribution, not a failure
+            # path. The spec's hard stop for pool failures: it never
+            # happens after a stream. The failure surfaces on this alias.
+            return False, (
+                "the request is a stream and the route was chosen by the alias's "
+                "weighted pool, so a pool failure never switches route"
+            )
         return Router._owner_switch_controls(alias, next_candidate)
 
     @staticmethod
@@ -798,6 +808,10 @@ class Router:
         """
         alias = self.resolve_alias(alias_name)
         conversation = derive_session(profile_id, alias_name, client_ip, session_hint)
+        #: True when the serving route was chosen by a weighted pool. A
+        #: pool is a deliberate distribution, so a failure inside it never
+        #: switches to a different route once the request is a stream.
+        from_weighted_pool = bool(alias.weighted_routes)
         if alias.weighted_routes:
             pool_routes = [item.route for item in alias.weighted_routes]
             selected, pool_fallbacks = select_weighted(
@@ -1006,7 +1020,8 @@ class Router:
                 if is_last:
                     break
                 allowed, reason = self._fallback_permitted(
-                    alias, ERROR_POLICY, eligible[index + 1], needs_tools
+                    alias, ERROR_POLICY, eligible[index + 1], needs_tools,
+                    pooled_stream=from_weighted_pool and stream,
                 )
                 if not allowed:
                     last_error = AdapterError(ERROR_POLICY, f"{last_error.message} ({reason})", provider_id=candidate.route.provider)
@@ -1207,7 +1222,8 @@ class Router:
                     if is_last:
                         break
                     allowed, reason = self._fallback_permitted(
-                        alias, exc.error_class, eligible[index + 1], needs_tools
+                        alias, exc.error_class, eligible[index + 1], needs_tools,
+                        pooled_stream=from_weighted_pool and stream,
                     )
                     if not allowed:
                         # The gateway's own capacity refusal keeps its
