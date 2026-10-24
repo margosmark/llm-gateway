@@ -15,6 +15,10 @@ Two rules govern every function here:
 from __future__ import annotations
 
 from typing import Any
+import base64
+import binascii
+import re
+from urllib.parse import urlsplit
 
 from gateway.bridge.model import (
     IMAGE,
@@ -117,6 +121,36 @@ def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> boo
     return False
 
 
+_MAX_IMAGE_DATA_BYTES = 4 * 1024 * 1024
+_DATA_IMAGE_RE = re.compile(r"^data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]*={0,2})$", re.IGNORECASE)
+
+def _validated_image_url(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > 6 * 1024 * 1024:
+        raise ConversionError("image URL is missing or exceeds the supported size limit", capability="image_input")
+    if value.lower().startswith("data:"):
+        match = _DATA_IMAGE_RE.fullmatch(value)
+        if match is None:
+            raise ConversionError("unsupported or malformed image data URL", capability="image_input")
+        try:
+            encoded = match.group(2)
+            decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True)
+        except (ValueError, binascii.Error):
+            raise ConversionError("malformed image data URL", capability="image_input") from None
+        if not decoded or len(decoded) > _MAX_IMAGE_DATA_BYTES:
+            raise ConversionError("image data exceeds the 4 MiB decoded size limit", capability="image_input")
+        return value
+    try:
+        parsed = urlsplit(value)
+        valid_port = parsed.port is None or 1 <= parsed.port <= 65535
+    except ValueError:
+        valid_port = False
+        parsed = None
+    if (parsed is None or parsed.scheme.lower() not in ("http", "https")
+            or not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or not valid_port or any(ord(char) < 32 or char.isspace() for char in value)):
+        raise ConversionError("image URL must be a valid HTTP(S) URL or supported image data URL", capability="image_input")
+    return value
+
 def _chat_content_to_parts(content: Any) -> list[ContentPart]:
     """Convert Chat Completions message content into content parts."""
     if content is None:
@@ -129,7 +163,7 @@ def _chat_content_to_parts(content: Any) -> list[ContentPart]:
             parts.append(ContentPart(kind=TEXT, text=entry))
             continue
         if not isinstance(entry, dict):
-            continue
+            raise ConversionError("malformed Chat Completions content part")
         entry_type = entry.get("type")
         if entry_type == "text" or (entry_type is None and "text" in entry):
             parts.append(ContentPart(kind=TEXT, text=str(entry.get("text") or "")))
@@ -142,7 +176,7 @@ def _chat_content_to_parts(content: Any) -> list[ContentPart]:
                 detail = image.get("detail")
             elif isinstance(image, str):
                 url = image
-            parts.append(ContentPart(kind=IMAGE, image_url=url, detail=detail))
+            parts.append(ContentPart(kind=IMAGE, image_url=_validated_image_url(url), detail=detail))
         elif entry_type == "input_text":
             parts.append(ContentPart(kind=TEXT, text=str(entry.get("text") or "")))
         elif entry_type == "output_text":
@@ -150,7 +184,9 @@ def _chat_content_to_parts(content: Any) -> list[ContentPart]:
         elif entry_type == "input_image":
             image = entry.get("image_url")
             url = image.get("url") if isinstance(image, dict) else image
-            parts.append(ContentPart(kind=IMAGE, image_url=url))
+            parts.append(ContentPart(kind=IMAGE, image_url=_validated_image_url(url)))
+        else:
+            raise ConversionError("unsupported Chat Completions content part type")
     return parts
 
 
@@ -166,14 +202,16 @@ def _responses_content_to_parts(content: Any) -> list[ContentPart]:
             parts.append(ContentPart(kind=TEXT, text=entry))
             continue
         if not isinstance(entry, dict):
-            continue
+            raise ConversionError("malformed Responses content part")
         entry_type = entry.get("type")
         if entry_type in ("input_text", "output_text", "text", "summary_text"):
             parts.append(ContentPart(kind=TEXT, text=str(entry.get("text") or "")))
         elif entry_type == "input_image":
             image = entry.get("image_url")
             url = image.get("url") if isinstance(image, dict) else image
-            parts.append(ContentPart(kind=IMAGE, image_url=url, detail=entry.get("detail")))
+            parts.append(ContentPart(kind=IMAGE, image_url=_validated_image_url(url), detail=entry.get("detail")))
+        else:
+            raise ConversionError("unsupported Responses content part type")
     return parts
 
 
