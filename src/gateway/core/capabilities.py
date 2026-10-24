@@ -28,6 +28,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from gateway.thinking import CANONICAL_LEVELS
+
 # Wire dialects.
 DIALECT_OPENAI_RESPONSES = "openai_responses"
 DIALECT_OPENAI_CHAT = "openai_chat"
@@ -55,8 +57,15 @@ RETENTION_LABELS = {
     RETENTION_UNKNOWN: "retention unknown",
 }
 
-# Reasoning efforts, per model. Luna tops out at max and has no ultra.
-REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+from gateway.thinking import CANONICAL_LEVELS
+
+# Reasoning efforts, per model. The vocabulary is not asserted here: it
+# lives in ``gateway.thinking`` with the provider documentation behind
+# each level, and a model publishes a subset of it - or publishes nothing
+# at all, in which case its levels are **Unknown** and a requested level
+# is dropped for that route with the substitution recorded. ``ultra`` is
+# deliberately absent: no provider this gateway serves publishes it.
+REASONING_EFFORTS = CANONICAL_LEVELS
 
 
 @dataclass(frozen=True)

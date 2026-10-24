@@ -99,7 +99,15 @@ class NormalisedRequest:
     hosted_tools: list[dict[str, Any]] = field(default_factory=list)
     stream: bool = False
     max_output_tokens: int | None = None
+    #: The canonical thinking level: a level from
+    #: ``gateway.thinking.CANONICAL_LEVELS``, or ``DISABLED_LEVEL`` for
+    #: "do not reason". Carried so a conversion renders it per dialect
+    #: instead of losing the control.
     reasoning_effort: str | None = None
+    #: A Responses-dialect reasoning *summary* request. It is carried
+    #: rather than dropped, because Chat Completions cannot express it:
+    #: the target dialect refuses it instead of ignoring it.
+    reasoning_summary: str | None = None
     temperature: float | None = None
     top_p: float | None = None
     stop: list[str] = field(default_factory=list)
