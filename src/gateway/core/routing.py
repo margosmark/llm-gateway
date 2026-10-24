@@ -76,6 +76,37 @@ TRIGGER_FOR_ERROR = {
 OWNER_POLICY_CLASSES = (ERROR_AUTH, ERROR_POLICY, ERROR_MALFORMED)
 
 
+def _contains_image_input(value: Any) -> bool:
+    """Whether a request contains an image part in either supported dialect."""
+    if isinstance(value, dict):
+        if value.get("type") in ("image_url", "input_image"):
+            return True
+        return any(_contains_image_input(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_image_input(item) for item in value)
+    return False
+
+
+def _requested_tool_capabilities(payload: dict[str, Any]) -> tuple[bool, bool]:
+    """Return whether function and/or provider-hosted tools are requested."""
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False, False
+    functions = any(
+        isinstance(tool, dict) and tool.get("type") in (None, "function")
+        for tool in tools
+    )
+    builtins = any(
+        isinstance(tool, dict) and tool.get("type") not in (None, "function")
+        for tool in tools
+    )
+    return functions, builtins
+
+
+def _contains_builtin_tools(payload: dict[str, Any]) -> bool:
+    return _requested_tool_capabilities(payload)[1]
+
+
 def _requested_reasoning_effort(payload: dict[str, Any]) -> str | None:
     """Return an enabled reasoning effort, never treating an explicit disable as a capability request."""
     effort = payload.get("reasoning_effort")
@@ -236,6 +267,7 @@ class Router:
             supports_streaming=entry.supports_streaming,
             supports_function_tools=entry.supports_function_tools,
             supports_builtin_tools=entry.supports_builtin_tools,
+            supports_previous_response_id=getattr(entry, "supports_previous_response_id", False),
             reasoning_efforts=tuple(entry.reasoning_efforts),
             supports_image_input=entry.supports_image_input,
             context_window=entry.context_window,
@@ -249,7 +281,9 @@ class Router:
         source_dialect: str = DIALECT_OPENAI_CHAT,
         stream: bool = False,
         needs_tools: bool = False,
+        needs_builtin_tools: bool = False,
         needs_image_input: bool = False,
+        needs_previous_response_id: bool = False,
         reasoning_effort: str | None = None,
     ) -> list[Candidate]:
         """Build the ordered candidate list for an alias."""
@@ -310,8 +344,16 @@ class Router:
                 candidate.excluded_reason = "this model does not support function tools"
                 candidates.append(candidate)
                 continue
+            if needs_builtin_tools and not capability.supports_builtin_tools:
+                candidate.excluded_reason = "this model does not support builtin tools"
+                candidates.append(candidate)
+                continue
             if needs_image_input and not capability.supports_image_input:
                 candidate.excluded_reason = "this model does not support image input"
+                candidates.append(candidate)
+                continue
+            if needs_previous_response_id and not capability.supports_previous_response_id:
+                candidate.excluded_reason = "this model does not support previous_response_id continuation"
                 candidates.append(candidate)
                 continue
             if reasoning_effort and not capability.supports_effort(reasoning_effort):
@@ -523,8 +565,9 @@ class Router:
         """
         alias = self.resolve_alias(alias_name)
 
-        needs_tools = bool(payload.get("tools"))
+        needs_tools, needs_builtin_tools = _requested_tool_capabilities(payload)
         needs_image_input = payload_has_image_input(payload, source_dialect)
+        needs_previous_response_id = bool(payload.get("previous_response_id"))
         reasoning_effort = _requested_reasoning_effort(payload)
 
         candidates = self.candidates(
@@ -532,7 +575,9 @@ class Router:
             source_dialect=source_dialect,
             stream=stream,
             needs_tools=needs_tools,
+            needs_builtin_tools=needs_builtin_tools,
             needs_image_input=needs_image_input,
+            needs_previous_response_id=needs_previous_response_id,
             reasoning_effort=reasoning_effort if isinstance(reasoning_effort, str) else None,
         )
         if not candidates:
