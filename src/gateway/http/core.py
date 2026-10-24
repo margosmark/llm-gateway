@@ -31,6 +31,11 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from gateway.http.keepalive import with_sse_keepalives
 
+# The one deliberate dependency: the client-abort seam. This layer
+# notices that the client has gone; the routing core owns cancelling the
+# upstream request behind it (``T11-ANCHOR: client-abort propagation``).
+from gateway.core.abort import abort_request
+
 MAX_BODY_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_WORKERS = 32
 DEFAULT_RATE_LIMIT_REQUESTS = 120
@@ -458,7 +463,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 result = Response(500, [("Content-Type", "application/json; charset=utf-8")],
                                   b'{"error":{"message":"internal error","type":"gateway_error"}}')
 
-            self._send(result, head_only=(method == "HEAD"))
+            self._send(result, head_only=(method == "HEAD"), request=request)
         finally:
             # A streamed response holds a provider in-flight slot until its
             # stream finishes or is closed. This finally is what gives the
@@ -472,7 +477,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if release is not None:
                 release()
 
-    def _send(self, result: Any, head_only: bool = False) -> None:
+    def _send(self, result: Any, head_only: bool = False, request: Request | None = None) -> None:
         try:
             if isinstance(result, StreamResponse):
                 self._send_stream(result, head_only)
@@ -480,6 +485,49 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 self._send_buffered(result, head_only)
         except (BrokenPipeError, ConnectionResetError):  # pragma: no cover - client hung up
             self.close_connection = True
+            # The client is gone. Its half of the socket is closed, so the
+            # upstream request would run to completion and every byte it
+            # produced would be thrown away at a provider that charges for
+            # them. Stop it instead. See _abort_upstream.
+            self._abort_upstream(result, request)
+
+    def _abort_upstream(self, result: Any, request: Request | None) -> None:
+        """Stop the upstream request behind *result* after the client hung up.
+
+        A broken pipe on the response write means the caller disconnected
+        mid-answer. The iterator behind a :class:`StreamResponse` is a
+        generator layered over the upstream adapter's own stream, so
+        closing it raises ``GeneratorExit`` where the answer is produced
+        and the adapter's cleanup runs. The rest of the cancellation - the
+        adapter's cancel hook, and the memory that this request was
+        *aborted* rather than *failed* - belongs to the routing core's
+        seam, which the HTTP layer reaches by request id out of the
+        request context. That context is set by the application while it
+        builds the response, exactly as the access log reads it.
+
+        Nothing here may raise. The client has already gone, so a
+        secondary failure on the way out is noise, not information.
+        """
+        iterator = getattr(result, "iterator", None)
+        closer = getattr(iterator, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 - cleanup after a hang-up must not raise.
+                pass
+        request_id = ""
+        if request is not None:
+            context = getattr(request, "context", None)
+            if isinstance(context, dict):
+                candidate = context.get("request_id")
+                if isinstance(candidate, str):
+                    request_id = candidate
+        try:
+            # Idempotent, and a no-op when the request never reached a
+            # provider: the outcome says there was nothing to cancel.
+            abort_request(request_id, "client_disconnected")
+        except Exception:  # noqa: BLE001 - the abort seam is best-effort here.
+            return
 
     def _send_buffered(self, response: Response, head_only: bool) -> None:
         self.send_response(response.status)
