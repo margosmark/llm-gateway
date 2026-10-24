@@ -224,6 +224,48 @@ reference client sends:
 The request's `model` is the **upstream model id** of the chosen route.
 An alias never reaches the provider.
 
+### 3.3.1 Request fields the upstream rejects
+
+The backend answers a list of ordinary Chat Completions fields with
+`400 {"detail": [{"msg": "Unsupported parameter: <field>"}]}`. Confirmed
+against the live backend, one field at a time, each added to an
+otherwise-accepted body:
+
+```text
+temperature       top_p             n                 stop
+stop_sequences    presence_penalty  frequency_penalty logit_bias
+logprobs          top_logprobs      seed              user
+metadata          response_format   service_tier      max_tokens
+max_completion_tokens                suffix
+```
+
+`service_tier` is reported as `Unsupported service_tier: <value>` rather
+than `Unsupported parameter`, but is rejected the same way.
+
+Two properties of this rule matter operationally:
+
+* **Validation runs before the allowance check.** The identical body
+  *without* the field returns the account-allowance error, so a 400 here is
+  a genuine shape rejection, not an exhausted account. That is what makes
+  the list above trustworthy evidence.
+* **The rejection is image-independent.** The same sweep run with an
+  `input_image` item present produces the identical set, so an image
+  request does not change which parameters are legal.
+
+This was the dominant cause of the `malformed` failure class. `malformed`
+is **not** a fallbackable class, so a single innocent `temperature` turned
+a servable request into a 502 with no fallback attempted — which is why it
+hit the image path hardest: Hermes' vision and summariser calls are exactly
+the requests that set `temperature`, and they are non-streaming.
+
+The fix keeps the knowledge on the adapter. `ChatGPTCodexAdapter` declares
+`UNSUPPORTED_PAYLOAD_FIELDS`, and the router — which holds no provider
+branch — reads it through the same seam as `dialect` and drops those fields
+**for that route only**. The substitution is recorded in the ledger as a
+degradation naming the dropped fields; it is never silent. An adapter that
+declares nothing is stripped of nothing, and a genuine 400 still fails
+closed.
+
 ### 3.4 The response stream
 
 Events observed from the backend:

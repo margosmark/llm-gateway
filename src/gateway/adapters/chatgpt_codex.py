@@ -92,6 +92,48 @@ IMAGE_INPUT_SOURCES = {
     "gpt-5.6-terra": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
 }
 
+#: Request fields the ChatGPT-authenticated Codex backend rejects with a 400.
+#:
+#: Every field below was confirmed against the live backend, one at a time,
+#: each added to an otherwise-accepted body. Each returns
+#: ``400 {"detail": [{"msg": "Unsupported parameter: <field>"}]}``, while the
+#: identical body without that field returns the account allowance error -
+#: which proves validation ran *before* the allowance check, so a 400 here is
+#: a genuine shape rejection rather than an exhausted account.
+#:
+#: The rejection is independent of image input: the same sweep run with an
+#: ``input_image`` item present produces the identical set. This is the
+#: single most common cause of the "malformed" failure class on this
+#: provider, because OpenAI's own Chat Completions dialect accepts all of
+#: them, so a client that sets ``temperature`` is doing nothing unusual -
+#: the field simply has no place in this dialect and must be dropped, with
+#: the substitution recorded, rather than forwarded.
+#:
+#: Sampling controls have no effect on a reasoning model served through this
+#: backend, so dropping them loses nothing the client can observe.
+CODEX_UNSUPPORTED_PAYLOAD_FIELDS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "n",
+        "stop",
+        "stop_sequences",
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "seed",
+        "user",
+        "metadata",
+        "response_format",
+        "service_tier",
+        "max_tokens",
+        "max_completion_tokens",
+        "suffix",
+    }
+)
+
 #: The Codex client appends its own version to the model-list request, and
 #: the backend expects it. The gateway identifies itself honestly with its
 #: own version rather than impersonating the Codex client.
@@ -203,6 +245,14 @@ class ChatGPTCodexAdapter:
 
     provider_id = PROVIDER_ID
     kind = KIND
+
+    #: Top-level request fields this provider's upstream answers with a 400
+    #: "Unsupported parameter" for. The router reads these off the adapter and
+    #: drops them for this route, recording the substitution - the fields are
+    #: all part of OpenAI's Chat dialect, so a caller setting one is behaving
+    #: normally and should not be failed for it. See the constant's comment
+    #: for the live evidence behind each entry.
+    UNSUPPORTED_PAYLOAD_FIELDS = CODEX_UNSUPPORTED_PAYLOAD_FIELDS
 
     def __init__(
         self,
