@@ -15,6 +15,10 @@ Two rules govern every function here:
 from __future__ import annotations
 
 from typing import Any
+import base64
+import binascii
+import re
+from urllib.parse import urlsplit
 
 from gateway.bridge.model import (
     IMAGE,
@@ -89,6 +93,49 @@ def _chat_reasoning(payload: dict[str, Any]) -> str | None:
     return flat or effort
 
 
+def _is_root_level_image_item(entry: dict[str, Any]) -> bool:
+    """Whether a top-level Responses input item is an image-like item.
+
+    The root of a Responses ``input`` array carries *items* (messages,
+    function calls, their outputs), never content parts: an image is an
+    ``input_image`` part **inside** a message item's ``content``. A root
+    item that claims to be an image - by type or by carrying an
+    ``image_url``/``input_image`` key - is therefore malformed for every
+    route, whatever its URL looks like.
+    """
+    return (
+        entry.get("type") in ("input_image", "image_url")
+        or "image_url" in entry
+        or "input_image" in entry
+    )
+
+
+def _validated_responses_root_items(payload: dict[str, Any]) -> list[Any]:
+    """The top-level Responses ``input`` items, or a safe refusal.
+
+    Every path that reads the root of a Responses payload - capability
+    detection, dialect conversion and same-dialect pass-through - shares
+    this validation, so a malformed or image-like root item cannot slip
+    through the one path that skips content parsing. It raises
+    :class:`ConversionError` (a 4xx at the API surface, before any route is
+    chosen and before any adapter is called) rather than silently dropping
+    the item or forwarding it to an adapter that would ignore it.
+    """
+    entries = _as_list(payload.get("input"))
+    for entry in entries:
+        if isinstance(entry, str):
+            continue
+        if not isinstance(entry, dict):
+            raise ConversionError("Responses input items must be strings or JSON objects")
+        if _is_root_level_image_item(entry):
+            raise ConversionError(
+                "a top-level Responses input item may not carry an image; "
+                "an image belongs in an input_image content part inside a message",
+                capability="image_input",
+            )
+    return entries
+
+
 def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> bool:
     """Whether a request carries an image that the serving model must see.
 
@@ -96,6 +143,11 @@ def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> boo
     rendering cannot disagree about which fields represent an image. Unknown
     part shapes are not treated as images here; a converted path will still
     refuse any shape it cannot express, rather than silently dropping it.
+
+    A top-level image-like Responses item is not an image to *serve* but a
+    malformed request: the shared root validation refuses it here, before
+    route selection, so it can never reach a text-only adapter that would
+    silently ignore it.
     """
     if source_dialect == DIALECT_OPENAI_CHAT:
         messages = payload.get("messages")
@@ -105,17 +157,46 @@ def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> boo
             for message in messages
         )
     if source_dialect == DIALECT_OPENAI_RESPONSES:
-        raw_input = payload.get("input")
-        for entry in _as_list(raw_input):
+        for entry in _validated_responses_root_items(payload):
             if isinstance(entry, str):
                 continue
-            if isinstance(entry, dict) and any(
+            if any(
                 part.kind == IMAGE for part in _responses_content_to_parts(entry.get("content"))
             ):
                 return True
         return False
     return False
 
+
+_MAX_IMAGE_DATA_BYTES = 4 * 1024 * 1024
+_DATA_IMAGE_RE = re.compile(r"^data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]*={0,2})$", re.IGNORECASE)
+
+def _validated_image_url(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > 6 * 1024 * 1024:
+        raise ConversionError("image URL is missing or exceeds the supported size limit", capability="image_input")
+    if value.lower().startswith("data:"):
+        match = _DATA_IMAGE_RE.fullmatch(value)
+        if match is None:
+            raise ConversionError("unsupported or malformed image data URL", capability="image_input")
+        try:
+            encoded = match.group(2)
+            decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True)
+        except (ValueError, binascii.Error):
+            raise ConversionError("malformed image data URL", capability="image_input") from None
+        if not decoded or len(decoded) > _MAX_IMAGE_DATA_BYTES:
+            raise ConversionError("image data exceeds the 4 MiB decoded size limit", capability="image_input")
+        return value
+    try:
+        parsed = urlsplit(value)
+        valid_port = parsed.port is None or 1 <= parsed.port <= 65535
+    except ValueError:
+        valid_port = False
+        parsed = None
+    if (parsed is None or parsed.scheme.lower() not in ("http", "https")
+            or not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or not valid_port or any(ord(char) < 32 or char.isspace() for char in value)):
+        raise ConversionError("image URL must be a valid HTTP(S) URL or supported image data URL", capability="image_input")
+    return value
 
 def _chat_content_to_parts(content: Any) -> list[ContentPart]:
     """Convert Chat Completions message content into content parts."""
@@ -129,7 +210,7 @@ def _chat_content_to_parts(content: Any) -> list[ContentPart]:
             parts.append(ContentPart(kind=TEXT, text=entry))
             continue
         if not isinstance(entry, dict):
-            continue
+            raise ConversionError("malformed Chat Completions content part")
         entry_type = entry.get("type")
         if entry_type == "text" or (entry_type is None and "text" in entry):
             parts.append(ContentPart(kind=TEXT, text=str(entry.get("text") or "")))
@@ -142,7 +223,7 @@ def _chat_content_to_parts(content: Any) -> list[ContentPart]:
                 detail = image.get("detail")
             elif isinstance(image, str):
                 url = image
-            parts.append(ContentPart(kind=IMAGE, image_url=url, detail=detail))
+            parts.append(ContentPart(kind=IMAGE, image_url=_validated_image_url(url), detail=detail))
         elif entry_type == "input_text":
             parts.append(ContentPart(kind=TEXT, text=str(entry.get("text") or "")))
         elif entry_type == "output_text":
@@ -150,7 +231,9 @@ def _chat_content_to_parts(content: Any) -> list[ContentPart]:
         elif entry_type == "input_image":
             image = entry.get("image_url")
             url = image.get("url") if isinstance(image, dict) else image
-            parts.append(ContentPart(kind=IMAGE, image_url=url))
+            parts.append(ContentPart(kind=IMAGE, image_url=_validated_image_url(url)))
+        else:
+            raise ConversionError("unsupported Chat Completions content part type")
     return parts
 
 
@@ -166,14 +249,16 @@ def _responses_content_to_parts(content: Any) -> list[ContentPart]:
             parts.append(ContentPart(kind=TEXT, text=entry))
             continue
         if not isinstance(entry, dict):
-            continue
+            raise ConversionError("malformed Responses content part")
         entry_type = entry.get("type")
         if entry_type in ("input_text", "output_text", "text", "summary_text"):
             parts.append(ContentPart(kind=TEXT, text=str(entry.get("text") or "")))
         elif entry_type == "input_image":
             image = entry.get("image_url")
             url = image.get("url") if isinstance(image, dict) else image
-            parts.append(ContentPart(kind=IMAGE, image_url=url, detail=entry.get("detail")))
+            parts.append(ContentPart(kind=IMAGE, image_url=_validated_image_url(url), detail=entry.get("detail")))
+        else:
+            raise ConversionError("unsupported Responses content part type")
     return parts
 
 
@@ -352,11 +437,9 @@ def from_responses(payload: dict[str, Any]) -> NormalisedRequest:
     if isinstance(raw_input, str):
         items.append(InputItem(kind=ITEM_MESSAGE, role=ROLE_USER, content=[ContentPart(TEXT, raw_input)]))
     else:
-        for entry in _as_list(raw_input):
+        for entry in _validated_responses_root_items(payload):
             if isinstance(entry, str):
                 items.append(InputItem(kind=ITEM_MESSAGE, role=ROLE_USER, content=[ContentPart(TEXT, entry)]))
-                continue
-            if not isinstance(entry, dict):
                 continue
             entry_type = entry.get("type")
             if entry_type == "function_call":
@@ -387,6 +470,11 @@ def from_responses(payload: dict[str, Any]) -> NormalisedRequest:
                         role=role,
                         content=_responses_content_to_parts(entry.get("content")),
                     )
+                )
+            else:
+                raise ConversionError(
+                    "unsupported Responses input item type: "
+                    f"{entry_type!r} cannot be expressed in the Chat Completions dialect"
                 )
 
     functions, hosted = _responses_tools_to_normalised(payload.get("tools"))
@@ -564,6 +652,12 @@ def convert_request(payload: dict[str, Any], source: str, target: str) -> dict[s
         # Same dialect: the upstream owns its own dialect, so a control the
         # gateway does not understand is forwarded rather than dropped or
         # refused - the provider is the party that defines what it accepts.
+        if source == DIALECT_OPENAI_RESPONSES:
+            # Root input *items* are the gateway's to validate even here: an
+            # image-like top-level item is malformed for every route, and
+            # forwarding it would let the serving adapter silently ignore an
+            # image the caller believes was delivered.
+            _validated_responses_root_items(payload)
         if source == DIALECT_OPENAI_CHAT:
             nested = payload.get("reasoning")
             if (

@@ -158,6 +158,24 @@ class RequestConversionTests(unittest.TestCase):
             )
         self.assertIn("hosted tools", ctx.exception.message)
 
+    def test_rejects_unknown_or_malformed_chat_content_parts(self) -> None:
+        for part in ({"type": "image", "url": "data:image/png;base64,AA"}, {"type": "image_url", "image_url": {}}):
+            with self.subTest(part=part), self.assertRaises(ConversionError):
+                from_chat_completions({"model": "m", "messages": [{"role": "user", "content": [part]}]})
+
+    def test_rejects_unknown_or_malformed_responses_content_parts(self) -> None:
+        for part in ({"type": "image_url", "url": "https://example.com/a.png"}, {"type": "input_image"}):
+            with self.subTest(part=part), self.assertRaises(ConversionError):
+                from_responses({"model": "m", "input": [{"role": "user", "content": [part]}]})
+
+    def test_image_url_scheme_and_data_size_are_validated(self) -> None:
+        for url in ("file:///etc/passwd", "https://", "http://user:pass@example.com/a", "data:text/plain;base64,AA"):
+            part = {"type": "image_url", "image_url": {"url": url}}
+            with self.subTest(url=url), self.assertRaises(ConversionError):
+                from_chat_completions({"model": "m", "messages": [{"role": "user", "content": [part]}]})
+        good = {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}
+        self.assertTrue(from_chat_completions({"model": "m", "messages": [{"role": "user", "content": [good]}]}).items)
+
     def test_missing_model_is_refused(self) -> None:
         with self.assertRaises(ConversionError):
             from_chat_completions({"messages": []})
