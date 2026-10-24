@@ -244,10 +244,12 @@ An alias may carry an optional **request policy** - owner defaults, caps
 and deny rules - so the client no longer dictates every parameter. It is
 off by default: without one, the client's values stand untouched, exactly
 as before. The block lives in the alias's `policy` entry in the
-configuration. A console editor for it is **not** landed yet, and a
-console alias save currently drops a file-configured policy - see
-`docs/REVIEW.md` R40 before relying on the console for aliases that have
-one.
+configuration. A console editor for it is **not** landed yet, but a
+console alias save no longer drops a file-configured policy: a save that
+omits the block preserves it, a save that submits one replaces it under
+the same validation as the file, and the save response reports what
+happened to the policy (`preserved`, `set`, `changed`, `cleared` or
+`unchanged`), so a change is never silent.
 
 * **defaults** apply when the client specified nothing: `temperature`,
   `max_output_tokens`, `thinking_level`, `system`.
