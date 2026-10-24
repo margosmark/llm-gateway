@@ -1694,3 +1694,40 @@ candidate, with its regression:
    redacted; an Anthropic-specific regression drives a fake transport whose
    error body echoes the key in both `error.code` and the message.
    Evidence: `tests/test_anthropic_adapter.py::test_upstream_error_codes_and_credentials_never_echo`.
+
+### R41 — A malformed top-level Responses `input_image` item bypassed capability detection and reached a text-only adapter — **closed**
+
+**Severity: P2 / medium (security).** The security gate on the image
+remediation candidate `0696c8c2` found that a Responses `input` item of the
+exact shape `{"type": "input_image", "image_url": "data:image/png;base64,AA"}`
+placed at the **top level** of the `input` array - i.e. as an item, not as a
+content part inside a message - bypassed every check. The item carries no
+`content` key, so `payload_has_image_input` saw no image and reported the
+request as text-only; same-dialect pass-through then forwarded the item
+verbatim to a text-only adapter, which silently ignored it. The caller
+received `200` and lost the image without an error. The Responses contract
+carries an image as an `input_image` **content part inside a message item**;
+a root-level image-like item is malformed for every route.
+
+**Fix.** The root of a Responses `input` array is now validated by one shared
+check (`_validated_responses_root_items` in `src/gateway/bridge/requests.py`)
+that every reader of the root consults: capability detection
+(`payload_has_image_input`), dialect conversion (`from_responses`) and
+same-dialect pass-through (`convert_request`). A root-level image-like item
+(by `type`, or by carrying an `image_url`/`input_image` key), a non-object
+item, and an item type the conversion cannot express are all refused with a
+`ConversionError` -> HTTP 422 `conversion_refused`, **before route selection
+and with zero adapter calls**. Non-image typed root items (function calls,
+outputs, and unknown types such as `reasoning` history) still pass through
+unchanged in their own dialect - the provider owns its dialect - and are
+refused, never silently dropped, when converting to the other one.
+
+**Regression evidence:**
+`tests/test_image_input.py::TopLevelResponsesImageItemTests` (the gate's
+exact probe over real HTTP: 422 + zero adapter calls, on both a text-only
+and an image-capable route; malformed shape variants; the valid nested image
+still reaches an image-capable route and fails closed 503 with only
+text-only routes; a plain text request is unaffected) and
+`tests/test_image_input.py::ImageDetectionTests` (root-item refusals at the
+detection layer, non-object items, and the pass-through/conversion split for
+non-image typed root items).

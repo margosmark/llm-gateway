@@ -93,6 +93,49 @@ def _chat_reasoning(payload: dict[str, Any]) -> str | None:
     return flat or effort
 
 
+def _is_root_level_image_item(entry: dict[str, Any]) -> bool:
+    """Whether a top-level Responses input item is an image-like item.
+
+    The root of a Responses ``input`` array carries *items* (messages,
+    function calls, their outputs), never content parts: an image is an
+    ``input_image`` part **inside** a message item's ``content``. A root
+    item that claims to be an image - by type or by carrying an
+    ``image_url``/``input_image`` key - is therefore malformed for every
+    route, whatever its URL looks like.
+    """
+    return (
+        entry.get("type") in ("input_image", "image_url")
+        or "image_url" in entry
+        or "input_image" in entry
+    )
+
+
+def _validated_responses_root_items(payload: dict[str, Any]) -> list[Any]:
+    """The top-level Responses ``input`` items, or a safe refusal.
+
+    Every path that reads the root of a Responses payload - capability
+    detection, dialect conversion and same-dialect pass-through - shares
+    this validation, so a malformed or image-like root item cannot slip
+    through the one path that skips content parsing. It raises
+    :class:`ConversionError` (a 4xx at the API surface, before any route is
+    chosen and before any adapter is called) rather than silently dropping
+    the item or forwarding it to an adapter that would ignore it.
+    """
+    entries = _as_list(payload.get("input"))
+    for entry in entries:
+        if isinstance(entry, str):
+            continue
+        if not isinstance(entry, dict):
+            raise ConversionError("Responses input items must be strings or JSON objects")
+        if _is_root_level_image_item(entry):
+            raise ConversionError(
+                "a top-level Responses input item may not carry an image; "
+                "an image belongs in an input_image content part inside a message",
+                capability="image_input",
+            )
+    return entries
+
+
 def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> bool:
     """Whether a request carries an image that the serving model must see.
 
@@ -100,6 +143,11 @@ def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> boo
     rendering cannot disagree about which fields represent an image. Unknown
     part shapes are not treated as images here; a converted path will still
     refuse any shape it cannot express, rather than silently dropping it.
+
+    A top-level image-like Responses item is not an image to *serve* but a
+    malformed request: the shared root validation refuses it here, before
+    route selection, so it can never reach a text-only adapter that would
+    silently ignore it.
     """
     if source_dialect == DIALECT_OPENAI_CHAT:
         messages = payload.get("messages")
@@ -109,11 +157,10 @@ def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> boo
             for message in messages
         )
     if source_dialect == DIALECT_OPENAI_RESPONSES:
-        raw_input = payload.get("input")
-        for entry in _as_list(raw_input):
+        for entry in _validated_responses_root_items(payload):
             if isinstance(entry, str):
                 continue
-            if isinstance(entry, dict) and any(
+            if any(
                 part.kind == IMAGE for part in _responses_content_to_parts(entry.get("content"))
             ):
                 return True
@@ -390,11 +437,9 @@ def from_responses(payload: dict[str, Any]) -> NormalisedRequest:
     if isinstance(raw_input, str):
         items.append(InputItem(kind=ITEM_MESSAGE, role=ROLE_USER, content=[ContentPart(TEXT, raw_input)]))
     else:
-        for entry in _as_list(raw_input):
+        for entry in _validated_responses_root_items(payload):
             if isinstance(entry, str):
                 items.append(InputItem(kind=ITEM_MESSAGE, role=ROLE_USER, content=[ContentPart(TEXT, entry)]))
-                continue
-            if not isinstance(entry, dict):
                 continue
             entry_type = entry.get("type")
             if entry_type == "function_call":
@@ -425,6 +470,11 @@ def from_responses(payload: dict[str, Any]) -> NormalisedRequest:
                         role=role,
                         content=_responses_content_to_parts(entry.get("content")),
                     )
+                )
+            else:
+                raise ConversionError(
+                    "unsupported Responses input item type: "
+                    f"{entry_type!r} cannot be expressed in the Chat Completions dialect"
                 )
 
     functions, hosted = _responses_tools_to_normalised(payload.get("tools"))
@@ -602,6 +652,12 @@ def convert_request(payload: dict[str, Any], source: str, target: str) -> dict[s
         # Same dialect: the upstream owns its own dialect, so a control the
         # gateway does not understand is forwarded rather than dropped or
         # refused - the provider is the party that defines what it accepts.
+        if source == DIALECT_OPENAI_RESPONSES:
+            # Root input *items* are the gateway's to validate even here: an
+            # image-like top-level item is malformed for every route, and
+            # forwarding it would let the serving adapter silently ignore an
+            # image the caller believes was delivered.
+            _validated_responses_root_items(payload)
         if source == DIALECT_OPENAI_CHAT:
             nested = payload.get("reasoning")
             if (
