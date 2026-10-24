@@ -71,7 +71,7 @@ DEFAULT_IDLE_CONNECTIONS = 4
 
 #: Every live client, so a single shutdown hook can release their sockets.
 #: A weak set: a client must never be kept alive by being closable.
-_LIVE_CLIENTS: "weakref.WeakSet[UpstreamClient]" = weakref.WeakSet()
+_LIVE_CLIENTS: weakref.WeakSet[UpstreamClient] = weakref.WeakSet()
 
 
 def close_all_clients() -> None:
@@ -343,7 +343,7 @@ class UpstreamClient:
                 # already carries.
                 try:
                     connection.connect()
-                except (socket.timeout, TimeoutError):
+                except TimeoutError:
                     raise AdapterError(
                         ERROR_TRANSIENT,
                         "the provider did not accept a connection within the configured timeout",
@@ -363,7 +363,7 @@ class UpstreamClient:
                     # and not a slow generation.
                     self._arm(connection, self.connect_timeout)
                 response = connection.getresponse()
-            except (socket.timeout, TimeoutError):
+            except TimeoutError:
                 raise AdapterError(
                     ERROR_TRANSIENT,
                     (
@@ -397,7 +397,7 @@ class UpstreamClient:
     ) -> UpstreamResponse:
         try:
             key, connection, raw = self._open(method, url, headers, body, provider_id, stream)
-        except (socket.timeout, TimeoutError):
+        except TimeoutError:
             # Defensive: _open maps its own phase timeouts to the wording
             # of the phase that stalled. This only sees a timeout that
             # escaped a phase neither mapping covered.
@@ -439,7 +439,8 @@ class UpstreamClient:
             payload = b""
             try:
                 payload = raw.read()
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # noqa: BLE001 - defensive: a truncated
+                # redirect body must not fail the request that never used it.
                 payload = b""
             self._pool.release(key, connection, False)
             return UpstreamResponse(raw.status, headers_map, payload, None, content_type)
@@ -457,7 +458,7 @@ class UpstreamClient:
         # read ``response.body`` on this path.
         try:
             payload = raw.read()
-        except (socket.timeout, TimeoutError):
+        except TimeoutError:
             self._pool.release(key, connection, False)
             raise AdapterError(
                 ERROR_TRANSIENT,
@@ -516,7 +517,7 @@ class UpstreamClient:
         """
         try:
             yield from _sse_frames(raw)
-        except (socket.timeout, TimeoutError):
+        except TimeoutError:
             raise AdapterError(
                 ERROR_TRANSIENT,
                 "the provider stream stalled before the response finished",

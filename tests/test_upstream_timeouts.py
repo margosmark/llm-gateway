@@ -32,6 +32,7 @@ import socket
 import threading
 import time
 import unittest
+from typing import ClassVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from gateway.adapters.base import AdapterError
@@ -95,11 +96,11 @@ class _QuietHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     stream_frames = 0
     frame_gap = 0.0
-    chunks: list[tuple[float, bytes]] = []
+    chunks: ClassVar[list[tuple[float, bytes]]] = []
     silent = False
     silence = threading.Event()
 
-    def do_GET(self):  # noqa: N802 - the dispatch name http.server expects
+    def do_GET(self):
         if type(self).silent:
             # Read the request, then never answer it - a provider that
             # accepted the work and went quiet.
@@ -113,7 +114,7 @@ class _QuietHandler(BaseHTTPRequestHandler):
             for index in range(type(self).stream_frames):
                 if index:
                     time.sleep(type(self).frame_gap)
-                self.wfile.write(f"data: frame-{index}\n\n".encode("utf-8"))
+                self.wfile.write(f"data: frame-{index}\n\n".encode())
                 self.wfile.flush()
             # No content length: the client reads until the peer hangs up,
             # which is what ends the stream.
@@ -235,7 +236,7 @@ class ConnectAndReadBudgetTests(unittest.TestCase):
         finally:
             client.close()
         for index in range(6):
-            self.assertIn(f"data: frame-{index}".encode("utf-8"), frames)
+            self.assertIn(f"data: frame-{index}".encode(), frames)
         self.assertGreaterEqual(
             elapsed,
             1.5,

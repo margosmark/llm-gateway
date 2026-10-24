@@ -25,10 +25,15 @@ from __future__ import annotations
 import socket
 import threading
 import unittest
+from typing import ClassVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from gateway.adapters.base import AdapterError
-from gateway.adapters.http_client import UpstreamClient, _ConnectionPool, close_all_clients
+from gateway.adapters.http_client import (
+    UpstreamClient,
+    _ConnectionPool,
+    close_all_clients,
+)
 from gateway.adapters.registry import AdapterRegistry
 
 
@@ -36,7 +41,7 @@ class _Handler(BaseHTTPRequestHandler):
     """Answers plainly, and can pretend to be several servers at once."""
 
     protocol_version = "HTTP/1.1"
-    connections: set[int] = set()
+    connections: ClassVar[set[int]] = set()
     requests = 0
     redirect = False
     drop_after = False
@@ -44,7 +49,7 @@ class _Handler(BaseHTTPRequestHandler):
     error_body = b""
     sse_body = b""
 
-    def do_GET(self):  # noqa: N802 - the dispatch name http.server expects
+    def do_GET(self):
         type(self).requests += 1
         type(self).connections.add(self.client_address[1])
         if type(self).redirect:

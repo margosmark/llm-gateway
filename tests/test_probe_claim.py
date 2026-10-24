@@ -38,8 +38,8 @@ from gateway.config import (
     Alias,
     JevInference,
     ModelEntry,
-    PhaseRouting,
     PhaseRoute,
+    PhaseRouting,
     ProviderState,
     RouteRef,
 )
