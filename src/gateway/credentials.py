@@ -44,6 +44,7 @@ KNOWN_PROVIDERS = (
     "opencode_console",
     "opencode_go",
     "ollama",
+    "openai_api",
 )
 
 
