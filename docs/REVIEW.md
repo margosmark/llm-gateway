@@ -1468,3 +1468,40 @@ IPv6 listener and successful same-origin mutation; `test_ipv6_authorities_are_br
 checks allowed Host and Origin forms. `test_ipv6_ula_listener_binds_when_host_owns_address`
 is skipped when the test machine does not own the ULA. Focused suites pass;
 full suite: 340 passed, 3 skipped.
+
+### R40 — The integrated candidate carried stale claims and three leak paths — **closed**
+
+The first integrated release candidate (`db7d349`, tree `3662365f`) drew two
+CHANGES_REQUIRED verdicts. Each finding is closed here on the re-dispatch
+candidate, with its regression:
+
+1. **Stale Anthropic limitation** (QA `t_81ce92d9`): the Known Limitations
+   claimed Anthropic support remained planned while the native Anthropic
+   provider shipped in the same tree. The bullet now separates the
+   implemented outbound Anthropic Messages provider from the unimplemented
+   inbound `/v1/messages` surface (T5).
+2. **Overstated exposure claim** (security `t_f4994f65` #1): the README
+   asserted the gateway is "never publicly exposed". It binds private/loopback
+   addresses and creates no firewall/NAT rule; exposure beyond the LAN is the
+   operator's responsibility. Reworded in `README.md`.
+3. **Imported capability coercion** (security #2): a config import accepted
+   the string `"false"` for `supports_image_input` and `ModelEntry.from_dict`
+   coerced it to True. `gateway.backup.import_config` now rejects any
+   non-boolean capability/state flag, and `ModelEntry.from_dict` restores the
+   declared default instead of coercing. Evidence:
+   `tests/test_backup.py::test_import_rejects_non_boolean_capability_flags`,
+   `tests/test_config.py::ModelEntryFlagTests`.
+4. **Upstream identifiers in public refusals** (security #3): the
+   `no_eligible_route` 503 serialized every considered route's provider id,
+   model id, label and dialect to the API caller. The public refusal is now
+   generic; per-route exclusion reasons stay on the router/owner side
+   (catalog capabilities and route validation). Evidence:
+   `tests/test_image_input.py::test_image_request_with_no_capable_route_fails_closed_at_the_gateway`,
+   `tests/test_degraded_route.py`.
+5. **Anthropic error-code/credential echo** (security #4): upstream error
+   codes and key-shaped values must never reach the console, state or
+   `last_error`. The shared `error_from_response` keeps only allowlisted
+   classification codes and fixed class messages with credential shapes
+   redacted; an Anthropic-specific regression drives a fake transport whose
+   error body echoes the key in both `error.code` and the message.
+   Evidence: `tests/test_anthropic_adapter.py::test_upstream_error_codes_and_credentials_never_echo`.
