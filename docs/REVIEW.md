@@ -733,9 +733,11 @@ class body declares the same annotated field name twice.
 the current source and names the exact `(file, line, class, field)` when a
 duplicate is reintroduced.
 
-### R25 — A thinking control was silently dropped on a converted request — **superseded**
-**Severity: high contract-correctness risk.** *(superseded by **R35**, which
-closes it with the normalisation and its regression tests)*
+### R25 — A thinking control was silently dropped on a converted request — **closed**
+**Severity: high contract-correctness risk.** *(closed; superseded by **R35**,
+which closed it for the Chat Completions source path, and completed by
+**T4**, which closed the same defect on the Responses source path and made
+one path unable to disagree with another)*
 
 `convert_request` forwards a same-dialect payload unchanged, but a
 **converted** request is rebuilt from the normalised form, and the
@@ -768,7 +770,44 @@ inbound spelling and rendered per dialect; a level the target dialect
 cannot express is refused, and a level the model does not publish is
 dropped *with the substitution recorded*, under the R19 preference rule.
 
-**Planned as** `docs/TODO.md` item **T4**.
+**Resolution.** One vocabulary, parsed from every inbound spelling and
+rendered per dialect, in `src/gateway/thinking.py` and
+`src/gateway/bridge/requests.py`:
+
+* `reasoning_effort`, `reasoning.effort`, `reasoning.enabled` and the
+  disabled level `none` normalise to one canonical level on **both**
+  source dialects. The Responses source path used to read only the
+  nested spelling, so a flat `reasoning_effort`, a `thinking` budget, a
+  `thinkingConfig`, a conflicting pair or a wrong-typed value was
+  resolved or dropped without a word;
+* the level renders as `reasoning: {effort}` for Responses and
+  `reasoning_effort` for Chat Completions, and "disabled" is rendered
+  per dialect rather than dropped: Responses spells it `effort: "none"`
+  (both published Responses models list it), Chat Completions omits the
+  control (no served chat-dialect model publishes it, and OpenAI
+  documents HTTP 400 from a model that does not support `none`);
+* the two paths can no longer disagree, because the rendering is a
+  function of the **target** dialect on the same-dialect path as well as
+  the converted one. The concrete case this finding named - the nested
+  spelling disagreeing with `_without_disabled_reasoning` - is pinned by
+  a test on all four path/dialect combinations;
+* a control that is not portable - an Anthropic `thinking` budget, a
+  Google `thinkingConfig`, a `reasoning.summary` on a Chat Completions
+  target, an unknown field inside `reasoning`, a wrong-typed value, or
+  two spellings that contradict each other - is **refused** with an
+  actionable message;
+* a level the selected model does not publish is still dropped for that
+  route with the substitution recorded, under the R19 preference rule,
+  and a level outside the gateway's own vocabulary is forwarded rather
+  than refused, so the router - not the vocabulary - decides.
+
+**Regression evidence:** `tests/test_thinking_levels.py` (19 tests: the
+vocabulary and its cited sources, every inbound spelling on both source
+dialects, per-dialect rendering, the refusal table, the four-path
+disabled-state agreement, and the drop-with-record asserted against the
+ledger's `degradations` and `serving_provider`/`serving_model`), plus
+`tests/test_thinking_controls.py` and `tests/test_bridge.py`, which
+continue to pass unchanged.
 
 ### R26 — The published per-token prices are never read, and no request records its usage — **closed**
 **Severity: medium observability gap.** *(closed; request-scoped catalogue snapshot verified)*
