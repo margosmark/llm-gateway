@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import unittest
 
-from gateway.adapters.base import AdapterError, ProviderRequest, ProviderResponse
+from gateway.adapters.base import AdapterError
 from gateway.config import Alias, ModelEntry, ProviderState, RouteRef
 from tests.test_end_to_end import FAKE_PROVIDER, FakeAdapter, GatewayHarness
 
