@@ -46,6 +46,7 @@ Two rules this store never breaks:
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -249,6 +250,25 @@ class CircuitStore:
                 for key, entry in self._entries.items()
                 if entry.armed and entry.until > now
             }
+
+    def retry_after_for(self, routes: list[tuple[str, str]], cap: int = 3600) -> int | None:
+        """Return the earliest active circuit expiry covering these routes.
+
+        Only armed, unexpired circuits are considered. The public value is
+        bounded and contains no provider/model identifiers.
+        """
+        with self._lock:
+            now = self._now()
+            self._prune(now)
+            expiries: list[float] = []
+            for provider, model in routes:
+                for key in (self._provider_key(provider), self._route_key(provider, model)):
+                    entry = self._entries.get(key)
+                    if entry is not None and entry.armed and entry.until > now:
+                        expiries.append(entry.until)
+            if not expiries:
+                return None
+            return min(cap, max(1, math.ceil(min(expiries) - now)))
 
     def details(self) -> dict[str, dict[str, Any]]:
         """Every circuit, with its reason and its state."""

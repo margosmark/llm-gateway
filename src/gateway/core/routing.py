@@ -138,17 +138,20 @@ def _unsupported_payload_fields(adapter: Adapter | None) -> frozenset[str]:
 class RoutingError(Exception):
     """A routing failure that the caller turns into an HTTP response."""
 
-    def __init__(self, message: str, code: str = "routing_error", status: int = 400, detail: Any = None) -> None:
+    def __init__(self, message: str, code: str = "routing_error", status: int = 400, detail: Any = None, retry_after_seconds: int | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.status = status
         self.detail = detail
+        self.retry_after_seconds = retry_after_seconds
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"error": {"message": self.message, "type": self.code}}
         if self.detail is not None:
             payload["error"]["detail"] = self.detail
+        if self.retry_after_seconds is not None:
+            payload["error"]["retry_after_seconds"] = self.retry_after_seconds
         return payload
 
 
@@ -165,6 +168,7 @@ class Candidate:
     #: asked for has to be dropped to do it. It is never silent: the
     #: substitution is recorded and reported.
     degraded_reason: str | None = None
+    circuit_blocked: bool = False
 
     @property
     def eligible(self) -> bool:
@@ -313,6 +317,7 @@ class Router:
             allowed, circuit_reason = self._circuits.check(route.provider, route.model)
             if not allowed:
                 candidate.excluded_reason = circuit_reason
+                candidate.circuit_blocked = True
                 candidates.append(candidate)
                 continue
 
@@ -594,6 +599,9 @@ class Router:
                 f"no eligible route for alias '{alias_name}'",
                 code="no_eligible_route",
                 status=503,
+                retry_after_seconds=self._circuits.retry_after_for(
+                    [(c.route.provider, c.route.model) for c in candidates if c.circuit_blocked]
+                ),
             )
 
         # Phase routing is opt-in per alias and resolved before the route
@@ -821,6 +829,9 @@ class Router:
                 f"no eligible route for alias '{alias_name}'",
                 code="no_eligible_route",
                 status=503,
+                retry_after_seconds=self._circuits.retry_after_for(
+                    [(c.route.provider, c.route.model) for c in eligible]
+                ),
             )
         # A provider failure is an upstream failure. It is reported as 502
         # even when the provider rejected its own credential, because the
