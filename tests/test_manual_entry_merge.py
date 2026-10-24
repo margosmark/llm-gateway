@@ -51,7 +51,7 @@ class ManualEntryMergeTests(unittest.TestCase):
                 models={"gpt-6-luna": DISCOVERED},
             )
 
-    def _manual(self, body: dict) -> tuple[int, dict]:
+    def _manual(self, body: dict):
         return self.harness.request(
             "POST",
             "/owner/api/model",
@@ -85,6 +85,42 @@ class ManualEntryMergeTests(unittest.TestCase):
         self.assertTrue(entry.supports_function_tools)
         self.assertTrue(entry.supports_builtin_tools)
         self.assertFalse(entry.supports_image_input)
+
+    def test_a_manual_edit_cannot_clear_a_confirmed_image_capability(self) -> None:
+        """A confirmed image capability survives a manual entry.
+
+        The capability is proven against the provider's own contract, so an
+        owner correcting a missing dialect or rewriting the notes must not
+        silently blank it: the route would stop being selected for images
+        while looking healthy in the console. Only the flag is held here -
+        ``notes`` is a field the owner explicitly supplies, so replacing it
+        is the point of the form, not a defect.
+        """
+        with self.harness.config.mutate() as config:
+            entry = config.providers[FAKE_PROVIDER].models["gpt-6-luna"]
+            entry.supports_image_input = True
+
+        for body in (
+            {"dialect": "openai_chat"},
+            {"notes": "owner note"},
+            {"enabled": True},
+        ):
+            with self.subTest(body=body):
+                status, payload, _ = self._manual(body)
+                self.assertEqual(status, 200, payload)
+                entry = self._entry()
+                self.assertTrue(
+                    entry.supports_image_input,
+                    f"a manual edit {body} must not clear a confirmed image capability",
+                )
+
+    def test_a_manual_edit_still_records_the_owner_supplied_fields(self) -> None:
+        """The merge preserves capability without ignoring the owner."""
+        self._manual({"dialect": "openai_chat", "notes": "owner note"})
+        entry = self._entry()
+        self.assertEqual(entry.dialect, "openai_chat")
+        self.assertEqual(entry.notes, "owner note")
+        self.assertEqual(entry.source, "manual")
 
     def test_a_manual_dialect_edit_preserves_the_enabled_state(self) -> None:
         self._manual({"dialect": "openai_chat"})

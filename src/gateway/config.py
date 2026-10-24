@@ -176,20 +176,26 @@ class ModelEntry:
             value = data.get(key)
             return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
+        def as_bool(key: str, default: bool) -> bool:
+            # Never coerce: a non-boolean (the string "false", an int, null)
+            # falls back to the declared default instead of becoming True.
+            value = data.get(key, default)
+            return value if isinstance(value, bool) else default
+
         efforts = data.get("reasoning_efforts")
         return cls(
             model_id=model_id,
-            enabled=bool(data.get("enabled", False)),
+            enabled=as_bool("enabled", False),
             dialect=as_str("dialect"),
             source=str(data.get("source") or "manual"),
             observed_at=as_str("observed_at"),
-            limits_known=bool(data.get("limits_known", False)),
+            limits_known=as_bool("limits_known", False),
             notes=as_str("notes"),
             reasoning_efforts=[e for e in efforts or [] if isinstance(e, str)],
-            supports_streaming=bool(data.get("supports_streaming", True)),
-            supports_function_tools=bool(data.get("supports_function_tools", True)),
-            supports_builtin_tools=bool(data.get("supports_builtin_tools", False)),
-            supports_image_input=bool(data.get("supports_image_input", False)),
+            supports_streaming=as_bool("supports_streaming", True),
+            supports_function_tools=as_bool("supports_function_tools", True),
+            supports_builtin_tools=as_bool("supports_builtin_tools", False),
+            supports_image_input=as_bool("supports_image_input", False),
             context_window=as_int("context_window"),
             context_limit=as_int("context_limit"),
             max_output_tokens=as_int("max_output_tokens"),
@@ -645,6 +651,12 @@ class ConfigStore:
             self._config = config
             self._persist()
 
+    def replace_validated(self, config: GatewayConfig) -> None:
+        """Persist a prevalidated replacement before publishing it in memory."""
+        with self._lock:
+            atomic_write_json(self._path, config.to_dict(), mode=0o600)
+            self._config = GatewayConfig.from_dict(config.to_dict())
+
     def _persist(self) -> None:
         atomic_write_json(self._path, self._config.to_dict(), mode=0o600)
 
@@ -673,7 +685,7 @@ class _ConfigTransaction:
 
 
 def default_provider_ids() -> tuple[str, ...]:
-    return ("chatgpt_codex", "opencode_go", "opencode_console")
+    return ("anthropic", "chatgpt_codex", "opencode_console", "opencode_go")
 
 
 def provider_kind(provider_id: str) -> str:

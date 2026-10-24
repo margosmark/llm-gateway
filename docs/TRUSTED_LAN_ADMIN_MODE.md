@@ -30,8 +30,10 @@ firewall rules, router rules, port forwarding, proxy trust, or public exposure.
 
 ## Invariants that remain mandatory
 
-- Bind only one configured private IPv4 address. Reject wildcard, loopback as
-  an explicit-LAN value, public, multicast, link-local, and unspecified binds.
+- Bind one explicitly configured address owned by this host: RFC1918 IPv4,
+  IPv6 unique-local (`fc00::/7`), or loopback. The listener supports IPv6;
+  format IPv6 literals in bracketed URL/Host/Origin form. Reject wildcard,
+  public (including RFC 5737 TEST-NET), multicast, link-local, and unspecified binds.
 - Continue to reject hostile or non-canonical `Host` values, forwarded/proxy
   headers, and cross-site state-changing browser requests.
 - Keep provider credentials and caller tokens write-only: never return them in

@@ -78,6 +78,56 @@ class ImageDetectionTests(unittest.TestCase):
         rendered = converted["input"][0]["content"]
         self.assertIn({"type": "input_image", "image_url": "data:image/png;base64,AA"}, rendered)
 
+    def test_responses_image_renders_back_to_the_chat_shape(self) -> None:
+        """The other direction: Responses input_image -> Chat image_url.
+
+        Both the bare-string and the ``{"url": ...}`` forms the Responses API
+        accepts must land back on the Chat ``image_url`` part, so a model that
+        speaks Responses can still be reached from a Chat client and a
+        forwarded conversation keeps its image.
+        """
+        for form in ("data:image/png;base64,AA", {"url": "data:image/png;base64,AA"}):
+            with self.subTest(form=type(form).__name__):
+                responses = {"model": "alias", "input": [{"role": "user", "content": [
+                    {"type": "input_text", "text": "look"},
+                    {"type": "input_image", "image_url": form},
+                ]}]}
+                self.assertTrue(payload_has_image_input(responses, DIALECT_OPENAI_RESPONSES))
+                converted = convert_request(
+                    responses, DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_CHAT
+                )
+                self.assertTrue(payload_has_image_input(converted, DIALECT_OPENAI_CHAT))
+                content = converted["messages"][0]["content"]
+                images = [p for p in content if p.get("type") == "image_url"]
+                self.assertEqual(len(images), 1, "exactly one image, never dropped")
+                self.assertEqual(
+                    images[0]["image_url"], {"url": "data:image/png;base64,AA"}
+                )
+                texts = [p for p in content if p.get("type") == "text"]
+                self.assertEqual(len(texts), 1, "the text survives alongside the image")
+
+    def test_an_image_survives_a_full_round_trip(self) -> None:
+        """Chat -> Responses -> Chat keeps the image and the text."""
+        original = {"model": "alias", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+        ]}]}
+        as_responses = convert_request(
+            original, DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
+        )
+        back = convert_request(
+            as_responses, DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_CHAT
+        )
+        content = back["messages"][0]["content"]
+        self.assertEqual(
+            [p for p in content if p.get("type") == "image_url"][0]["image_url"],
+            {"url": "data:image/png;base64,AA"},
+            "the image URL is byte-identical after the round trip",
+        )
+        self.assertEqual(
+            [p for p in content if p.get("type") == "text"][0]["text"], "look"
+        )
+
 
 class ImageCapableAdapter:
     """A provider that answers any request; it records what it was sent."""
@@ -174,9 +224,12 @@ class RouterImageEnforcementTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(payload["error"]["type"], "no_eligible_route")
         self.assertEqual(primary.calls, [])
-        reasons = {entry["excluded_reason"] for entry in payload["error"]["detail"]
-                   if isinstance(payload["error"].get("detail"), list)}
-        self.assertIn("this model does not support image input", reasons)
+        # The public refusal is generic: no upstream provider or model
+        # identifiers may leak into the response payload.
+        serialized = json.dumps(payload)
+        for identifier in (FAKE_PROVIDER, "gpt-6-luna", "opencode_go", "mimo-v2.6-flash"):
+            self.assertNotIn(identifier, serialized)
+        self.assertNotIn("detail", payload["error"])
 
     def test_a_text_only_request_is_unaffected_by_the_image_rule(self) -> None:
         harness, primary = self._harness(primary_images=False, fallback_images=False)
@@ -243,6 +296,34 @@ class AliasCatalogImagePublicationTests(unittest.TestCase):
                 RouteRef(FAKE_PROVIDER, "gpt-6-luna"), [])
         _, body, _ = harness.request("GET", "/v1/alias-catalog")
         self.assertFalse(body["data"][0]["supports_image_input"])
+
+    def test_a_codex_primary_with_transcribed_evidence_makes_the_alias_image_capable(self) -> None:
+        """The real `pm` shape: a ChatGPT/Codex primary, a text-only fallback.
+
+        ``gpt-5.6-terra`` carries transcribed image evidence, so the alias is
+        image-capable even though its ``mimo-v2.6-flash`` fallback is not -
+        the router excludes that fallback from an image request instead.
+        """
+        harness = GatewayHarness()
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            config.providers[FAKE_PROVIDER] = ProviderState(
+                provider_id=FAKE_PROVIDER, kind=FAKE_PROVIDER, state="connected",
+                models={"gpt-5.6-terra": ModelEntry(
+                    model_id="gpt-5.6-terra", enabled=True, dialect=DIALECT_OPENAI_RESPONSES,
+                    source="discovered", supports_image_input=True)},
+            )
+            config.providers["opencode_go"] = ProviderState(
+                provider_id="opencode_go", kind="opencode_go", state="connected",
+                models={"mimo-v2.6-flash": ModelEntry(
+                    model_id="mimo-v2.6-flash", enabled=True, dialect=DIALECT_OPENAI_CHAT,
+                    source="discovered", supports_image_input=False)},
+            )
+            config.aliases["pm"] = _alias_with_routes(
+                RouteRef(FAKE_PROVIDER, "gpt-5.6-terra"),
+                [RouteRef("opencode_go", "mimo-v2.6-flash")], name="pm")
+        _, body, _ = harness.request("GET", "/v1/alias-catalog")
+        self.assertTrue(body["data"][0]["supports_image_input"])
 
 
 class PhaseRouteImageEnforcementTests(unittest.TestCase):

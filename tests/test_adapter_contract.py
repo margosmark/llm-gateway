@@ -102,6 +102,31 @@ class AdapterContractTests(unittest.TestCase):
         # A model the account cannot use through the API is not offered.
         self.assertNotIn("gpt-6-sol", by_id)
 
+    def test_codex_image_support_is_transcribed_per_exact_slug(self) -> None:
+        """The Codex catalogue publishes no image field, so it is transcribed.
+
+        ``gpt-5.6-terra`` is documented by OpenAI as accepting image input;
+        ``gpt-6-luna`` has no such evidence, so it stays false. Image support
+        is never inferred from the Responses dialect or a model family.
+        """
+        payload = json.dumps({
+            "models": [
+                {"slug": "gpt-5.6-terra", "supported_in_api": True},
+                {"slug": "gpt-6-luna", "supported_in_api": True},
+            ]
+        }).encode()
+        store = self._store()
+        store.provider_handle("chatgpt_codex").write({"access_token": "synthetic"})
+        adapter = ChatGPTCodexAdapter(
+            store.provider_handle("chatgpt_codex"), client=ScriptedUpstream(payload)
+        )
+        by_id = {m.model_id: m for m in adapter.list_models()}
+        self.assertTrue(by_id["gpt-5.6-terra"].supports_image_input)
+        self.assertIn("developers.openai.com", by_id["gpt-5.6-terra"].notes or "")
+        # Unevidenced stays false, and says so rather than claiming support.
+        self.assertFalse(by_id["gpt-6-luna"].supports_image_input)
+        self.assertNotIn("developers.openai.com", by_id["gpt-6-luna"].notes or "")
+
     def test_an_openai_shaped_catalogue_is_still_parsed(self) -> None:
         payload = json.dumps({"data": [{"id": "gpt-6-luna"}]}).encode()
         store = self._store()
@@ -169,6 +194,21 @@ class AdapterContractTests(unittest.TestCase):
         models = {m.model_id: m for m in adapter.list_models()}
         self.assertEqual(models["gpt-6-luna"].dialect, "openai_responses")
         self.assertEqual(models["mimo-v2.6-flash"].dialect, "openai_chat")
+
+    def test_the_generic_refresh_handler_works_for_anthropic(self) -> None:
+        from gateway.adapters.anthropic import AnthropicAdapter
+
+        store = self._store()
+        store.provider_handle("anthropic").write({"api_key": "synthetic"})
+        upstream = ScriptedUpstream(json.dumps({"data": [{"id": "claude-synthetic"}]}).encode())
+        adapter = AnthropicAdapter(store.provider_handle("anthropic"), client=upstream)
+        app = self._app([adapter])
+        status, result = self._refresh(app, "anthropic")
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["model_count"], 1)
+        state = app.config.snapshot().providers["anthropic"]
+        self.assertEqual(state.models["claude-synthetic"].dialect, "anthropic_messages")
+        self.assertEqual(len(upstream.requests), 1)
 
     def _store(self) -> CredentialStore:
         return CredentialStore(self.root)

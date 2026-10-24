@@ -43,9 +43,14 @@ and use the gateway, including replacing provider credentials. There is no
 owner password, login/session bootstrap, separate setup listener, or
 per-device administrative boundary. Use this only on a LAN you trust.
 
-The gateway binds an explicit private address. A wildcard bind is refused at
-startup. It never creates a firewall or router rule, and it is never publicly
-exposed. All owner configuration and client APIs share the one listener.
+The gateway binds an explicit RFC1918 IPv4, IPv6 unique-local (`fc00::/7`),
+or loopback address owned by the host. IPv6 literals are supported by the
+listener and shown in bracketed URL/Host/Origin form. Public addresses
+(including RFC 5737 TEST-NET), multicast, link-local and wildcard binds are
+refused at startup. The gateway creates no firewall, router or NAT rule and
+cannot enforce one: the operator must ensure the listener is not
+port-forwarded or otherwise exposed beyond the trusted LAN. All owner
+configuration and client APIs share the one listener.
 Canonical same-origin browser mutations work without cookies, passwords,
 sessions, or CSRF bootstrap values; cross-origin browser mutations, hostile
 Host values, and forwarded headers remain rejected. Credentials are entered
@@ -267,6 +272,15 @@ with no such evidence is never assumed to accept images — so an alias whose
 routes are *all* unevidenced stays text-only in OpenCode until the evidence
 exists. This is the same honesty rule the gateway applies to context
 windows.
+
+Each provider keeps its **own** evidence map, because the two reach the
+capability from different places: OpenCode Go's lives in
+`scripts/build_go_catalog_snapshot.py` and is baked into the dated
+`data/go_catalog.json`, while ChatGPT/Codex's lives in
+`src/gateway/adapters/chatgpt_codex.py` because its catalogue endpoint
+publishes no image field to transcribe. Adding a model to one has no effect
+on the other. Currently evidenced: `minimax-m3.1-flash` (MiniMax) and
+`gpt-5.6-terra` (OpenAI).
 
 `integrations/opencode/` is an OpenCode V2 provider plugin that reads that
 catalogue, registers one provider (`personal-gateway`) and refreshes every
@@ -561,10 +575,14 @@ with the traps that cost the most time:
 These are real, and the console reports them honestly rather than hiding
 them.
 
-* **Models on a non-OpenAI dialect cannot be served.** OpenCode Go serves
-  some models over Anthropic Messages or Google v1beta. The gateway does not
-  translate those dialects, so such a route is refused with a clear reason
-  and its dialect is shown as Unknown. It is not guessed.
+* **Not every catalogued model can be served.** OpenCode Go serves models
+  over Anthropic Messages and Google v1beta. Anthropic Messages is
+  translated by the native Anthropic provider (T14): once an
+  Anthropic-dialect upstream route is configured, it is served through
+  the OpenAI-compatible surface and its discovery follows the shared
+  adapter contract. Google v1beta is not translated — the owner declined
+  that work (T6, `docs/TODO.md`) — and a route the gateway cannot
+  translate is refused with a clear reason rather than guessed.
 * **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
   a web dashboard, but no machine-readable allowance API for a personal
   plan. The gateway calls no undocumented endpoint, so actual remaining
@@ -598,6 +616,20 @@ them.
   and any credit, discount or plan the owner holds, stay **Unknown**: the
   gateway has no tokenizer and no billing relationship with the provider, and
   a model with no published price reports **Unknown** rather than zero.
+* **No inbound `/v1/messages` endpoint.** Anthropic-shaped clients cannot
+  call the gateway natively; the inbound surface is planned as T5 in
+  `docs/TODO.md`. The native Anthropic provider is outbound only: it
+  serves Anthropic-dialect upstreams through the OpenAI-compatible API.
+
+R1, R8 and R9 are closed in `docs/REVIEW.md`: device-code polling
+completes, ChatGPT model refresh follows the shared adapter contract,
+and buffered cross-dialect responses are converted. These are covered
+by `tests/test_device_flow.py`, `tests/test_adapter_contract.py`, and
+`tests/test_buffered_bridge.py` respectively.
+
+The LAN-only HTTP trust model and the absence of a machine-readable
+provider allowance API remain genuine limitations; none imply
+provider-account or live-deployment verification.
 
 ---
 
