@@ -87,7 +87,7 @@ def import_config(payload: Any, current: GatewayConfig, registry: Any) -> Gatewa
         for model_record in model_records.values():
             if not isinstance(model_record.get("enabled", False), bool):
                 raise ValidationError("model enabled must be boolean", "enabled")
-            if model_record.get("dialect") not in (None, "openai_responses", "openai_chat", "anthropic_messages", "google_v1beta"):
+            if model_record.get("dialect") not in (None, "openai_responses", "openai_chat", "anthropic_messages", "google_v1beta", "systemone"):
                 raise ValidationError("unsupported model dialect", "dialect")
         provider = ProviderState.from_dict(value)
         if provider is None or provider.provider_id != key:
