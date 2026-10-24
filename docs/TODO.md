@@ -251,10 +251,11 @@ route that is actually selected.
 Google v1beta and is refused today. It is the only model in the catalogue
 whose retention class is **`training_permitted`**.
 
-**Blocked on** a decision: one model does not justify a third conversion
-path, and the model it would unlock is the one with the weakest privacy
-posture. A passthrough would be enough if it is ever wanted. Revisit after
-T5.
+**Decision (owner, 2026-10-23): declined.** `gemini-4-argon-contributor`
+stays refused. One model does not justify a third conversion path, and it
+is the only `training_permitted` model — the weakest privacy posture in
+the catalogue. Do not implement a passthrough unless the owner reverses
+this decision explicitly; no worker may self-promote it back to todo.
 
 ### T16 — A manual model entry must merge, not replace — `done`
 
@@ -1003,6 +1004,11 @@ bounded - and the README's storage promise must change to match. The
 failure-state cache in T32 has none of these problems, because it stores
 no content.
 
+**Decision (owner, 2026-10-23): declined.** No response cache may exist.
+The no-storage promise stands unchanged: the gateway does not store
+prompts, responses, or response content. The failure-state cache in T32
+remains the only caching, and it stores no content.
+
 ---
 
 ## Summary
@@ -1014,7 +1020,7 @@ no content.
 | T3 | Enforce the declared-but-unchecked capabilities | 1 | todo |
 | T4 | Normalised thinking levels | 1 | **done** |
 | T5 | Anthropic Messages dialect and `/v1/messages` | 1 | todo |
-| T6 | Google v1beta dialect | 1 | blocked |
+| T6 | Google v1beta dialect | 1 | declined (owner, 2026-10-23) |
 | T7 | A durable request ledger | 2 | **done** |
 | T8 | Console backup, export and import | 2 | todo |
 | T9 | A `/metrics` endpoint | 2 | todo |
@@ -1042,7 +1048,7 @@ no content.
 | T31 | One provider health view | 4 | todo |
 | T32 | A durable circuit breaker, remembered across restarts | 4 | **done** |
 | T33 | Honour the provider's `Retry-After` | 4 | **done** |
-| T34 | Decide whether a response cache may exist at all | 4 | blocked |
+| T34 | Decide whether a response cache may exist at all | 4 | declined (owner, 2026-10-23) |
 | T36 | The gateway appears in OpenCode's model selector | 1 | **done** |
 | T37 | Opt-in per-alias phase routing with optional Jev inference | 3 | **done** |
 
