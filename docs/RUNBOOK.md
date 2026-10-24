@@ -70,6 +70,16 @@ docker compose up -d
 docker compose logs -f gateway
 ```
 
+The HTTP server uses a bounded worker pool (default 32 concurrent requests) and
+a per-client rolling limit of 120 requests per 60 seconds. Configure them with
+`GATEWAY_MAX_WORKERS`, `GATEWAY_RATE_LIMIT_REQUESTS`, and
+`GATEWAY_RATE_LIMIT_WINDOW_SECONDS` (or the corresponding `--max-workers`,
+`--rate-limit-requests`, and `--rate-limit-window-seconds` options). Over-cap
+requests receive HTTP 429 with error type `rate_limited`. This is local capacity
+protection, not an access-control boundary or protection against an on-path LAN
+attacker; it does not authenticate or authorize clients. Client identity is the
+peer IP observed by the socket, not a request header.
+
 The gateway binds one listener at `GATEWAY_BIND:GATEWAY_PORT` (default port
 `8765`), serving `/owner/`, `/v1/`, `/health`, and `/version`. It refuses
 wildcard binds. There is no setup listener, second port, owner passphrase, or
