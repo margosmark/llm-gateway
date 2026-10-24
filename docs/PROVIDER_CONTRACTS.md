@@ -139,6 +139,19 @@ reads only `choice` and `confidence` and never forwards or stores the rest.
 
 ---
 
+## Anthropic Messages API
+
+The native API-key adapter uses Anthropic's documented `POST /v1/messages`
+endpoint and `GET /v1/models` catalogue. Requests carry `x-api-key`,
+`anthropic-version: 2023-06-01`, JSON content type, and an event-stream Accept
+header for streaming. Messages streaming uses SSE; the adapter passes complete
+frames from the shared upstream client without translating their event shape.
+The exact available model identifiers depend on the account and catalogue
+response. Context limits, quotas, retention, and model-specific features are
+left Unknown unless separately established; the adapter makes no inferred
+capability claims. Calls occur only on explicit provider test, model refresh,
+or inference actions.
+
 ## OpenCode Go
 
 **Established from** `https://opencode.ai/docs/go/` and from probing

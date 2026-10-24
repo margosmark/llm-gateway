@@ -679,7 +679,7 @@ class _ConfigTransaction:
 
 
 def default_provider_ids() -> tuple[str, ...]:
-    return ("chatgpt_codex", "opencode_go", "opencode_console")
+    return ("anthropic", "chatgpt_codex", "opencode_console", "opencode_go")
 
 
 def provider_kind(provider_id: str) -> str:

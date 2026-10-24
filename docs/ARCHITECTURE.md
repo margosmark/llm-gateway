@@ -229,6 +229,7 @@ policy. Provider-specific behaviour lives in `gateway.adapters`.
   Its upstream is **streaming only** and expects the same request fields
   OpenAI's own client sends. See `CHATGPT_CODEX_CONTRACT.md` and
   `PROVIDER_CONTRACTS.md` for the exact contract.
+* **Anthropic** uses the native Messages dialect and a provider-scoped API-key credential file. Model capabilities and limits are not inferred; catalogue refresh and connection tests are explicit actions.
 * **OpenCode Go** discovers model IDs from its explicit catalogue endpoint.
   The checked-in `data/go_catalog.json` supplies the dated, published mapping
   from model ID to wire dialect. An undocumented dialect is refused rather

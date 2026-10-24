@@ -9,6 +9,7 @@ import sys
 import threading
 from pathlib import Path
 
+from gateway.adapters.anthropic import AnthropicAdapter
 from gateway.adapters.chatgpt_codex import ChatGPTCodexAdapter
 from gateway.adapters.opencode_go import OpenCodeGoAdapter
 from gateway.adapters.opencode_console import OpenCodeConsoleAdapter
@@ -96,6 +97,7 @@ def build_application(data_dir: Path, host: str, port: int):
     config = ConfigStore(data_dir / "config.json")
     credentials = CredentialStore(data_dir)
     registry = AdapterRegistry()
+    registry.register(AnthropicAdapter(credentials.provider_handle("anthropic")))
     registry.register(ChatGPTCodexAdapter(credentials.provider_handle("chatgpt_codex")))
     registry.register(OpenCodeGoAdapter(credentials.provider_handle("opencode_go")))
     registry.register(OpenCodeConsoleAdapter(credentials.provider_handle("opencode_console")))
