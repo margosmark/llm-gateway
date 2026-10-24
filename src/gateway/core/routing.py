@@ -138,16 +138,30 @@ def _unsupported_payload_fields(adapter: Adapter | None) -> frozenset[str]:
 class RoutingError(Exception):
     """A routing failure that the caller turns into an HTTP response."""
 
-    def __init__(self, message: str, code: str = "routing_error", status: int = 400, detail: Any = None, retry_after_seconds: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str = "routing_error",
+        status: int = 400,
+        detail: Any = None,
+        retry_after_seconds: int | None = None,
+        capability: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.status = status
         self.detail = detail
         self.retry_after_seconds = retry_after_seconds
+        #: Set when the refusal is *about* a capability the alias cannot
+        #: meet, so the client is told which one without being told which
+        #: provider or model it was turned away from.
+        self.capability = capability
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"error": {"message": self.message, "type": self.code}}
+        if self.capability is not None:
+            payload["error"]["capability"] = self.capability
         if self.detail is not None:
             payload["error"]["detail"] = self.detail
         if self.retry_after_seconds is not None:
@@ -549,6 +563,21 @@ class Router:
             return phase, "jev", bucket, note
         return None, "default", bucket, note
 
+    def _publishes_image_route(self, alias: Alias) -> bool:
+        """Whether this alias has an enabled route that accepts images.
+
+        A configuration fact, deliberately independent of eligibility: a
+        benched image-capable route still counts as published, so the
+        image-specific refusal never claims the owner failed to configure
+        one. It reads the stored rows only and makes no provider call.
+        """
+        config = self._config.snapshot()
+        for route in alias.all_routes():
+            entry = self._model_entry(config, route)
+            if entry is not None and entry.enabled and entry.supports_image_input:
+                return True
+        return False
+
     def invoke(
         self,
         alias_name: str,
@@ -595,13 +624,32 @@ class Router:
             # labels or dialects of the considered routes. The caller gets a
             # generic refusal; the owner sees per-route capability facts in
             # the console catalog and during route validation.
+            #
+            # An image has one extra requirement: the refusal must *say*
+            # what was refused, because "no eligible route" does not tell a
+            # client that its attachment was the reason. That is only said
+            # when the configuration really has no image-capable route for
+            # this alias - a route that accepts images but is benched,
+            # disabled or otherwise unavailable keeps the generic wording,
+            # since "publishes no image-capable route" would then be false.
+            image_refusal = needs_image_input and not self._publishes_image_route(alias)
+            retry_after = self._circuits.retry_after_for(
+                [(c.route.provider, c.route.model) for c in candidates if c.circuit_blocked]
+            )
+            if image_refusal:
+                raise RoutingError(
+                    f"alias '{alias_name}' publishes no route that accepts image input; "
+                    "resend the request without the image, or publish an image-capable "
+                    "model for this alias",
+                    code="no_eligible_route",
+                    status=503,
+                    capability="image_input",
+                )
             raise RoutingError(
                 f"no eligible route for alias '{alias_name}'",
                 code="no_eligible_route",
                 status=503,
-                retry_after_seconds=self._circuits.retry_after_for(
-                    [(c.route.provider, c.route.model) for c in candidates if c.circuit_blocked]
-                ),
+                retry_after_seconds=retry_after,
             )
 
         # Phase routing is opt-in per alias and resolved before the route

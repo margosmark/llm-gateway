@@ -290,8 +290,18 @@ capability from different places: OpenCode Go's lives in
 `data/go_catalog.json`, while ChatGPT/Codex's lives in
 `src/gateway/adapters/chatgpt_codex.py` because its catalogue endpoint
 publishes no image field to transcribe. Adding a model to one has no effect
-on the other. Currently evidenced: `minimax-m3.1-flash` (MiniMax) and
-`gpt-5.6-terra` (OpenAI).
+on the other. Currently evidenced, per exact slug: `minimax-m3.1-flash`
+(MiniMax, read 2026-10-23), `gpt-5.6-terra` (OpenAI, read 2026-10-23), and
+`mimo-v2.6-flash`, `mimo-v2.6-pro`, `mimo-v2.5` and `mimo-v2.5-pro` from
+OpenCode's own per-model data pages (read 2026-10-24) — the last one
+transcribed **false**, because its page lists text only.
+
+A verdict that lives only in the catalogue is worth nothing until it
+reaches the stored row the router reads, so every boot re-applies each
+adapter's evidence to the configured model rows: promotion only, exact slug
+only, no provider call, no row added, nothing demoted. See the runbook's
+*Hermes profile vision routing* section for what the client side does with
+that answer.
 
 `integrations/opencode/` is an OpenCode V2 provider plugin that reads that
 catalogue, registers one provider (`personal-gateway`) and refreshes every

@@ -50,6 +50,7 @@ from gateway.adapters.base import (
 from gateway.adapters.http_client import UpstreamClient, parse_json_body
 from gateway.core.capabilities import (
     DIALECT_OPENAI_RESPONSES,
+    ImageEvidence,
     ModelInfo,
     effective_context_limit,
     resolve_context_window,
@@ -84,13 +85,20 @@ MODELS_PATH = "/models"
 #: A slug absent from this map stays false: image support is never inferred
 #: from a model family, a tier name, or the Responses dialect, because those
 #: inferences are wrong in both directions (GPT-5.6 Terra accepts images;
-#: MiMo-V2-Flash does not, while its sibling MiMo-V2.5 does).
+#: Xiaomi's ``mimo-v2.5-pro`` does not, while its sibling ``mimo-v2.5`` does).
 #:
 #: ``gpt-5.6-terra``: OpenAI lists "Input modalities: text, image" and
 #: ``image_input`` under Supported features (read 2026-10-23).
 IMAGE_INPUT_SOURCES = {
     "gpt-5.6-terra": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
 }
+
+#: The date each source above was read. A claim without a date cannot be
+#: re-checked later, so the date travels with the URL.
+IMAGE_INPUT_OBSERVED_AT = {
+    "gpt-5.6-terra": "2026-10-23",
+}
+
 
 #: Request fields the ChatGPT-authenticated Codex backend rejects with a 400.
 #:
@@ -523,6 +531,25 @@ class ChatGPTCodexAdapter:
         if isinstance(account_id, str) and account_id:
             headers["ChatGPT-Account-ID"] = account_id
         return headers
+
+    def image_input_evidence(self) -> dict[str, ImageEvidence]:
+        """The transcribed image verdicts for this provider, per exact slug.
+
+        The Codex catalogue endpoint publishes no image field, so every claim
+        here is a transcription from the model-provider's own page. It is
+        exposed through the adapter hook so a boot can reconcile the stored
+        rows with it: a claim that never reaches ``config.json`` is
+        indistinguishable from false, however good the citation is.
+        """
+        evidence: dict[str, ImageEvidence] = {}
+        for model_id, source in IMAGE_INPUT_SOURCES.items():
+            if isinstance(model_id, str) and isinstance(source, str) and source:
+                evidence[model_id] = ImageEvidence(
+                    supports_image_input=True,
+                    source=source,
+                    observed_at=IMAGE_INPUT_OBSERVED_AT.get(model_id),
+                )
+        return evidence
 
     def list_models(self) -> list[ModelInfo]:
         """Fetch the model list. Never called implicitly.
