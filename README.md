@@ -498,14 +498,19 @@ edit defaults, caps, and deny rules using bounded numeric fields and the
 canonical closed thinking-level vocabulary. Saving sends the editor's
 intended policy explicitly; **Remove request policy** clears it, submitting
 an explicit `null` so the server drops the block rather than keeping a
-resubmitted copy. The save
+resubmitted copy, and clearing every policy field does the same - the
+editor never resubmits a policy it no longer shows. The save
 response reports what happened (`preserved`, `set`, `changed`, `cleared` or
 `unchanged`), and the console includes that outcome in its confirmation.
 Integer token counts are carried digit for digit: the console parses and
 reserialises policy integers without routing them through a binary
 floating-point number, so a server-valid value beyond JavaScript's
 safe-integer range is stored exactly instead of being silently rounded by
-an unrelated edit.
+an unrelated edit. Token counts are entered as plain digits, and the
+editor refuses an exponent spelling such as `1e21` with a visible error:
+the server reads that as a floating-point number and drops the token
+rule while still reporting the save, so the console stops the save
+instead of losing the rule silently.
 
 * **defaults** apply when the client specified nothing: `temperature`,
   `max_output_tokens`, `thinking_level`, `system`.

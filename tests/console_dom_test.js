@@ -816,6 +816,14 @@ check("policy save submits explicit policy including deliberate removal and repo
   assert(source.includes('policy: policy'));
   assert(source.includes('result && result.policy && result.policy.state'));
   assert(source.includes('" Request policy " + policyState + "."'));
+  // A cleared-all rebuild is an explicit clear too: the empty editor must
+  // never fall through to the stored policy (review finding, Low).
+  assert(source.includes("so the empty rebuild must never fall through to"));
+  assert(source.includes("An explicit null is the deliberate clear the"));
+  // And a token value that is not plain digits is refused before the wire.
+  assert(source.includes("var tokenFields = [defaultTokens, capTokens];"));
+  assert(source.includes("!isExactDigits(field.value)"));
+  assert(source.includes("no exponent like 1e21"));
 });
 
 // --- the alias policy editor, executed against the stub -------------------
@@ -953,6 +961,103 @@ check("ticking remove request policy submits an explicit policy null", function 
   assert(body.includes('"policy":null'), "the wire body must carry policy: null: " + body);
 });
 
+check("the save guard refuses a token value that would serialise exponentially", function () {
+  // Regression: checkValidity() accepts "1e21" (a valid floating-point
+  // number string), the rebuild routed it through Number(), and the wire
+  // carried max_output_tokens:1e+21 - which the server's integer rule
+  // (config._policy_tokens) reads as a float and drops while reporting
+  // the save a success. The identical value typed as digits is stored
+  // exactly, so the loss was client-caused and silent.
+  assert.strictEqual(helpers.isExactDigits("32000"), true);
+  assert.strictEqual(helpers.isExactDigits("9007199254740993"), true, "an unsafe-integer digit string is digits");
+  assert.strictEqual(helpers.isExactDigits("1e21"), false);
+  assert.strictEqual(helpers.isExactDigits("1.5"), false);
+  assert.strictEqual(helpers.isExactDigits(""), false);
+
+  // The real save guard, sliced from console.js. The stub mirrors browser
+  // constraint validation, which reports the exponent form as valid -
+  // that is exactly why checkValidity() alone was not enough.
+  const exponentField = elWithStub("input", { type: "number", min: "1", step: "1", value: "1e21" });
+  assert.strictEqual(exponentField.checkValidity(), true, "the browser accepts 1e21 - that is the trap");
+  const guardSlice = source.slice(
+    source.indexOf("var policyNumericFields ="),
+    source.indexOf("var triggers =")
+  );
+  const guard = new Function(
+    "defaultTemperature",
+    "defaultTokens",
+    "capTokens",
+    "toast",
+    "isExactDigits",
+    guardSlice + '\nreturn "continued";'
+  );
+  const blank = { value: "", checkValidity: function () { return true; } };
+  const toasts = [];
+  const refused = guard(
+    { value: "", checkValidity: function () { return true; } },
+    exponentField,
+    blank,
+    function (message) { toasts.push(message); },
+    helpers.isExactDigits
+  );
+  assert.strictEqual(refused, undefined, "the exponent form must stop the save: " + toasts.join("; "));
+  assert.strictEqual(toasts.length, 1, "the refusal must be visible: " + toasts.join("; "));
+  assert(toasts[0].indexOf("plain digits") !== -1, toasts[0]);
+
+  // The same control in digits - the exact value the exponent named -
+  // passes the guard, so nothing server-valid is blocked.
+  exponentField.value = "1000000000000000000000";
+  const continued = guard(
+    { value: "", checkValidity: function () { return true; } },
+    exponentField,
+    blank,
+    function (message) { toasts.push(message); },
+    helpers.isExactDigits
+  );
+  assert.strictEqual(continued, "continued", "plain digits must not be refused: " + toasts.join("; "));
+});
+
+check("clearing every policy field submits an explicit clear, not the stored policy", function () {
+  // Regression: an empty rebuild fell through to `policy = editing.policy`
+  // and resubmitted the old block verbatim. The server reported
+  // "unchanged" and every rule the owner had just cleared stayed in
+  // force while the editor showed nothing - the visible state never
+  // reached the wire.
+  const controls = buildPolicyControls(policiedAlias);
+  const policy = rebuildPolicy({
+    removeRequestPolicy: controls.removeRequestPolicy,
+    defaultTemperature: { value: "" },
+    defaultTokens: { value: "" },
+    defaultThinking: { value: "" },
+    defaultSystem: { value: "" },
+    capTokens: { value: "" },
+    capThinking: { value: "" },
+    denyTools: { checked: false },
+    denyStore: { value: "" },
+  }, policiedAlias);
+  assert.strictEqual(
+    policy,
+    null,
+    "an empty editor must clear the policy, not resubmit it: " + JSON.stringify(policy)
+  );
+  const body = helpers.emitJson({ action: "save", name: "coding", policy: policy });
+  assert(body.includes('"policy":null'), "the wire must carry the explicit clear: " + body);
+  // A policy that still has one rule is not empty: partial clears keep
+  // rebuilding the rest rather than clearing everything.
+  const partial = rebuildPolicy({
+    removeRequestPolicy: controls.removeRequestPolicy,
+    defaultTemperature: { value: "" },
+    defaultTokens: { value: "" },
+    defaultThinking: { value: "" },
+    defaultSystem: { value: "" },
+    capTokens: { value: "16000" },
+    capThinking: { value: "" },
+    denyTools: { checked: false },
+    denyStore: { value: "" },
+  }, policiedAlias);
+  assert.strictEqual(partial.caps.max_output_tokens, 16000, JSON.stringify(partial));
+});
+
 check("the policy editor never initialises a textarea from the value attribute", function () {
   assert(source.includes('el("textarea", { maxlength: "4000", rows: "3" })'));
   assert(source.includes("defaultSystem.value = policyDefaults.system || \"\";"));
@@ -989,6 +1094,7 @@ check("an unrelated edit keeps a valid non-tenth temperature through guard and r
     "defaultTokens",
     "capTokens",
     "toast",
+    "isExactDigits",
     guardSlice + '\nreturn "continued";'
   );
   const toasts = [];
@@ -996,7 +1102,8 @@ check("an unrelated edit keeps a valid non-tenth temperature through guard and r
     controls.defaultTemperature,
     controls.defaultTokens,
     { value: "", checkValidity: function () { return true; } },
-    function (message) { toasts.push(message); }
+    function (message) { toasts.push(message); },
+    helpers.isExactDigits
   );
   assert.strictEqual(
     outcome,
@@ -1083,6 +1190,7 @@ check("an unrelated edit resubmits an unsafe token policy with every digit", fun
     "defaultTokens",
     "capTokens",
     "toast",
+    "isExactDigits",
     guardSlice + '\nreturn "continued";'
   );
   const toasts = [];
@@ -1090,7 +1198,8 @@ check("an unrelated edit resubmits an unsafe token policy with every digit", fun
     controls.defaultTemperature,
     controls.defaultTokens,
     { value: UNSAFE_TOKEN, checkValidity: function () { return true; } },
-    function (message) { toasts.push(message); }
+    function (message) { toasts.push(message); },
+    helpers.isExactDigits
   );
   assert.strictEqual(outcome, "continued", "the save guard refused a valid token value: " + toasts.join("; "));
 
