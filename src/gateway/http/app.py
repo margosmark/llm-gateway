@@ -1696,6 +1696,7 @@ class GatewayApp:
                 profile_id=profile.profile_id,
                 client_ip=request.client_address[0],
                 caller_phase=caller_phase,
+                client_request_id=request.context.get("client_request_id"),
             )
         except RoutingError as exc:
             # A failed request must be just as attributable as a served one.

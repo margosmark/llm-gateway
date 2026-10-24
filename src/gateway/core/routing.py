@@ -786,6 +786,7 @@ class Router:
         profile_id: str | None = None,
         client_ip: str | None = None,
         caller_phase: str | None = None,
+        client_request_id: str | None = None,
     ) -> RoutedResponse:
         """Resolve an alias and send the request, applying the fallback policy.
 
@@ -1259,6 +1260,7 @@ class Router:
                     latency_ms=int((time.monotonic() - started) * 1000),
                     stream=stream,
                     profile_id=profile_id,
+                    client_request_id=client_request_id,
                 )
                 return RoutedResponse(
                     response=response,
@@ -1293,6 +1295,7 @@ class Router:
             latency_ms=int((time.monotonic() - started) * 1000),
             stream=stream,
             profile_id=profile_id,
+            client_request_id=client_request_id,
         )
         if skip_refusal is not None:
             raise skip_refusal
@@ -1333,6 +1336,7 @@ class Router:
         latency_ms: int,
         stream: bool,
         profile_id: str | None,
+        client_request_id: str | None = None,
     ) -> None:
         """Record one request outcome.
 
@@ -1349,6 +1353,7 @@ class Router:
                 request_id=request_id,
                 timestamp=utc_now_iso(),
                 requested_alias=alias_name,
+                client_request_id=client_request_id,
                 requested_model=payload.get("model") if isinstance(payload, dict) else None,
                 serving_provider=attribution.serving_provider,
                 serving_model=attribution.serving_model,

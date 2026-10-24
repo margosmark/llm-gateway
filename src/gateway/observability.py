@@ -98,6 +98,7 @@ class RequestEvent:
     request_id: str
     timestamp: str
     requested_alias: str
+    client_request_id: str | None = None
     requested_model: str | None = None
     serving_provider: str | None = None
     serving_model: str | None = None
@@ -126,6 +127,7 @@ class RequestEvent:
             "request_id": self.request_id,
             "timestamp": self.timestamp,
             "requested_alias": self.requested_alias,
+            "client_request_id": self.client_request_id,
             "requested_model": self.requested_model,
             "serving_provider": self.serving_provider,
             "serving_model": self.serving_model,
