@@ -1433,6 +1433,8 @@ claim with the owner token. The latter matters because an unexpected failure
 is not evidence that a circuit should open, and it is not a probe that is
 still running: without the release, a crash inside `invoke()` wedged the
 route for the full probe timeout.
+Those two release sites covered only `invoke()` itself; R41 replaced them
+with a single guard that covers every post-claim exit.
 
 **Regression evidence.** `tests/test_probe_claim.py` (10 tests) covers each
 enumeration path above and asserts both the absence of a stuck claim
@@ -1451,12 +1453,67 @@ passed. `ruff check` on the four changed files reports only the pre-existing
 `F401` findings already present on the base revision. `git diff --check`
 clean.
 
+### R41 — An exception raised after a successful probe claim escaped every release path, so the route refused probes until the timeout — **closed**
+
+**Severity: high availability correctness.** *(closed; one guard now
+releases the claim on every post-claim exit)*
+
+`Router.invoke()` claimed the half-open probe and then ran a `try` whose
+handlers were **siblings**, not parents: `except AdapterError` and
+`except Exception` both covered only `candidate.adapter.invoke()`. An
+exception raised *inside* the `AdapterError` handler — while
+`_maybe_open_circuit()` was processing the failure, before that handler's
+own `release_probe()` call — is not caught by a sibling `except`, so it
+escaped with the claim still held. Anything raised after a successful
+invocation, in the post-claim recording (`record_success()`, the ledger
+write), was worse: that code sat outside the `try` altogether.
+
+The security probe reproduced it as an HTTP 500 with the primary's
+in-flight claim still held. The route then refused every compatible
+request for the rest of `PROBE_TIMEOUT_SECONDS` (300s) while nothing was
+probing it — the same wedge R40 set out to remove, re-entered through a
+different path.
+
+**Fix.** The whole post-claim block now runs under one `try ... finally`
+(`src/gateway/core/routing.py`), and the `finally` releases **this claim's
+owner token**: success, a failure that falls back, and every exception all
+pass through it. The two earlier release sites — inside the
+`AdapterError` handler and inside the invoke-only `except Exception` — are
+gone, leaving one release point and one invariant. Releasing an
+already-released claim is a no-op, and `release_probe()` still refuses an
+owner token that does not match, so a foreign request's live probe is
+never cleared by this path and normal success/failure behaviour is
+unchanged.
+
+**Regression evidence.** `tests/test_probe_claim.py` (12 tests) adds
+`test_an_exception_while_the_failure_is_processed_releases_the_claim` — a
+synthetic exception injected into `_maybe_open_circuit()` after a
+half-open claim — and
+`test_an_exception_after_a_successful_probe_releases_the_claim`, where
+`record_success()` raises after a successful probe. Both assert the claim
+is released immediately (`_probe_held`) and that the next compatible
+request claims the probe and closes the circuit. Verified by restoring
+only `src/gateway/core/routing.py` to the candidate revision: both tests
+fail with `AssertionError: True is not false : ... left the probe
+claimed`, and pass again with the fix in place.
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+Ran 494 tests ... OK (skipped=2)
+
+python3 -m compileall -q src tests                        OK
+node tests/console_dom_test.js                            all checks passed
+node tests/test_opencode_catalog.mjs                      OpenCode catalogue checks passed
+PYTHONPATH=src python3 -m gateway --help                  OK
+git diff --check                                          clean
+```
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
 open**; R36 is the explicit
 post-deployment route replacement above, and R38 is the inert per-phase
-reasoning effort, which needs a routing change. R37, R39 and R40 are closed. The register
+reasoning effort, which needs a routing change. R37, R39, R40 and R41 are closed. The register
 is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.

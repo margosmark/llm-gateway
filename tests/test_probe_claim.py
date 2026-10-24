@@ -18,7 +18,11 @@ The properties under test:
 * while one request holds a live probe, a second concurrent request never
   reaches that route, and the ledger says so;
 * a failed probe releases the claim and reopens the circuit, and an
-  unexpected failure releases the claim instead of wedging the route.
+  unexpected failure releases the claim instead of wedging the route;
+* the release belongs to the claim, not to whichever handler was
+  running: an exception raised **while** the AdapterError handler is
+  opening the circuit, or in the recording that follows a success,
+  releases the claim exactly the same way.
 """
 from __future__ import annotations
 
@@ -400,6 +404,74 @@ class ProbeReleaseOnFailureTests(unittest.TestCase):
 
         # The route is usable again immediately: the next compatible
         # request claims the probe and a healthy provider closes it.
+        harness.registry.register(FakeAdapter())
+        status, _, _ = harness.request("POST", "/v1/chat/completions", body=_chat())
+        self.assertEqual(status, 200)
+        event = _latest(harness)
+        self.assertEqual(event["serving_provider"], FAKE_PROVIDER)
+        self.assertEqual(harness.router.circuits.remaining(FAKE_PROVIDER, "gpt-6-luna"), 0)
+
+
+    def test_an_exception_while_the_failure_is_processed_releases_the_claim(self) -> None:
+        # The defect this pins: ``_maybe_open_circuit`` runs *inside* the
+        # ``except AdapterError`` handler, and an exception raised there is
+        # not caught by a sibling ``except``. It escaped as an HTTP 500
+        # with the primary's claim still held, so the route refused every
+        # probe for the rest of the window while nothing probed it.
+        harness, clock = _harness()
+        self.addCleanup(harness.close)
+        _open_and_expire(harness, clock)
+
+        harness.registry.register(
+            FakeAdapter(fail_with=AdapterError("rate_limited", provider_id=FAKE_PROVIDER))
+        )
+        with mock.patch.object(
+            harness.router,
+            "_maybe_open_circuit",
+            side_effect=RuntimeError("synthetic failure while opening the circuit"),
+        ):
+            status, _, _ = harness.request("POST", "/v1/chat/completions", body=_chat())
+        self.assertEqual(status, 500)
+        self.assertFalse(
+            _probe_held(harness),
+            "an exception inside the AdapterError handler left the probe claimed",
+        )
+
+        # The circuit is still half-open, so the very next compatible
+        # request claims the probe at once and a healthy provider closes
+        # it: the route did not sit on its fallback until the timeout.
+        harness.registry.register(FakeAdapter())
+        status, _, _ = harness.request("POST", "/v1/chat/completions", body=_chat())
+        self.assertEqual(status, 200)
+        event = _latest(harness)
+        self.assertEqual(event["serving_provider"], FAKE_PROVIDER)
+        self.assertFalse(event["fallback_used"])
+        self.assertEqual(harness.router.circuits.remaining(FAKE_PROVIDER, "gpt-6-luna"), 0)
+
+    def test_an_exception_after_a_successful_probe_releases_the_claim(self) -> None:
+        # Post-claim processing - closing the circuit, writing the ledger -
+        # runs after the invocation's own handlers. An exception there used
+        # to escape with the half-open claim still held, for the same
+        # reason: nobody released it on that path.
+        harness, clock = _harness()
+        self.addCleanup(harness.close)
+        _open_and_expire(harness, clock)
+        harness.registry.register(FakeAdapter())
+
+        with mock.patch.object(
+            harness.router.circuits,
+            "record_success",
+            side_effect=RuntimeError("synthetic failure while recording the success"),
+        ):
+            status, _, _ = harness.request("POST", "/v1/chat/completions", body=_chat())
+        self.assertEqual(status, 500)
+        self.assertFalse(
+            _probe_held(harness),
+            "an exception during post-claim processing left the probe claimed",
+        )
+
+        # The claim is gone, so the next request is the probe and it
+        # succeeds - the half-open route is usable immediately.
         harness.registry.register(FakeAdapter())
         status, _, _ = harness.request("POST", "/v1/chat/completions", body=_chat())
         self.assertEqual(status, 200)
