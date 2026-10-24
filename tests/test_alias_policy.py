@@ -422,5 +422,109 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(self._ledger_row(harness)["degradations"])
 
 
+class ConsoleSaveTests(unittest.TestCase):
+    """A console alias save must never silently drop or change a policy (R40)."""
+
+    def _harness(self, **policy: object) -> GatewayHarness:
+        harness = GatewayHarness()
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            config.providers[FAKE_PROVIDER].models["gpt-6-luna"].reasoning_efforts = [
+                "none", "low", "medium", "high", "xhigh", "max"
+            ]
+            config.aliases["coding"] = Alias(
+                name="coding",
+                enabled=True,
+                primary=RouteRef(FAKE_PROVIDER, "gpt-6-luna"),
+                policy=AliasPolicy.from_dict(policy),
+            )
+        return harness
+
+    @staticmethod
+    def _save(harness: GatewayHarness, **extra: object):
+        payload = {
+            "action": "save",
+            "name": "coding",
+            "primary": {"provider": FAKE_PROVIDER, "model": "gpt-6-luna"},
+            "enabled": True,
+        }
+        payload.update(extra)
+        return harness.request("POST", "/owner/api/alias", body=payload)
+
+    def test_a_save_without_a_policy_block_preserves_the_existing_one(self) -> None:
+        # The console form never submits `policy`, so this is the path an
+        # owner takes when editing any other field of a policied alias.
+        harness = self._harness(**TODO_POLICY)
+        status, body, _ = self._save(harness)
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "preserved")
+        self.assertEqual(harness.config.snapshot().aliases["coding"].policy, AliasPolicy.from_dict(TODO_POLICY))
+        # The preserved policy still governs the next request.
+        status, _, _ = harness.request("POST", "/v1/chat/completions", body=chat_body())
+        self.assertEqual(status, 200)
+        upstream = harness.adapter.calls[0].payload
+        self.assertEqual(upstream["temperature"], 0.1)
+        # The cap clamps the default: defaults *and* caps survived the save.
+        self.assertEqual(upstream["reasoning"], {"effort": "medium"})
+        self.assertIs(upstream["store"], False)
+
+    def test_an_explicit_policy_replaces_the_old_one_and_reports_it(self) -> None:
+        harness = self._harness(defaults=TODO_POLICY["defaults"])
+        replacement = {"caps": TODO_POLICY["caps"]}
+        status, body, _ = self._save(harness, policy=replacement)
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        before = AliasPolicy.from_dict({"defaults": TODO_POLICY["defaults"]})
+        after = AliasPolicy.from_dict(replacement)
+        assert before is not None and after is not None
+        self.assertEqual(body["policy"]["state"], "changed")
+        self.assertEqual(body["policy"]["before"], before.to_dict())
+        self.assertEqual(body["policy"]["after"], after.to_dict())
+        self.assertEqual(harness.config.snapshot().aliases["coding"].policy, after)
+        # The new policy is the one in force: the old default is gone.
+        status, _, _ = harness.request("POST", "/v1/chat/completions", body=chat_body(temperature=0.7))
+        self.assertEqual(status, 200)
+        self.assertEqual(harness.adapter.calls[0].payload["temperature"], 0.7)
+
+    def test_a_resubmitted_identical_policy_reports_unchanged(self) -> None:
+        harness = self._harness(caps=TODO_POLICY["caps"])
+        status, body, _ = self._save(harness, policy={"caps": TODO_POLICY["caps"]})
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "unchanged")
+
+    def test_an_explicit_null_clears_the_policy_and_says_so(self) -> None:
+        harness = self._harness(deny=TODO_POLICY["deny"])
+        status, body, _ = self._save(harness, policy=None)
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "cleared")
+        self.assertIsNone(harness.config.snapshot().aliases["coding"].policy)
+        # With the policy cleared, the deny rule no longer forces `store`.
+        status, _, _ = harness.request("POST", "/v1/chat/completions", body=chat_body())
+        self.assertEqual(status, 200)
+        self.assertNotIn("store", harness.adapter.calls[0].payload)
+
+    def test_an_invalid_explicit_policy_is_refused_and_the_policy_survives(self) -> None:
+        harness = self._harness(defaults=TODO_POLICY["defaults"])
+        status, body, _ = self._save(harness, policy={"defaults": {"temperature": 99}})
+        self.assertEqual(status, 400, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["error"]["field"], "policy")
+        self.assertEqual(
+            harness.config.snapshot().aliases["coding"].policy,
+            AliasPolicy.from_dict({"defaults": TODO_POLICY["defaults"]}),
+        )
+
+    def test_a_save_of_an_alias_without_a_policy_reports_none(self) -> None:
+        harness = self._harness()
+        status, body, _ = self._save(harness)
+        self.assertEqual(status, 200, body)
+        assert isinstance(body, dict)
+        self.assertEqual(body["policy"]["state"], "none")
+        self.assertIsNone(harness.config.snapshot().aliases["coding"].policy)
+
+
 if __name__ == "__main__":
     unittest.main()

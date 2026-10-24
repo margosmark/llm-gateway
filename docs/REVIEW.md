@@ -1688,7 +1688,7 @@ renumbered on integration because main's register already uses R32–R44)*
 
 **Evidence:** `tests/test_alias_groups.py` exercises published-state changes, preservation of each alias's route and policy, invalid/empty tags, incomplete group refusal, and legacy/tag round-trips. `AliasGroupHttpTests` in `tests/test_end_to_end.py` drives the HTTP action and asserts only members are affected and that refusal is atomic.
 
-### R40 — A console alias save silently drops a file-configured request policy — **open**
+### R40 — A console alias save silently drops a file-configured request policy — **closed**
 
 **Found:** 2026-10-24, during T21 (a request policy per alias).
 
@@ -1713,6 +1713,23 @@ with the same parse-time validation (`AliasPolicy.from_dict`) plus a
 console editor, or preserve the existing alias's policy on save.
 Whichever is chosen, a save that drops a policy must report it.
 `tests/test_alias_policy.py` should gain the regression.
+
+**Closed:** 2026-10-24. `handle_alias_action` (`save`,
+`src/gateway/http/app.py`) now carries the existing alias's `policy`
+across a save whose payload omits the block - which is every save the
+console form makes - and also accepts an explicit `policy` in the save
+payload under the same parse-time validation as the configuration file
+(`AliasPolicy.from_dict`). A block that is not an object or null, or
+that rules nothing after validation, is refused with 400
+(`invalid_alias`, field `policy`) rather than dropped: on a mutation
+endpoint an invalid policy must never disappear quietly. Every save
+response reports what happened to the policy (`_policy_save_outcome`:
+`preserved`, `set`, `changed`, `cleared` or `unchanged`, with
+`before`/`after` when they differ), so a change is never silent.
+Regression: `tests/test_alias_policy.py`, `ConsoleSaveTests` - six
+tests, including a save through `POST /owner/api/alias` that asserts
+the policy survives and still governs the next upstream request. A
+console *editor* for the block remains a separate, unlanded piece.
 
 ## Recommended order
 
