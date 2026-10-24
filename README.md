@@ -197,6 +197,17 @@ allowance exhaustion is different from a rate limit, and the console keeps
 those apart. A local cooldown is a retry policy, not evidence that the
 provider reset.
 
+A confirmed exhaustion is held only within a **bounded** window — at most
+30 minutes by default, configurable with
+`GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS` — so a subscription window that
+reopens on the provider's schedule is never stranded behind a multi-hour
+local circuit. When the window ends, exactly **one** recovery probe is let
+through: a concurrent request falls back (with a truthful skip reason)
+until that probe answers. If you have confirmed a reset window yourself,
+the console's **Clear cooldowns** button on the provider card — or the
+same `clear_cooldowns` action on the owner API — clears exactly that
+provider's cooldowns on demand.
+
 The gateway **never** switches provider:
 
 * after streamed output has started;

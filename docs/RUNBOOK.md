@@ -267,8 +267,11 @@ revoked by a rollback; the gateway will refresh or reject them on its own.
 The open circuits are a third file, `circuits.json`, and a configuration
 rollback leaves it alone as well. That is deliberate: a gateway that comes
 back after an outage stays away from the provider that was exhausted,
-instead of calling it again on the first request. Delete the file by hand
-if you want the gateway to try every route immediately.
+instead of calling it again on the first request. A confirmed-exhaustion
+circuit is bounded (at most `GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS`,
+default 30 minutes), so it expires on its own; the owner console's
+**Clear cooldowns** action clears one provider's circuits deliberately
+without editing this file by hand.
 
 ---
 
@@ -292,7 +295,7 @@ if you want the gateway to try every route immediately.
 | `/version` reports `unknown` | The deployment was not released properly | Deploy with `scripts/release.py --build`; it publishes the identity. The gateway also warns about this at startup |
 | A client reports *an empty stream with no finish reason* | The stream was not framed correctly | Update to a build that emits terminated SSE frames; check the raw bytes for `\n\n` between frames |
 | A fallback did not run | The alias has not authorised it, or the trigger is off | The alias needs **both** the trigger and the confirmation of the fallback provider. The record says which was missing |
-| A fallback did not run and the record says *skipped* | The primary was in a local cooldown | The cooldown is local policy, not evidence the provider reset. It expires on its own |
+| A fallback did not run and the record says *skipped* | The primary was in a local cooldown | The cooldown is local policy, not evidence the provider reset. A confirmed exhaustion expires on its own within the bounded window (default 30 minutes); the Status view shows the hold and the next probe. Use **Clear cooldowns** on the provider card if you have confirmed the reset window yourself |
 | A request was served by a phase route, not the primary | The alias has an enabled phase-routing policy and a phase applied (from the caller's `metadata.personal_gateway.phase` hint or from Jev inference) | Expected. The ledger records `phase` and `phase_source` (`caller`/`jev`/`default`) as metadata only. A phase route is the primary for that phase, **not** a fallback |
 | Jev did not pick a phase | Inference is off for the alias, the request carried tools, Jev was uncertain, or Jev failed | Expected and safe: the ordinary route is used and the ledger records why. Raise `minimum_confidence` only if you accept more guessing, never to force a route |
 
@@ -311,3 +314,75 @@ if you want the gateway to try every route immediately.
   part of a deployment.
 * **Never** sign in to a provider account on the owner's behalf. The owner
   completes the device-code flow in their own browser.
+
+---
+
+## 8. Recovering a held provider
+
+When a provider reports that the account's allowance is exhausted, the
+gateway opens a **bounded** provider-wide cooldown: at least 15 minutes,
+at most `GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS` seconds (default
+`1800` = 30 minutes; set it with `--exhausted-cooldown-max-seconds` or
+the environment variable, a whole number of seconds ≥ 1). The window does
+not grow with repeated failures, so a subscription window that reopens on
+the provider's own schedule is never stranded behind a multi-hour hold.
+
+Recovery is automatic and stampede-safe: when the window ends, the next
+request claims the single **half-open probe**; every concurrent request
+is skipped with a truthful reason (`a recovery probe is already in
+flight ...`) and falls back if the alias allows it. A successful probe
+clears the provider and route circuits and the configured primary serves
+again with `fallback_used=false`; a failed probe re-arms the circuit
+within the same bounded window and records the failure class and count.
+
+To recover immediately after **you have confirmed** the subscription or
+reset window is open:
+
+1. Open the owner console → Providers.
+2. Press **Clear cooldowns** on the provider card and confirm. The
+   response lists the cleared circuits (metadata only — never a
+   credential) for exactly that provider.
+3. Press **Test connection**, or test an alias, to verify service.
+
+The same action over the API (canonical `Origin` required, like every
+owner mutation):
+
+```sh
+curl -s -X POST http://10.10.11.109:8765/owner/api/provider \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: http://10.10.11.109:8765' \
+  -d '{"action": "clear_cooldowns", "provider_id": "chatgpt_codex"}'
+```
+
+Optional: add `"probe_alias": "<alias>"` to run exactly one explicit
+recovery probe through that alias as part of the same action; the
+response reports the serving provider/model and whether a fallback was
+used. Without it, no provider is called.
+
+The Status view's cooldown table shows, per circuit: the original failure
+timestamp, scope (whole provider or one route), failure count, current
+hold, the next eligible probe time, and whether a probe is in flight.
+The request ledger labels every non-primary outcome — a phase-route
+selection is labelled `phase route`, a circuit skip is labelled
+`held by local circuit`, and a cross-provider fallback carries its
+reason — so the three are never confused.
+
+---
+
+## 9. Legacy user systemd unit (retired)
+
+An audit on 2026-10-24 found a separate **user** systemd unit at
+`/home/developer/.config/systemd/user/personal-llm-gateway.service` on
+the dev box. It describes a loopback-only venv deployment
+(`.venv/bin/llm-gateway --host 127.0.0.1 --port 8765`) that is **not**
+the supported deployment: the production gateway is the Docker Compose
+stack on the private LAN address. At audit time the unit was `inactive
+(dead)` and `disabled` — it is not a live second surface.
+
+**Decision:** the unit is retired. It is not started, enabled, or
+documented as a supported surface; the Compose stack is the only
+supported deployment. Removing the unit file is an operator action (it
+was deliberately not modified as part of the cooldown-recovery feature
+work). If the loopback venv deployment is ever wanted again, it must be
+designed and documented deliberately — do not revive this unit by
+accident with `systemctl --user enable --now`.

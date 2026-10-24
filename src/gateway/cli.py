@@ -17,7 +17,7 @@ from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.buildinfo import release_identity
 from gateway.backup import snapshot_interval_seconds
-from gateway.circuits import CircuitStore
+from gateway.circuits import EXHAUSTED_MAX_SECONDS, CircuitStore
 from gateway.snapshots import SnapshotWorker
 from gateway.config import ConfigStore, ProviderState
 from gateway.core.routing import Router
@@ -47,6 +47,26 @@ def _gateway_port(value: str) -> int:
             "port 8766 is reserved and cannot be used; choose another gateway port"
         )
     return port
+
+
+def _exhausted_cooldown_max_seconds(value: str) -> int:
+    """Validate the confirmed-exhaustion cooldown cap.
+
+    The cap bounds how long a provider-wide ``exhausted`` circuit may hold
+    a route. It must be a positive whole number of seconds, so a typo
+    cannot silently disable the recovery bound.
+    """
+    try:
+        seconds = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "exhausted cooldown cap must be a whole number of seconds"
+        ) from exc
+    if seconds < 1:
+        raise argparse.ArgumentTypeError(
+            "exhausted cooldown cap must be at least 1 second"
+        )
+    return seconds
 
 
 def _is_wildcard(host: str) -> bool:
@@ -100,11 +120,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-workers", type=int, default=int(os.environ.get("GATEWAY_MAX_WORKERS", DEFAULT_MAX_WORKERS)), help="Maximum concurrent HTTP workers (default: 32).")
     parser.add_argument("--rate-limit-requests", type=int, default=int(os.environ.get("GATEWAY_RATE_LIMIT_REQUESTS", DEFAULT_RATE_LIMIT_REQUESTS)), help="Requests per client in the rolling window (default: 120).")
     parser.add_argument("--rate-limit-window-seconds", type=float, default=float(os.environ.get("GATEWAY_RATE_LIMIT_WINDOW_SECONDS", DEFAULT_RATE_LIMIT_WINDOW_SECONDS)), help="Per-client rolling window in seconds (default: 60).")
+    parser.add_argument(
+        "--exhausted-cooldown-max-seconds",
+        type=_exhausted_cooldown_max_seconds,
+        default=os.environ.get("GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS", str(EXHAUSTED_MAX_SECONDS)),
+        help=(
+            "Longest window a confirmed provider/account exhaustion may hold a route "
+            f"(default: {EXHAUSTED_MAX_SECONDS}; configurable with GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS)."
+        ),
+    )
     parser.add_argument("--print-url", action="store_true", help="Print gateway URLs and exit.")
     return parser
 
 
-def build_application(data_dir: Path, host: str, port: int):
+def build_application(
+    data_dir: Path,
+    host: str,
+    port: int,
+    exhausted_max_seconds: int = EXHAUSTED_MAX_SECONDS,
+):
     data_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(data_dir, 0o700)
     config = ConfigStore(data_dir / "config.json")
@@ -121,8 +155,12 @@ def build_application(data_dir: Path, host: str, port: int):
     ledger = RequestLedger(persistence_path=data_dir / "request-ledger.jsonl")
     limits = LimitStore()
     # The open circuits are remembered on disk, so a gateway that restarts
-    # during an outage does not call the exhausted provider again.
-    circuits = CircuitStore(data_dir / "circuits.json")
+    # during an outage does not call the exhausted provider again. The
+    # confirmed-exhaustion window is bounded, so a reopened subscription
+    # window is never stranded behind a multi-hour local hold.
+    circuits = CircuitStore(
+        data_dir / "circuits.json", exhausted_max_seconds=exhausted_max_seconds
+    )
     router = Router(config, registry, ledger=ledger, circuits=circuits)
     profile_auth = ProfileAuth(config, credentials)
     policy = SecurityPolicy(allowed_hosts=build_allowed_hosts(host, port), canonical_origins=build_canonical_origins(host, port))
@@ -146,7 +184,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_workers < 1 or args.rate_limit_requests < 1 or args.rate_limit_window_seconds <= 0:
         print("refusing to start: worker and rate-limit settings must be positive.", file=sys.stderr)
         return 2
-    app, config, _, _ = build_application(Path(args.data_dir), args.host, args.port)
+    app, config, _, _ = build_application(
+        Path(args.data_dir), args.host, args.port,
+        exhausted_max_seconds=args.exhausted_cooldown_max_seconds,
+    )
     authority = format_authority_host(args.host)
     if args.print_url:
         print(f"console: http://{authority}:{args.port}/owner/\nAPI:     http://{authority}:{args.port}/v1/\nrelease: http://{authority}:{args.port}/version")

@@ -281,18 +281,37 @@ most.
 
 * It is keyed by **route** - provider *and* model - so one broken model
   does not hold the others at the same provider.
-* A **confirmed exhaustion** is account-scoped: it opens for at least an
-  hour and covers the whole provider, because the account's allowance is
-  gone rather than one route's share of it.
+* A **confirmed exhaustion** is account-scoped: it covers the whole
+  provider, because the account's allowance is gone rather than one
+  route's share of it. Its window is **bounded** - a floor of 15 minutes
+  and a cap of 30 minutes by default (`EXHAUSTED_BASE_SECONDS` and
+  `EXHAUSTED_MAX_SECONDS`, configurable at startup with
+  `GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS`) - and it does **not** grow
+  exponentially, however many failures have been seen. A subscription
+  window reopens on the provider's schedule, so a local hold must never
+  strand reopened capacity behind a multi-hour circuit.
 * A **rate limit** opens the route for as long as the provider asked.
 * A **transient** failure is a blip. It opens the route only after a
   pattern of consecutive failures, and a success resets the count.
-* The window **escalates** with consecutive failures, up to a day.
+* The window **escalates** with consecutive failures, up to a day - for
+  every class except a confirmed exhaustion, which stays within the
+  bounded window described above.
 * When a window ends the circuit is **half-open**: exactly one request is
-  let through to find out whether the provider recovered. A success closes
-  it; a failure reopens it for longer. A probe that never returns is
-  reclaimed after five minutes, and a probe is never remembered across a
-  restart.
+  let through to find out whether the provider recovered. A success
+  closes it; a failure re-arms it within the bounded window and keeps the
+  failure class and count. A probe that never returns is reclaimed after
+  five minutes, and a probe is never remembered across a restart.
+* The owner may **clear one provider's cooldowns deliberately** from the
+  console or `POST /owner/api/provider` with
+  `{"action": "clear_cooldowns", "provider_id": "..."}` - a trusted-LAN
+  mutation with the same canonical-Origin protection as every other
+  owner action. It returns the cleared entries (metadata only) and never
+  touches another provider's circuits. A provider call happens only when
+  the owner also names a `probe_alias`.
+* The owner state (`GET /owner/api/state`) reports, per circuit, the
+  original failure timestamp, scope, failure count, current hold,
+  next eligible probe, and whether a probe is in flight; the effective
+  policy is reported as `cooldown_policy`.
 * The stored state is **metadata only**, and it is forgotten after a week.
 
 ## Phase routing (opt-in)

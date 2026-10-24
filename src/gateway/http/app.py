@@ -23,6 +23,11 @@ from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_ch
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import convert_stream, sse_done
 from gateway.backup import export_config, import_config, snapshot_interval_seconds
+from gateway.circuits import (
+    EXHAUSTED_BASE_SECONDS,
+    PROBE_TIMEOUT_SECONDS,
+    TRANSIENT_FAILURE_THRESHOLD,
+)
 from gateway.costs import aggregate_usage, annotate_events, published_prices, response_token_counters, stream_token_counters
 from gateway.stores import atomic_write_json
 from gateway.config import (
@@ -690,6 +695,12 @@ class GatewayApp:
                 "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),
+                "cooldown_policy": {
+                    "exhausted_base_seconds": EXHAUSTED_BASE_SECONDS,
+                    "exhausted_max_seconds": self.router.circuits.exhausted_max_seconds,
+                    "probe_timeout_seconds": PROBE_TIMEOUT_SECONDS,
+                    "transient_failure_threshold": TRANSIENT_FAILURE_THRESHOLD,
+                },
                 "release": self._release_identity() if self._release_identity else {},
                 "base_url": self.base_url,
                 "fallback_triggers": list(FALLBACK_TRIGGERS),
@@ -876,6 +887,27 @@ class GatewayApp:
                 provider.state = STATE_CONFIGURED_UNTESTED
             # The key is never echoed back.
             return json_response({"ok": True, "stored": True})
+
+        if action == "clear_cooldowns":
+            # The deliberate recovery action. The owner has confirmed the
+            # subscription/reset window is open, so the local circuits for
+            # exactly this provider are cleared. It never touches another
+            # provider's circuits, and it returns only metadata: the
+            # removed circuit entries, never a credential or request
+            # content. No provider is called unless the owner also asks
+            # for one explicit probe by naming its alias.
+            cleared = self.router.circuits.clear(provider=provider_id)
+            probe_alias = str(payload.get("probe_alias") or "")
+            probe = self._run_alias_probe(probe_alias) if probe_alias else None
+            return json_response(
+                {
+                    "ok": True,
+                    "provider": provider_id,
+                    "cleared": cleared,
+                    "cleared_count": len(cleared),
+                    "probe": probe,
+                }
+            )
 
         return json_response(
             {"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400
@@ -1083,14 +1115,31 @@ class GatewayApp:
         The test sends a tiny prompt to the alias and reports the provider
         that served it. It does not store the prompt or the response.
         """
+        result = self._run_alias_probe(name)
+        error = result.get("error")
+        if error is not None:
+            status = {"unknown_alias": 404, "alias_incomplete": 409}.get(error["type"], 502)
+            return json_response({"error": error}, status)
+        return json_response(result)
+
+    def _run_alias_probe(self, name: str) -> dict[str, Any]:
+        """Send one tiny explicit probe through an alias.
+
+        Returns a metadata-only result: the provider and model that
+        served it, whether a fallback was used, or the error class and
+        message. Never a prompt, a response body, or a credential. This
+        runs only as part of an explicit owner action - never on a page
+        load or a configuration read.
+        """
         config = self.config.snapshot()
         alias = config.aliases.get(name)
         if alias is None:
-            return json_response({"error": {"message": "unknown alias", "type": "unknown_alias"}}, 404)
+            return {"ok": False, "error": {"message": "unknown alias", "type": "unknown_alias"}}
         if alias.primary is None:
-            return json_response(
-                {"error": {"message": "the alias has no primary route", "type": "alias_incomplete"}}, 409
-            )
+            return {
+                "ok": False,
+                "error": {"message": "the alias has no primary route", "type": "alias_incomplete"},
+            }
         try:
             routed = self.router.invoke(
                 name,
@@ -1107,16 +1156,14 @@ class GatewayApp:
         except (RoutingError, AdapterError, ConversionError) as exc:
             message = getattr(exc, "message", str(exc))
             code = getattr(exc, "code", "route_test_failed")
-            return json_response({"error": {"message": message, "type": code}}, 502)
-        return json_response(
-            {
-                "ok": True,
-                "serving_provider": routed.attribution.serving_provider,
-                "serving_model": routed.attribution.serving_model,
-                "fallback_used": routed.attribution.fallback_used,
-                "fallback_reason": routed.attribution.fallback_reason,
-            }
-        )
+            return {"ok": False, "error": {"message": message, "type": code}}
+        return {
+            "ok": True,
+            "serving_provider": routed.attribution.serving_provider,
+            "serving_model": routed.attribution.serving_model,
+            "fallback_used": routed.attribution.fallback_used,
+            "fallback_reason": routed.attribution.fallback_reason,
+        }
 
     # --- profile actions -------------------------------------------------
 
