@@ -109,6 +109,13 @@ gap rather than as zero usage. The sidecar stores aggregates only - no
 request identifier, no prompt, no response, and no cost estimate (prices are
 applied at read time); it is written 0600 and is not a billing record.
 
+A record written at route time can be amended **in place** when a later
+fact changes the outcome: a client disconnect records `client_abort`
+(T11), and an upstream that dies mid-answer records the provider's own
+class through `gateway.core.abort.classify_late_error` (`docs/REVIEW.md`
+R77). Totals move with the amendment, so a truncated or failed request
+can no longer read as a success.
+
 The Status view reports whether persistence is enabled and the declared
 30-day retention window. Its provider health summary combines configured
 connection/test/catalogue metadata, model counts, current local cooldowns,
@@ -427,6 +434,22 @@ one object.
 final Responses object - the terminal `response.completed` event carries the
 whole thing - and a Chat Completions stream accumulates into one object. The
 result is then converted into the caller's dialect as usual.
+
+### An upstream that dies mid-answer
+
+Routing records the outcome before the answer has been delivered, so a
+provider that fails *while the stream is being consumed* would leave a
+record that reads success. `gateway.http.app` amends that record through
+`gateway.core.abort.classify_late_error` — the class the adapter raised,
+or `client_abort` when the caller had already left — so it stays a
+member of `ERROR_CLASSES` and circuits and cooldowns consume it. The
+streaming client receives exactly one in-band
+`data: {"error": {"message": ..., "type": ...}}` frame after the last
+delivered frame and then a clean `0\r\n\r\n`, with **no**
+`data: [DONE]`: the status really was 200, and `[DONE]` means a complete
+answer. Only `AdapterError` is handled — logged at ERROR with its
+traceback — so any other exception still reaches
+`socketserver.handle_error` untouched.
 
 ### Frame framing
 

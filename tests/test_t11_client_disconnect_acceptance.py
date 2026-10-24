@@ -30,8 +30,9 @@ Matrix (this file maps 1:1 onto the card):
 5. **Refusal vs abort distinctness** - an upstream refusal is recorded as a
    provider class and counted; a client abort is recorded as
    ``client_abort`` and never counted; an upstream mid-stream failure is
-   never relabeled ``client_abort`` (its missing class is follow-up card
-   t_1b61e593).
+   never relabeled ``client_abort`` (R42, `docs/REVIEW.md`, now also
+   records the provider's own class there - this file pins the
+   distinctness).
 
 The heavy mid-stream disconnect scenario runs once per class that needs it
 (evidence gathered in ``setUpClass``/helpers, asserted by independent test
@@ -569,11 +570,12 @@ class UpstreamAbortDistinctnessTests(unittest.TestCase):
     def test_upstream_midstream_failure_is_never_classified_as_client_abort(self) -> None:
         """The upstream dying mid-answer must never read as a client abort.
 
-        Known gap (follow-up card t_1b61e593): today that record keeps
-        ``error_class=None`` (still 'success') and is counted by nothing -
-        there is no dedicated upstream-abort class yet. This test pins only
-        the distinctness T11 requires and must pass both before and after
-        that gap is closed.
+        R42 (`docs/REVIEW.md`) closed the gap this test was written
+        against: that record now carries the adapter's own class (or
+        ``client_abort`` only when the caller had left). What this test
+        pins is the distinctness T11 requires - a provider failure is
+        never relabeled as a client abort - and it must keep passing
+        whatever class is recorded.
         """
         harness = _make_harness(DyingUpstreamAdapter())
         self.addCleanup(harness.close)
