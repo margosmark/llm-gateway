@@ -20,6 +20,7 @@ from gateway.backup import snapshot_interval_seconds
 from gateway.circuits import EXHAUSTED_MAX_SECONDS, CircuitStore
 from gateway.snapshots import SnapshotWorker
 from gateway.config import ConfigStore, ProviderState
+from gateway.core.capabilities import apply_image_evidence, image_evidence
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
@@ -148,10 +149,30 @@ def build_application(
     registry.register(ChatGPTCodexAdapter(credentials.provider_handle("chatgpt_codex")))
     registry.register(OpenCodeGoAdapter(credentials.provider_handle("opencode_go")))
     registry.register(OpenCodeConsoleAdapter(credentials.provider_handle("opencode_console")))
+    reconciled: list[tuple[str, str]] = []
     with config.mutate() as snapshot:
         for provider_id in registry.provider_ids():
             if provider_id not in snapshot.providers:
                 snapshot.providers[provider_id] = ProviderState(provider_id=provider_id, kind=provider_id)
+        # A capability that lives only in the dated catalogue is
+        # indistinguishable from false in the stored rows, because the
+        # router, the alias catalogue and every client read the row. So each
+        # boot re-applies, per exact model id, the image evidence each
+        # adapter holds in local files and local maps. No provider is called,
+        # no row is added, and nothing that is not evidenced changes.
+        reconciled = apply_image_evidence(
+            snapshot,
+            {
+                provider_id: image_evidence(registry.get(provider_id))
+                for provider_id in registry.provider_ids()
+            },
+        )
+    if reconciled:
+        print(
+            "image capability reconciled from local evidence: "
+            + ", ".join(f"{provider_id}/{model_id}" for provider_id, model_id in reconciled),
+            flush=True,
+        )
     ledger = RequestLedger(persistence_path=data_dir / "request-ledger.jsonl")
     limits = LimitStore()
     # The open circuits are remembered on disk, so a gateway that restarts
