@@ -738,6 +738,18 @@ latency or prices remain Unknown.
 
 Aliases may also have a local monthly USD budget. It is a **soft cap** checked before each request; requests already in flight may overshoot. Spend is computed from recorded successful-request token counters and published per-token prices. If any monthly spend cannot be priced or the ledger history is incomplete, spend is **Unknown** and the alias is reported uncapped rather than free. The console shows the UTC month boundary when the budget resets.
 
+A provider that fails **after** the route answered — while the answer is
+being delivered — is recorded the same way: the route-time ledger record
+is amended in place with the provider's own error class (or
+`client_abort` when the caller had already disconnected), so the error
+totals, circuits and cooldowns all see it. A streaming client is told in
+band: exactly one SSE error event
+`data: {"error": {"message": ..., "type": ...}}` after the last
+delivered frame, then a clean end of the chunked stream — and never
+`data: [DONE]`, which stays reserved for a complete answer. The HTTP
+status stays 200 because the headers were already sent; a buffered
+client keeps its 502, and its record now says the same thing.
+
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
 never as unlimited. The **Usage and limits** card shows only enforceable
