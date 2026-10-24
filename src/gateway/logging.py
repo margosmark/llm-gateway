@@ -22,11 +22,24 @@ collector.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from typing import Any, TextIO
 
 from gateway.observability import redact
+
+#: The gateway's operational logger: a *handled* failure, recorded at
+#: ERROR with its traceback. It is deliberately separate from
+#: :class:`RequestLogger`, which is the metadata-only access log.
+#:
+#: Nothing configures it, so records fall through to the logging
+#: module's own stderr fallback (:data:`logging.lastResort`), which
+#: resolves ``sys.stderr`` when the record is emitted. That keeps a
+#: handled failure's traceback visible - the log is not blinded
+#: (t_7198bfa3) - while the request itself is still answered, without
+#: the socketserver banner an *unhandled* exception produces.
+operations_logger = logging.getLogger("gateway")
 
 
 class RequestLogger:

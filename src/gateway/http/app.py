@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from gateway.adapters.base import AdapterError
+from gateway.adapters.base import CLASS_MESSAGES, AdapterError
 from gateway.adapters.chatgpt_codex import (
     ANTI_PHISHING,
     PREREQUISITE,
@@ -21,7 +21,7 @@ from gateway.auth import ProfileAuth, access_mode_description, profile_allows
 from gateway.bridge.aggregate import aggregate_stream
 from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_chat
 from gateway.bridge.model import ConversionError
-from gateway.bridge.streams import convert_stream, sse_done
+from gateway.bridge.streams import convert_stream, sse_done, sse_frame
 from gateway.backup import export_config, import_config, snapshot_interval_seconds
 from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
@@ -44,6 +44,7 @@ from gateway.config import (
     RouteRef,
     utc_now_iso,
 )
+from gateway.core.abort import classify_late_error
 from gateway.core.capabilities import (
     DIALECT_OPENAI_CHAT,
     DIALECT_OPENAI_RESPONSES,
@@ -54,7 +55,7 @@ from gateway.credentials import CredentialStore
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
-from gateway.logging import RequestLogger
+from gateway.logging import RequestLogger, operations_logger
 from gateway.routes import validate_alias_routes, validate_phase_routing
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
@@ -200,6 +201,10 @@ class GatewayApp:
             return result
         except AdapterError as exc:
             result = json_response({"error": {"message": exc.message, "type": exc.error_class}}, 502)
+            # The client is told the truth; the record written at route
+            # time said "success", so amend it to agree with this answer
+            # (docs/REVIEW.md R42).
+            self._amend_late_failure(request, exc, status=502)
             self._log_request(request, result, started)
             return result
         except Exception:  # pragma: no cover - defensive
@@ -208,6 +213,40 @@ class GatewayApp:
             return result
         self._log_request(request, result, started)
         return result
+
+    def _amend_late_failure(self, request: Request, exc: AdapterError, status: int) -> None:
+        """Correct a route-time record for a failure raised after routing.
+
+        The ledger record is written while the route is being chosen, so a
+        provider that fails *later* - while a streaming-only answer is being
+        aggregated, for instance - leaves a record that reads success. The
+        client is about to be told ``status`` (502), so the record carries
+        the same status and the class from
+        :func:`gateway.core.abort.classify_late_error`: the provider's own
+        class, or ``client_abort`` when the caller had already left.
+
+        A request that never routed (the provider refused before the route
+        answered) carries no request id in its context: routing already
+        recorded that outcome truthfully - 502 and the provider's class -
+        so there is nothing here to amend.
+
+        Never raises: a ledger problem must not change the response the
+        client receives.
+        """
+        if self.ledger is None:
+            return
+        context = request.context if isinstance(request.context, dict) else {}
+        request_id = context.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            return
+        try:
+            self.ledger.amend(
+                request_id,
+                status=status,
+                error_class=classify_late_error(context.get("route_context"), exc),
+            )
+        except Exception:  # noqa: BLE001 - an amendment must never break a response.
+            return
 
     def _log_request(self, request: Request, result: Any, started: float) -> None:
         """Record one request outcome.
@@ -481,6 +520,12 @@ class GatewayApp:
         request.context["attribution"] = routed.attribution.to_dict()
         request.context["streamed"] = stream
         request.context["request_id"] = request_id
+        # The route context travels with the request so a failure raised
+        # *after* routing succeeded - while the stream is being consumed,
+        # or while a streaming-only answer is aggregated - can still be
+        # classified when it surfaces out in handle(). See docs/REVIEW.md
+        # R42.
+        request.context["route_context"] = routed.route_context
         request.context["serving_model"] = routed.attribution.serving_model
 
         if not stream:
@@ -514,16 +559,58 @@ class GatewayApp:
 
         def frames():
             observed: dict[str, int] = {}
-            converted = upstream_stream if upstream_dialect == dialect else convert_stream(
-                upstream_stream, upstream_dialect, dialect, routed.request.model
-            )
-            for frame in converted:
-                observed.update(stream_token_counters([frame], dialect) or {})
-                yield frame
-            if dialect != upstream_dialect and dialect == DIALECT_OPENAI_CHAT:
-                yield sse_done()
-            if self.ledger:
-                self.ledger.amend(request_id, token_counters=observed or None)
+            try:
+                converted = upstream_stream if upstream_dialect == dialect else convert_stream(
+                    upstream_stream, upstream_dialect, dialect, routed.request.model
+                )
+                for frame in converted:
+                    observed.update(stream_token_counters([frame], dialect) or {})
+                    yield frame
+                if dialect != upstream_dialect and dialect == DIALECT_OPENAI_CHAT:
+                    yield sse_done()
+                if self.ledger:
+                    self.ledger.amend(request_id, token_counters=observed or None)
+            except AdapterError as exc:
+                # The upstream died *after* the route answered, while the
+                # answer was being delivered (docs/REVIEW.md R42). The
+                # record written at route time still reads success: correct
+                # it, then tell the client in band, then let the generator
+                # end so the HTTP layer writes the clean chunked terminator.
+                #
+                # The class is the provider's own, or client_abort when the
+                # caller had already left (T11 rule 2), so it is a member of
+                # ERROR_CLASSES that circuits and cooldowns consume and it
+                # can never read as a client abort. Only AdapterError is
+                # handled: anything else keeps propagating to
+                # socketserver.handle_error (t_7198bfa3, log not blinded).
+                error_class = classify_late_error(routed.route_context, exc)
+                operations_logger.error(
+                    "upstream failed mid-stream (class=%s request_id=%s); "
+                    "the ledger was amended and the client is told in band",
+                    error_class,
+                    request_id,
+                    exc_info=exc,
+                )
+                if self.ledger:
+                    self.ledger.amend(
+                        request_id,
+                        error_class=error_class,
+                        token_counters=observed or None,
+                    )
+                # Exactly one error frame, then - deliberately - no
+                # data: [DONE]: [DONE] is reserved for a complete answer,
+                # so no consumer can mistake a truncation for completion.
+                message = (
+                    exc.message
+                    if error_class == exc.error_class
+                    else CLASS_MESSAGES.get(error_class, exc.message)
+                )
+                yield sse_frame(
+                    json.dumps(
+                        {"error": {"message": message, "type": error_class}},
+                        ensure_ascii=False,
+                    )
+                )
 
         return StreamResponse(
             frames(),

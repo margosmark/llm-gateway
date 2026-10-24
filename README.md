@@ -403,6 +403,18 @@ and displays the price source and observation date. No published price means
 **Unknown**, never zero. Request metadata is retained on the state volume for
 up to 30 days; it is not a billing system.
 
+A provider that fails **after** the route answered — while the answer is
+being delivered — is recorded the same way: the route-time ledger record
+is amended in place with the provider's own error class (or
+`client_abort` when the caller had already disconnected), so the error
+totals, circuits and cooldowns all see it. A streaming client is told in
+band: exactly one SSE error event
+`data: {"error": {"message": ..., "type": ...}}` after the last
+delivered frame, then a clean end of the chunked stream — and never
+`data: [DONE]`, which stays reserved for a complete answer. The HTTP
+status stays 200 because the headers were already sent; a buffered
+client keeps its 502, and its record now says the same thing.
+
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
 never as unlimited.

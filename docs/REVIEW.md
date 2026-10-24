@@ -1553,9 +1553,9 @@ skip, Origin refusal clears nothing, state policy/telemetry),
 cap reaches the circuit store). Operator runbook §8/§9 document the
 recovery procedure and the retired legacy systemd unit.
 
-### R42 — An upstream that dies mid-answer is recorded as success and the client is silently truncated — **open**
+### R42 — An upstream that dies mid-answer is recorded as success and the client is silently truncated — **closed**
 
-**Severity: high.** *(open)*
+**Severity: high.** *(closed)*
 
 Found by QA card `t_1b61e593` (2026-10-24) and independently reproduced
 with synthetic adapters and loopback sockets only — no network, no
@@ -1625,6 +1625,39 @@ signal that it is incomplete.
 `tests/test_t11_client_disconnect_acceptance.py::UpstreamAbortDistinctnessTests::test_upstream_midstream_failure_is_never_classified_as_client_abort`
 — the mid-stream record is never relabeled `client_abort`, and
 `error_class is None` must not be enshrined as desired behaviour.
+
+**Resolution.** Both paths now amend the route-time record through
+`gateway.core.abort.classify_late_error` (its first production call
+site): the class the adapter raised is the class that is recorded —
+`transient` here, `auth` when the adapter said so, `client_abort` only
+when the caller had already left (T11 rule 2) — and no new class was
+introduced, so the class stays a member of `ERROR_CLASSES`, is counted
+by `client_abort.provider_error_count(ledger)`, and is consumed by
+circuits and cooldowns. On the streaming path (`app.py`, `frames()`)
+the failure is now *handled*: the record is amended (class; status
+stays 200, the status actually sent), the gateway operational logger
+records it at ERROR **with** the traceback, the client receives exactly
+one in-band `data: {"error": {"message": <class message>, "type":
+<class>}}` frame after the last delivered frame, and the chunked stream
+then ends cleanly with `0\r\n\r\n` and **without** `data: [DONE]`.
+On the buffered path the outer `AdapterError` catch in `handle()`
+amends the same record with the status it returns (502), so ledger and
+access log agree. Only `AdapterError` is caught; any other exception
+still propagates to `socketserver.handle_error` untouched. Evidence:
+`tests/test_r42_upstream_midstream_ledger.py` (clean chunked EOF with no
+`[DONE]`; exactly one error frame after the delivered answer; class,
+`provider_error_count` and `totals["errors"]` all recorded; `auth` kept;
+buffered 502 and ledger record agree; a refusal before the answer still
+records at route time; a non-`AdapterError` mid-stream failure still
+reaches stderr with its traceback), plus the T11 matrix green on the
+same tip — `tests/test_t11_client_disconnect_acceptance.py` in full,
+including
+`UpstreamAbortDistinctnessTests::test_upstream_midstream_failure_is_never_classified_as_client_abort`
+and
+`MidFlightLoggingTests::test_an_application_error_still_prints_a_traceback`.
+Full suite on this tip: 583 tests, `OK (skipped=4)` — the four skips are
+environmental (node/chromium, docker, IPv6 ULA) or the t_3acad3f0
+conditional.
 
 *(Numbered R42 rather than the R41 the originating card proposed: R41 was
 taken by the exhaustion-cooldown finding while this card was in flight.)*
