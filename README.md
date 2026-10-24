@@ -47,8 +47,10 @@ The gateway binds an explicit RFC1918 IPv4, IPv6 unique-local (`fc00::/7`),
 or loopback address owned by the host. IPv6 literals are supported by the
 listener and shown in bracketed URL/Host/Origin form. Public addresses
 (including RFC 5737 TEST-NET), multicast, link-local and wildcard binds are
-refused at startup. It never creates a firewall or router rule, and it is
-never publicly exposed. All owner configuration and client APIs share the one listener.
+refused at startup. The gateway creates no firewall, router or NAT rule and
+cannot enforce one: the operator must ensure the listener is not
+port-forwarded or otherwise exposed beyond the trusted LAN. All owner
+configuration and client APIs share the one listener.
 Canonical same-origin browser mutations work without cookies, passwords,
 sessions, or CSRF bootstrap values; cross-origin browser mutations, hostile
 Host values, and forwarded headers remain rejected. Credentials are entered

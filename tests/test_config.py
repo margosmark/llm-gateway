@@ -155,6 +155,23 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(restored.state, STATE_NOT_CONFIGURED)
 
 
+class ModelEntryFlagTests(unittest.TestCase):
+    def test_capability_flags_are_never_coerced(self) -> None:
+        # Security regression: the string "false" (or an int, or null) must
+        # not become True through bool() coercion on any parsing path.
+        entry = ModelEntry.from_dict({
+            "model_id": "m", "enabled": "true",
+            "supports_image_input": "false", "supports_builtin_tools": 1,
+            "supports_streaming": None, "limits_known": "yes",
+        })
+        assert entry is not None
+        self.assertFalse(entry.enabled)
+        self.assertFalse(entry.supports_image_input)
+        self.assertFalse(entry.supports_builtin_tools)
+        self.assertTrue(entry.supports_streaming)  # declared default restored, not coerced
+        self.assertFalse(entry.limits_known)
+
+
 class PublishedAliasTests(unittest.TestCase):
     def test_only_enabled_aliases_with_a_primary_are_published(self) -> None:
         config = GatewayConfig()

@@ -60,6 +60,41 @@ class AnthropicAdapterTests(unittest.TestCase):
                     AnthropicAdapter(self.credentials, transport).invoke(ProviderRequest(model="claude-synthetic", payload={}, dialect="anthropic_messages"))
                 self.assertEqual(caught.exception.error_class, expected)
 
+    def test_upstream_error_codes_and_credentials_never_echo(self):
+        # Security regression: an upstream response that echoes a key-shaped
+        # value in its error code/type and repeats the key in the message must
+        # surface neither. Only allowlisted classification codes survive, and
+        # the message is the fixed class message with credential shapes
+        # redacted - so nothing reaches the console, state or last_error.
+        synthetic_key = "sk-ant-api03-AbCdEf0123456789abcdef"
+        self.credentials.write({"api_key": synthetic_key})
+        body = json.dumps({
+            "type": "error",
+            "error": {
+                "type": synthetic_key,
+                "code": "invalid_request_error",
+                "message": f"invalid x-api-key: {synthetic_key}",
+            },
+        }).encode()
+        transport = FakeTransport([
+            UpstreamResponse(400, {}, body, None, "application/json"),
+            UpstreamResponse(400, {}, body, None, "application/json"),
+        ])
+        adapter = AnthropicAdapter(self.credentials, transport)
+
+        result = adapter.test_connection()
+        self.assertFalse(result.ok)
+        serialized = json.dumps(result.to_dict())
+        self.assertNotIn(synthetic_key, serialized)
+        self.assertIsNone(result.detail.get("upstream_code"))
+
+        with self.assertRaises(AdapterError) as caught:
+            adapter.invoke(ProviderRequest(model="claude-synthetic", payload={}, dialect="anthropic_messages"))
+        self.assertEqual(caught.exception.error_class, ERROR_MALFORMED)
+        self.assertNotIn(synthetic_key, caught.exception.message)
+        self.assertNotIn(synthetic_key, json.dumps(caught.exception.to_dict()))
+        self.assertIsNone(caught.exception.upstream_code)
+
     def test_model_list_contract_and_safe_unknown_capabilities(self):
         transport = FakeTransport([UpstreamResponse(200, {}, b'{"data":[{"id":"claude-synthetic"}]}', None, "application/json")])
         models = AnthropicAdapter(self.credentials, transport).list_models()
