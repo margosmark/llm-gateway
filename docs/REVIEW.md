@@ -1437,3 +1437,34 @@ and unroutable-route refusals, default-off interval visibility, and snapshot
 worker enabled/disabled behavior. Full suite passed on the implementation
 candidate (339 tests, 2 skipped); compileall and console DOM checks passed.
 Independent candidate QA is tracked by the dependent QA card.
+The retired setup-port reuse finding is fixed in `gateway.cli`: `--port` and
+`GATEWAY_PORT` both reject `8766` during argument parsing with an actionable
+error, before application construction or listener startup. Regression tests
+`test_reserved_setup_port_is_rejected_from_cli_before_startup`,
+`test_reserved_setup_port_is_rejected_from_environment_before_startup`, and
+`test_allowed_explicit_private_port_remains_configurable` cover refusal and
+the valid configurable-port path.
+
+
+## Bind-policy follow-up (SEC-2–SEC-4) — closed in current worktree
+
+The bind predicate now uses explicit allowlists: RFC1918 IPv4, IPv6 ULA
+(`fc00::/7`), and loopback. It rejects RFC 5737 TEST-NET, other public
+addresses, multicast, link-local, and unspecified addresses instead of
+relying on Python's version-dependent `ipaddress.is_private`. The local-address
+probe selects `AF_INET` or `AF_INET6` from the parsed address, so an assigned
+ULA can proceed through startup validation. Bind policy documentation now
+states these same supported classes.
+
+Evidence: `tests/test_cli.py` — `test_public_addresses_are_refused` covers all
+three TEST-NET examples and forbidden address classes;
+`test_test_net_addresses_are_refused_before_startup` verifies `main()` refuses
+all three before application construction; `test_owned_ipv6_ula_uses_startup_path`
+verifies ULA is accepted by startup validation when locally owned. The HTTP
+server now selects AF_INET6 for colon-containing addresses, and security
+policy formats IPv6 URL/Host/Origin authorities with brackets. Regression
+evidence: `test_ipv6_loopback_server_serves_canonical_mutation` traverses a real
+IPv6 listener and successful same-origin mutation; `test_ipv6_authorities_are_bracketed_for_host_and_origin`
+checks allowed Host and Origin forms. `test_ipv6_ula_listener_binds_when_host_owns_address`
+is skipped when the test machine does not own the ULA. Focused suites pass;
+full suite: 340 passed, 3 skipped.

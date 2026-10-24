@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import socket
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -15,7 +16,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from gateway.cli import _is_private_or_loopback, _is_wildcard, build_application, build_parser, main
+from gateway.cli import _address_is_local, _is_private_or_loopback, _is_wildcard, build_application, build_parser, main
 
 
 class BindRuleTests(unittest.TestCase):
@@ -28,14 +29,13 @@ class BindRuleTests(unittest.TestCase):
             self.assertFalse(_is_wildcard(host), host)
 
     def test_private_and_loopback_addresses_are_accepted(self) -> None:
-        for host in ("10.10.11.109", "192.168.0.30", "172.16.0.1", "127.0.0.1"):
+        for host in ("10.10.11.109", "192.168.0.30", "172.16.0.1", "127.0.0.1", "fc00::1", "fd12:3456::1", "::1"):
             self.assertTrue(_is_private_or_loopback(host), host)
 
     def test_public_addresses_are_refused(self) -> None:
-        # Documentation ranges (192.0.2.0/24, 198.51.100.0/24,
-        # 203.0.113.0/24) are treated as private by Python's ipaddress
-        # module, so the test uses genuinely routable public addresses.
-        for host in ("8.8.8.8", "1.1.1.1", "93.184.216.34", "not-an-address"):
+        for host in ("8.8.8.8", "1.1.1.1", "93.184.216.34",
+                     "192.0.2.1", "198.51.100.1", "203.0.113.1",
+                     "169.254.1.1", "fe80::1", "ff02::1", "not-an-address"):
             self.assertFalse(_is_private_or_loopback(host), host)
 
 
@@ -67,6 +67,36 @@ class ParserTests(unittest.TestCase):
         self.assertIn("port 8766 is reserved", error.getvalue())
         build_app.assert_not_called()
         server.assert_not_called()
+
+    def test_test_net_addresses_are_refused_before_startup(self) -> None:
+        for host in ("192.0.2.1", "198.51.100.1", "203.0.113.1"):
+            error = StringIO()
+            with self.subTest(host=host), redirect_stderr(error), \
+                    mock.patch("gateway.cli.build_application") as build_app:
+                self.assertEqual(main(["--host", host]), 2)
+            self.assertIn("not a private or loopback address", error.getvalue())
+            build_app.assert_not_called()
+
+    def test_address_is_local_uses_ipv6_probe_for_ula(self) -> None:
+        with mock.patch("socket.socket") as create_socket:
+            probe = create_socket.return_value.__enter__.return_value
+            self.assertTrue(_address_is_local("fd12:3456::1"))
+        create_socket.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
+        probe.bind.assert_called_once_with(("fd12:3456::1", 0, 0, 0))
+
+    def test_owned_ipv6_ula_uses_startup_path(self) -> None:
+        stdout = io.StringIO()
+        with mock.patch("socket.socket") as create_socket, \
+                mock.patch("gateway.cli.build_application", return_value=(None, None, None, None)) as build_app:
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(main(["--host", "fd12:3456::1", "--print-url"]), 0)
+        self.assertIn("http://[fd12:3456::1]:8765/owner/", stdout.getvalue())
+        create_socket.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
+        create_socket.return_value.__enter__.return_value.bind.assert_called_once_with(
+            ("fd12:3456::1", 0, 0, 0)
+        )
+        build_app.assert_called_once()
+        self.assertEqual(build_app.call_args.args[1], "fd12:3456::1")
 
     def test_allowed_explicit_private_port_remains_configurable(self) -> None:
         with mock.patch("gateway.cli._address_is_local", return_value=True), \
