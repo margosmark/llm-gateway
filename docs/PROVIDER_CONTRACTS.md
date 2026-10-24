@@ -533,6 +533,68 @@ personal plan. The gateway therefore:
 
 ---
 
+## OpenAI API (key)
+
+**Established from** OpenAI's official API reference at
+`developers.openai.com/api/reference` (List models, Create chat
+completion, Create response), read 2026-10-23, and from the OpenAI
+community feature request for a machine-readable capabilities endpoint
+(2026-09), which exists precisely because `GET /v1/models` publishes no
+capability fields.
+
+| Fact | Value |
+|---|---|
+| Catalogue endpoint | authenticated `GET https://api.openai.com/v1/models` |
+| Chat Completions inference | `POST https://api.openai.com/v1/chat/completions` |
+| Responses inference | `POST https://api.openai.com/v1/responses` |
+| Authentication | `Authorization: Bearer ***` |
+| Catalogue shape | `{"object": "list", "data": [{"id", "object", "created", "owned_by"}]}` — an id and nothing else |
+
+**The catalogue publishes no wire dialect, no capability flags, no
+context window, no price, no limit and no retention class.** The adapter
+therefore records every discovered model with an *unknown* dialect and
+Unknown for every published fact, exactly like an undocumented OpenCode
+Go id:
+
+* the router excludes such a route ("the wire dialect for this model is
+  not documented") and the adapter refuses the same value again at
+  `invoke` as defence in depth; the owner sets Chat Completions or
+  Responses per model through the manual model action, and the owner's
+  choice survives a later refresh because the provider publishes nothing
+  for that field (the T16 merge rule);
+* `supports_streaming` and `supports_function_tools` are true as the
+  **API-level defaults of the two served endpoints** — both document
+  `stream` and `tools` request parameters. A model that rejects either
+  answers with a classified upstream error instead of a silent drop;
+* `supports_image_input` stays **false for every discovered model**:
+  image input is a hard per-model capability and this catalogue carries
+  no evidence for any model — the same evidence rule OpenCode Go follows;
+* `reasoning_efforts` stays empty, so a requested effort is dropped as a
+  recorded preference rather than excluding the route.
+
+**No session header.** The provider documents no conversation identifier,
+so the router's derived `session_id` is not forwarded and nothing
+caller-controlled reaches the upstream under a session name.
+
+**Error classification** uses the shared vocabulary only: `401`/`403` →
+`auth` (including the local refusal when no credential is stored), `429` →
+`rate_limited`, `insufficient_quota` → `exhausted`, `402` → `exhausted`,
+`400`/`404`/`422` → `malformed`, `410` and `model_not_found` →
+`route_gone`, `5xx` → `transient`, anything else → `unknown`. A raw
+upstream status or body text never reaches an error message.
+
+**Credential isolation.** The key lives in
+`credentials/openai_api.json` (mode `0600` inside a `0700` directory),
+is readable only through the handle bound to `openai_api`, and never
+appears in state, status, `/version`, the request ledger, a log line or
+any response.
+
+**No implicit calls.** The catalogue is read only by the explicit Test
+and Refresh owner actions; a page load, a status read or a configuration
+save makes zero upstream requests.
+
+---
+
 ## Probing an upstream safely
 
 When a contract is unclear, probe it **from inside the container**, using the

@@ -18,6 +18,7 @@ from gateway.adapters.local_openai import FLAVORS as LOCAL_FLAVORS
 from gateway.adapters.local_openai import LocalOpenAIAdapter
 from gateway.adapters.opencode_go import OpenCodeGoAdapter
 from gateway.adapters.opencode_console import OpenCodeConsoleAdapter
+from gateway.adapters.openai_api import OpenAIApiAdapter
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.buildinfo import release_identity
@@ -457,6 +458,7 @@ def build_application(
         registry.register(
             LocalOpenAIAdapter(provider_id, credentials.provider_handle(provider_id), config)
         )
+    registry.register(OpenAIApiAdapter(credentials.provider_handle("openai_api")))
     reconciled: list[tuple[str, str]] = []
     with config.mutate() as snapshot:
         for provider_id in registry.provider_ids():

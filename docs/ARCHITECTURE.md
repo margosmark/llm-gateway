@@ -601,6 +601,13 @@ backstop for a process that exits without it.
     publishes no capability evidence and no tariff, so tools and image input
     start `False` and move only on owner approval (or Ollama's documented
     `POST /api/show`), and cost is never a number.
+* **OpenAI API** authenticates to the documented `GET /v1/models`
+  catalogue with a bearer token and serves both OpenAI dialects:
+  `/v1/chat/completions` for a Chat Completions route and `/v1/responses`
+  for a Responses route. The catalogue publishes no wire dialect, so a
+  discovered model keeps an unknown dialect until the owner sets it; an
+  undocumented dialect is refused rather than guessed, both in the router
+  and in the adapter.
 
 Adding a provider requires an adapter, model-capability handling, safe error
 classification, registry registration, UI/state treatment, tests, and an

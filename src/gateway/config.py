@@ -1069,6 +1069,7 @@ def default_provider_ids() -> tuple[str, ...]:
         "llama_cpp",
         "lm_studio",
         "ollama",
+        "openai_api",
     )
 
 

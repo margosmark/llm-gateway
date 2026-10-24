@@ -494,6 +494,25 @@ a provider or adds a ledger event; any fallback after a provider error is
 necessarily unevaluated. Treat the returned request body as sensitive: it is
 returned only to the caller and is not logged or retained.
 
+### OpenAI API
+
+`Providers → OpenAI API` takes an ordinary OpenAI platform API key in the
+same write-only form. **Save and test** stores the key and then validates it
+against `https://api.openai.com/v1/models`; Test and Refresh remain explicit
+actions, and a page load, a status read or a configuration save makes zero
+upstream requests. The key lives in its own owner-only credential file and is
+never returned by state, status, `/version`, the ledger or a log line.
+
+The OpenAI catalogue publishes a model id and nothing else, so a refreshed
+model shows **Unknown** for its dialect. Set it before routing to it: in
+Models & Routes, use *Enter a model id manually* with the same provider and
+model id and pick Chat Completions or Responses, then enable the row. Until
+then the router excludes the route with *"the wire dialect for this model is
+not documented"* rather than guessing an endpoint. The owner's dialect
+choice survives a later refresh. Limits, context windows, retention and
+image input stay **Unknown** for every discovered model — the gateway does
+not infer them from a model id.
+
 ---
 
 ## 3. Verifying a deployment
