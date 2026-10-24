@@ -106,6 +106,90 @@ CLASS_MESSAGES = {
 #: on the same route even though it may be served by another one.
 RETRYABLE_CLASSES = frozenset({ERROR_TRANSIENT, ERROR_RATE_LIMITED})
 
+#: The one thing a rejected request's *reason* may carry out of the
+#: provider's own body: the **name** of a field the provider refused.
+#:
+#: A rejected body is provider text and routinely echoes request content -
+#: prompt fragments, session identifiers, quoted values. The gateway copies
+#: **no** part of that text into an error, an attempt, or the durable
+#: ledger. Only an identifier-shaped token is retained, and only after it
+#: has been checked against this rule, so a hostile or oversized "field
+#: name" can never become gateway state.
+SAFE_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,63}$")
+
+#: Structural segments of a validation ``loc`` path that are not field
+#: names.
+_VALIDATION_LOC_PREFIXES = ("body", "query", "path", "header", "formData")
+
+#: The documented shape of a refusal that names a field in prose:
+#: ``Unsupported parameter: temperature``. Matched exactly, because a
+#: pattern that "finds a word" anywhere in a message would be a channel for
+#: provider text to reach the logs.
+_UNSUPPORTED_PARAMETER_MSG = re.compile(r"^Unsupported parameter: ([A-Za-z_][A-Za-z0-9_.\-]{0,63})$")
+
+#: How many field names one failure may report. A rejection is expected to
+#: name one; the bound keeps a pathological body from growing the ledger.
+MAX_REJECTED_FIELDS = 8
+
+
+def sanitize_rejected_fields(values: Any) -> tuple[str, ...]:
+    """Keep only identifier-shaped field names, deduplicated and bounded.
+
+    This is the *only* gate between an upstream rejection body and gateway
+    state. It is deliberately strict: anything that is not a plain field
+    name (values, prose, numbers, over-long tokens) is discarded, so no
+    prompt text, credential, or arbitrary provider string can ride along.
+    """
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return ()
+    kept: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        name = value.strip()
+        if not SAFE_FIELD_NAME.fullmatch(name):
+            continue
+        if name not in kept:
+            kept.append(name)
+        if len(kept) >= MAX_REJECTED_FIELDS:
+            break
+    return tuple(kept)
+
+
+def _names_from_validation_loc(loc: Any) -> list[str]:
+    """The top-level field a pydantic-style ``loc`` path points at."""
+    if not isinstance(loc, list):
+        return []
+    segments = [segment for segment in loc if isinstance(segment, str)]
+    while segments and segments[0] in _VALIDATION_LOC_PREFIXES:
+        segments = segments[1:]
+    return segments[:1]
+
+
+def rejected_fields_from_payload(payload: Any) -> tuple[str, ...]:
+    """Field names a *shape* rejection named, without retaining its text.
+
+    Two documented bodies name a field: a pydantic validation entry with a
+    ``loc`` path, and the ``Unsupported parameter: <name>`` message. Anything
+    else - a prose ``detail`` string, an unknown ``msg`` - yields nothing,
+    because copying it would put provider text into the ledger.
+    """
+    if not isinstance(payload, dict):
+        return ()
+    detail = payload.get("detail")
+    entries = detail if isinstance(detail, list) else [detail]
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        names.extend(_names_from_validation_loc(entry.get("loc")))
+        msg = entry.get("msg")
+        if isinstance(msg, str):
+            match = _UNSUPPORTED_PARAMETER_MSG.match(msg.strip())
+            if match:
+                names.append(match.group(1))
+    return sanitize_rejected_fields(names)
+
 #: The longest window a provider's ``Retry-After`` may ask for.
 #:
 #: The provider is the only party that knows how long its own allowance
@@ -178,6 +262,7 @@ class AdapterError(Exception):
         status: int | None = None,
         upstream_code: str | None = None,
         retry_after: int | None = None,
+        rejected_fields: Iterable[str] | None = None,
     ) -> None:
         self.error_class = error_class
         self.provider_id = provider_id
@@ -187,6 +272,11 @@ class AdapterError(Exception):
         #: is a hint from the provider about its own recovery, not evidence
         #: that the provider has recovered.
         self.retry_after = retry_after
+        #: The names of request fields the provider refused, when the
+        #: rejection named them. These are the one detail carried out of a
+        #: rejected body, and they arrive here already identifier-shaped, so
+        #: a rejection cannot smuggle request content into the ledger.
+        self.rejected_fields = sanitize_rejected_fields(rejected_fields)
         self.message = _safe_error_message(error_class, message)
         super().__init__(self.message)
 
@@ -203,6 +293,7 @@ class AdapterError(Exception):
             "upstream_code": self.upstream_code,
             "retryable": self.retryable,
             "retry_after": self.retry_after,
+            "rejected_fields": list(self.rejected_fields) or None,
         }
 
 
@@ -368,6 +459,13 @@ def error_from_response(
     """
     code = _extract_upstream_code(payload)
     error_class = classify_status(status, payload, code)
+    # A shape rejection names the field it refused. Carry that name - and
+    # nothing else from the body - so the failure is attributable, which is
+    # what the 2026-10-24 incident lacked: 93 malformed 502s whose offending
+    # field could not be identified from any log.
+    rejected_fields = (
+        rejected_fields_from_payload(payload) if error_class == ERROR_MALFORMED else ()
+    )
     return AdapterError(
         error_class=error_class,
         # Provider text (including codes and operation labels) is untrusted.
@@ -377,6 +475,7 @@ def error_from_response(
         status=status,
         upstream_code=code,
         retry_after=retry_after_from_headers(headers),
+        rejected_fields=rejected_fields,
     )
 
 

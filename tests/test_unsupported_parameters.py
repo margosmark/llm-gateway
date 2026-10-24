@@ -155,6 +155,54 @@ class UnsupportedParameterTests(unittest.TestCase):
 
         self.assertNotEqual(status, 200)
 
+    def test_fields_the_gateway_already_owns_are_not_declared(self) -> None:
+        """Two fields the backend refuses are deliberately absent.
+
+        ``store``: the adapter forces ``store: false`` on every request it
+        sends, so a client's value cannot reach the backend; declaring it
+        would record a substitution for a value the gateway never forwarded.
+
+        ``previous_response_id``: a capability difference, not a preference.
+        The router already excludes a route that cannot continue a
+        caller-supplied conversation, and dropping the field would silently
+        change which conversation the request continued. Such a request must
+        be refused, never repaired.
+        """
+        from gateway.adapters.chatgpt_codex import ChatGPTCodexAdapter
+
+        declared = ChatGPTCodexAdapter.UNSUPPORTED_PAYLOAD_FIELDS
+        self.assertNotIn("store", declared)
+        self.assertNotIn("previous_response_id", declared)
+
+    def test_the_round_two_fields_never_reach_the_backend_on_a_converted_request(self) -> None:
+        """Declaring a field must not disturb a request the bridge converts.
+
+        The bridge renders its own payload, so none of the round-2 fields
+        can appear on the wire and none may be reported as a substitution.
+        ``reasoning_effort`` is left out here on purpose: it *does* survive
+        conversion as the dialect's own ``reasoning`` object, and an
+        unpublished effort is a separate, already-covered substitution.
+        """
+        self.harness.registry.register(_CodexLikeAdapter())
+
+        status, _, _ = self._send(
+            {
+                "functions": [{"name": "lookup"}],
+                "function_call": "auto",
+                "max_tool_calls": 5,
+                "prediction": {"type": "content"},
+                "modalities": ["text"],
+                "web_search_options": {},
+                "safety_identifier": "abc",
+                "truncation": "auto",
+            }
+        )
+
+        self.assertEqual(status, 200)
+        # Nothing that the bridge does not emit may be reported as a
+        # substitution.
+        self.assertEqual(self._event()["degradations"], [])
+
 
 class ImagePlusParameterTests(unittest.TestCase):
     """The failure hit the image path: an image with a temperature still works."""
@@ -227,6 +275,15 @@ class ImagePlusParameterTests(unittest.TestCase):
             "max_tokens", "max_completion_tokens", "suffix", "stop_sequences",
         ):
             self.assertIn(field, declared, f"{field} is rejected upstream and must be declared")
+        # Round 2 (2026-10-24): the set had grown, and the incident proved
+        # an incomplete list is a 502 for the caller. Same probe, same
+        # control, both enabled models, text and image.
+        for field in (
+            "functions", "function_call", "max_tool_calls", "prediction",
+            "modalities", "web_search_options", "safety_identifier",
+            "truncation", "reasoning_effort",
+        ):
+            self.assertIn(field, declared, f"{field} is rejected upstream (round 2) and must be declared")
 
 
 if __name__ == "__main__":

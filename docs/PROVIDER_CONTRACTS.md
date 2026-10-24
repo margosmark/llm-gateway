@@ -339,6 +339,39 @@ GET  https://chatgpt.com/backend-api/codex/models?client_version=<semver>
   `response.completed` event carries the **complete final object**, including
   `output` and `usage` — which is what makes aggregation simple.
 
+### Request fields the backend refuses
+
+Ordinary Chat Completions fields are refused with
+`400 {"detail": [{"msg": "Unsupported parameter: <field>"}]}`. That status
+classifies as `malformed`, which is an owner-policy class: the router serves
+no fallback unless the owner has defined one, so a single innocent field
+became a 502 for the caller. The provider therefore declares the whole set
+in `CODEX_UNSUPPORTED_PAYLOAD_FIELDS`, and the router drops those fields
+**for that route only**, recording the substitution.
+
+The set was confirmed twice, always with the same differential method — one
+field added to an otherwise-accepted body, and the identical body minus that
+field reaching the account allowance error (`429 usage_limit_reached`), which
+proves validation runs *before* the allowance check:
+
+| Sweep | Scope | Fields refused |
+|---|---|---|
+| `scripts/probe_codex_param_sweep.py` (2026-10-21) | `gpt-5.6-terra`, text and image | `temperature`, `top_p`, `n`, `stop`, `stop_sequences`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs`, `seed`, `user`, `metadata`, `response_format`, `service_tier`, `max_tokens`, `max_completion_tokens`, `suffix` |
+| `scripts/probe_codex_param_sweep_round2.py` (2026-10-24) | both enabled models, text and image, plus fields the gateway itself adds | `functions`, `function_call`, `max_tool_calls`, `prediction`, `modalities`, `web_search_options`, `safety_identifier`, `truncation`, `reasoning_effort` (flat spelling), and `store: true` |
+| `scripts/probe_codex_param_sweep_round2b.py` (2026-10-24) | the spelling a converted request actually carries | `max_output_tokens` **accepted**; `max_tokens`, `max_completion_tokens`, `temperature`, `reasoning_effort` refused |
+
+Accepted on the same baseline: `stream_options`, `prompt_cache_key`,
+`tool_choice`, `parallel_tool_calls`, `include: []`.
+
+Two refused fields are deliberately **not** declared:
+
+* `store` — the adapter forces `store: false` on every request it sends, so
+  a client's value can never reach the backend.
+* `previous_response_id` — a capability difference, not a preference. The
+  router already excludes a route that cannot honour a caller-supplied
+  continuation, and dropping the field would silently change which
+  conversation the request continued.
+
 ### Context windows
 
 | Field | Meaning |

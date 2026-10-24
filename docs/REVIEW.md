@@ -1385,7 +1385,11 @@ old short-circuit condition.
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
 open**; R36 is the explicit
 post-deployment route replacement above, and R38 is the inert per-phase
-reasoning effort, which needs a routing change. R37 and R39 are closed. The register
+reasoning effort, which needs a routing change. R37 and R39 are closed. R40
+and R41 are closed with regression tests on the integrated tree; R41's third
+item is also an **operator** action, because no code change can redeploy a
+stale image - production is still running `f7cf5a4`, which predates the
+strip fix, and must be released from a current tree by hand. The register
 is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
@@ -1505,3 +1509,68 @@ candidate, with its regression:
    redacted; an Anthropic-specific regression drives a fake transport whose
    error body echoes the key in both `error.code` and the message.
    Evidence: `tests/test_anthropic_adapter.py::test_upstream_error_codes_and_credentials_never_echo`.
+
+### R41 — A malformed 502 named nothing: no field, no alias, no route — **closed**
+
+**Severity: high diagnostic, with an availability consequence.** On
+2026-10-24, 16:35:12Z-17:08:06Z, the production gateway returned **93
+`502 malformed`** responses to `POST /v1/chat/completions` in an exact
+three-per-minute cadence (the Hermes kanban decomposer retries at 0/1 s/2 s),
+followed by one `502 exhausted` at 17:08:35Z that opened a 3600 s
+provider-wide cooldown. None of the 93 could be diagnosed from inside the
+gateway, and three separate defects compounded:
+
+1. **The rejection body was discarded.** `error_from_response` kept only the
+   fixed class message, so nothing said which request field the Codex
+   backend had refused - the whole diagnosis for a shape rejection.
+2. **A failed request was unattributable.** `_handle_inference` recorded the
+   alias/attribution/request id on the request context only on the success
+   path, so the 502 access-log line carried no `alias`, no `provider`, no
+   `model`; and `_record()` filled `serving_provider`/`serving_model` from an
+   `Attribution` that the failure path never populated, so the durable
+   ledger row showed null, null for exactly the requests an operator most
+   needs.
+3. **The deployed strip list was stale.** The running image was `f7cf5a4`,
+   which predates `1d9fe2f`; the fields the client sends (`temperature`,
+   `max_tokens`) were still forwarded, and the backend refused them. The
+   rollback that installed that image left `/version` reporting the
+   rolled-back source revision against the *previous* release's image
+   digest, because `release.json` on the state volume is rewritten only by a
+   proper release - so the identity check could not see the rollback.
+
+**Fix.**
+
+* `AdapterError.rejected_fields` carries the names a shape rejection named.
+  Only identifier-shaped tokens leave a body: a pydantic `loc` path, or the
+  documented `Unsupported parameter: <field>` message. Prose, quoted values,
+  prompt echoes and over-long tokens are dropped by
+  `gateway.adapters.base.sanitize_rejected_fields`, which is the single gate
+  between upstream text and gateway state; the durable ledger re-validates
+  on read and *derives* `reason` from the class message plus the validated
+  names, never copying the row.
+* The failure path sets `serving_provider`/`serving_model` to the route it
+  failed on (the success path overwrites them with the serving route), and
+  `RoutingError.log_attribution` carries the alias and route into the
+  access-log line. The public error *body* stays generic; `log_attribution`
+  is deliberately absent from `to_dict()`.
+* The Codex strip list was re-swept live (see
+  `docs/PROVIDER_CONTRACTS.md`): nine further fields are refused with the
+  same 400 and the same control, and are now declared. `store` and
+  `previous_response_id` are refused by the backend but deliberately not
+  declared: the adapter already forces `store: false`, and dropping a
+  caller's continuation would change which conversation a request continued.
+
+**Regression evidence.** `tests/test_failure_attribution.py` (15 tests: the
+field-name gate, the durable row, the 502 access-log line, the owner-policy
+fallback, and the incident payload itself served with `temperature` dropped
+and `max_tokens` crossing as `max_output_tokens`),
+`tests/test_ledger_persistence.py::test_load_keeps_only_field_names_in_an_attempt`,
+`::test_round_trip_preserves_rejected_field_names`, and
+`tests/test_unsupported_parameters.py` (declared set, deliberate exclusions,
+no false substitutions). Full suite: **541 passed, 3 skipped**.
+
+Live evidence for the strip list: `scripts/probe_codex_param_sweep_round2.py`
+(both enabled models, text and image, run inside the production container)
+and `scripts/probe_codex_param_sweep_round2b.py` (confirms
+`max_output_tokens` - the spelling a converted request carries - is
+accepted, while both Chat spellings are refused).

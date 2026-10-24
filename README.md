@@ -385,7 +385,10 @@ and invoke every published route.
 
 Status, analytics and exports are metadata only. A request ledger records
 which alias was asked for, which provider and model actually served it, how
-long it took and how it ended — never what it said. Token counters come from
+long it took and how it ended — never what it said. A request that failed is
+recorded the same way, naming the route it failed on; when a provider
+refused a request's shape, the ledger and the error carry the **names** of
+the fields it refused and nothing else from its body. Token counters come from
 reported provider usage; local cost estimates use published prices only and
 are not provider bills. The Status page aggregates usage for the last 24 hours
 and displays the price source and observation date. No published price means
