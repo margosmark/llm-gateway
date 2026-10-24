@@ -570,10 +570,14 @@ with the traps that cost the most time:
 These are real, and the console reports them honestly rather than hiding
 them.
 
-* **Models on a non-OpenAI dialect cannot be served.** OpenCode Go serves
-  some models over Anthropic Messages or Google v1beta. The gateway does not
-  translate those dialects, so such a route is refused with a clear reason
-  and its dialect is shown as Unknown. It is not guessed.
+* **Not every catalogued model can be served.** OpenCode Go serves models
+  over Anthropic Messages and Google v1beta. Anthropic Messages is
+  translated by the native Anthropic provider (T14): once an
+  Anthropic-dialect upstream route is configured, it is served through
+  the OpenAI-compatible surface and its discovery follows the shared
+  adapter contract. Google v1beta is not translated — the owner declined
+  that work (T6, `docs/TODO.md`) — and a route the gateway cannot
+  translate is refused with a clear reason rather than guessed.
 * **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
   a web dashboard, but no machine-readable allowance API for a personal
   plan. The gateway calls no undocumented endpoint, so actual remaining
@@ -607,6 +611,20 @@ them.
   and any credit, discount or plan the owner holds, stay **Unknown**: the
   gateway has no tokenizer and no billing relationship with the provider, and
   a model with no published price reports **Unknown** rather than zero.
+* **No inbound `/v1/messages` endpoint.** Anthropic-shaped clients cannot
+  call the gateway natively; the inbound surface is planned as T5 in
+  `docs/TODO.md`. The native Anthropic provider is outbound only: it
+  serves Anthropic-dialect upstreams through the OpenAI-compatible API.
+
+R1, R8 and R9 are closed in `docs/REVIEW.md`: device-code polling
+completes, ChatGPT model refresh follows the shared adapter contract,
+and buffered cross-dialect responses are converted. These are covered
+by `tests/test_device_flow.py`, `tests/test_adapter_contract.py`, and
+`tests/test_buffered_bridge.py` respectively.
+
+The LAN-only HTTP trust model and the absence of a machine-readable
+provider allowance API remain genuine limitations; none imply
+provider-account or live-deployment verification.
 
 ---
 
