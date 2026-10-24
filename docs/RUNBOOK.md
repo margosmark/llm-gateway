@@ -387,7 +387,12 @@ to OpenCode Console for that direct request; they are not retained by the gatewa
 
 The Status ledger is metadata-only and asynchronously persisted to
 `request-ledger.db` in the state volume (SQLite, WAL, one writer thread -
-the request hot path never waits on it). Retention is by AGE ONLY: rows
+the request hot path never waits on it). For inference requests, a validated
+client `X-Request-Id` is retained as `client_request_id` beside the gateway's
+authoritative `request_id`; client IDs never select or amend ledger records.
+Invalid or repeated `X-Request-Id` headers are rejected without echoing the
+value. IDs are limited to 128 ASCII letters, digits, dots, underscores,
+hyphens, colons or dashes. Retention is by AGE ONLY: rows
 older than 30 days are pruned on load and on a daily timer, with no size
 cap on history, so the full window survives at the measured write rate
 (~5,200 requests/day, ~156k rows over 30 days, tens of MiB on disk). The
