@@ -49,6 +49,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -118,6 +119,9 @@ class CircuitEntry:
     #: exists.
     probe_in_flight: bool = False
     probe_started_at: float = 0.0
+    #: The token of the request that claimed the probe, so that only the
+    #: claim's owner may release it. **In memory only**, like the flag.
+    probe_owner: str | None = None
 
     @property
     def key(self) -> str:
@@ -208,12 +212,43 @@ class CircuitStore:
 
     # --- queries ---------------------------------------------------------
 
-    def check(self, provider: str, model: str) -> tuple[bool, str]:
-        """May this route be used?
+    def preview(self, provider: str, model: str) -> tuple[bool, str]:
+        """Is this route usable right now, without claiming anything?
 
-        Returns ``(allowed, reason)``. The reason explains a refusal, and
-        names the window that caused it.
+        This is the check for **enumeration**. It never mutates the store,
+        because a candidate that is assembled but never invoked must not
+        hold a recovery probe: a claim that is never used would keep the
+        route on its fallback until the probe timed out.
         """
+        return self._check(provider, model, claim=False, owner=None)
+
+    def check(self, provider: str, model: str) -> tuple[bool, str]:
+        """May this route be used, claiming a half-open recovery probe?
+
+        This is the **claim**, kept under its historical name for callers
+        that only need the verdict. An invocation path should use
+        :meth:`claim` instead, because only the claim's owner can release
+        it.
+        """
+        allowed, reason, _owner = self.claim(provider, model)
+        return allowed, reason
+
+    def claim(self, provider: str, model: str) -> tuple[bool, str, str]:
+        """Atomically check eligibility and claim a half-open probe.
+
+        Returns ``(allowed, reason, owner)``. The owner token identifies
+        this claim, so that only the request that made it can release it:
+        a request that gives up must never clear a probe that another
+        request is still running.
+        """
+        owner = uuid.uuid4().hex
+        allowed, reason = self._check(provider, model, claim=True, owner=owner)
+        return allowed, reason, owner
+
+    def _check(
+        self, provider: str, model: str, *, claim: bool, owner: str | None
+    ) -> tuple[bool, str]:
+        """Return route eligibility; only an invocation path may claim."""
         with self._lock:
             now = self._now()
             self._prune(now)
@@ -234,9 +269,11 @@ class CircuitStore:
                     )
             # Nothing is holding the route. Claim the probe, if there is a
             # half-open circuit to probe.
-            for entry in entries:
-                entry.probe_in_flight = True
-                entry.probe_started_at = now
+            if claim:
+                for entry in entries:
+                    entry.probe_in_flight = True
+                    entry.probe_started_at = now
+                    entry.probe_owner = owner
             return True, ""
 
     def snapshot(self) -> dict[str, int]:
@@ -416,6 +453,24 @@ class CircuitStore:
             self._prune(now)
             self._persist()
 
+    def release_probe(self, provider: str, model: str, owner: str | None = None) -> None:
+        """Release a claimed probe when the invocation did not happen.
+
+        With an ``owner`` token, only the claim's own holder may release
+        it: a request that gives up must never clear a probe that another
+        request is still running.
+        """
+        with self._lock:
+            for key in (self._provider_key(provider), self._route_key(provider, model)):
+                entry = self._entries.get(key)
+                if entry is None:
+                    continue
+                if owner is not None and entry.probe_owner != owner:
+                    continue
+                entry.probe_in_flight = False
+                entry.probe_started_at = 0.0
+                entry.probe_owner = None
+
     def record_success(self, provider: str, model: str) -> None:
         """Record a success, which closes the route's circuit.
 
@@ -492,6 +547,7 @@ class CircuitStore:
         if now - entry.probe_started_at > PROBE_TIMEOUT_SECONDS:
             # The probe was abandoned. It must not block the route for ever.
             entry.probe_in_flight = False
+            entry.probe_owner = None
             return False
         return True
 
