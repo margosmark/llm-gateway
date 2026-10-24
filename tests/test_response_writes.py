@@ -67,6 +67,12 @@ class _FakeServer:
 
     def __init__(self, result: object) -> None:
         self.application = lambda request: result
+        self.rate_limiter = _AllowAllRateLimiter()
+
+
+class _AllowAllRateLimiter:
+    def allow(self, client_address: str) -> bool:
+        return True
 
 
 def _serve(request_bytes: bytes, result: object = None) -> _CountingSocket:
