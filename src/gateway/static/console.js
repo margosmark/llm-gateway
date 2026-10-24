@@ -150,33 +150,51 @@
   }
 
   // Recursively turn unsafe digit strings in known integer fields into
-  // raw-int markers, so serialization can write their exact digits.
-  function exactify(value, key) {
+  // raw-int markers, so serialization can write their exact digits. Counts
+  // every marker it leaves in the tree (minted here or passed in), so
+  // emitJson can prove each one was spliced back out.
+  function exactify(value, key, state) {
     if (typeof value === "string") {
-      return exactIntegerKey(key) && isUnsafeInteger(value) ? rawInt(value) : value;
+      if (exactIntegerKey(key) && isUnsafeInteger(value)) {
+        state.markers += 1;
+        return rawInt(value);
+      }
+      return value;
     }
     if (Array.isArray(value)) {
-      return value.map(function (item) { return exactify(item, key); });
+      return value.map(function (item) { return exactify(item, key, state); });
     }
     if (value && typeof value === "object") {
-      if (typeof value.__raw_int__ === "string") return value;
+      if (typeof value.__raw_int__ === "string") {
+        state.markers += 1;
+        return value;
+      }
       var out = {};
-      Object.keys(value).forEach(function (name) { out[name] = exactify(value[name], name); });
+      Object.keys(value).forEach(function (name) { out[name] = exactify(value[name], name, state); });
       return out;
     }
     return value;
   }
 
   // Serialize a value, splicing raw-int markers back into exact digits.
-  // The pattern can only come from a marker this file minted: JSON.stringify
-  // escapes quotes inside strings, so string content can never produce an
-  // unescaped `{"__raw_int__":"<digits>"}` object in the output.
+  // Only a minted marker counts, and every counted marker must splice, so
+  // the refusal is minted-vs-spliced rather than a substring test: string
+  // content that merely mentions `__raw_int__` passes through untouched
+  // (JSON.stringify escapes quotes inside strings, so text can neither
+  // mint a marker nor match the splice pattern, whose braces and quotes
+  // must be unescaped). The pattern is whitespace-tolerant so a
+  // pretty-printed body (backup export) splices too.
   function emitJson(value, space) {
-    var payload = JSON.stringify(exactify(value), null, space);
+    var state = { markers: 0 };
+    var payload = JSON.stringify(exactify(value, undefined, state), null, space);
+    var spliced = 0;
     if (payload.indexOf("__raw_int__") !== -1) {
-      payload = payload.replace(/\{"__raw_int__":"(-?[0-9]+)"\}/g, "$1");
+      payload = payload.replace(/\{\s*"__raw_int__"\s*:\s*"(-?[0-9]+)"\s*\}/g, function (match, digits) {
+        spliced += 1;
+        return digits;
+      });
     }
-    if (payload.indexOf("__raw_int__") !== -1) {
+    if (spliced !== state.markers) {
       throw new Error("refusing to send an unspliced exact-integer marker");
     }
     return payload;
@@ -3268,9 +3286,14 @@
       }
       var policy = editing && editing.policy ? editing.policy : null;
       // Removal is an explicit owner action and takes precedence over
-      // any populated policy controls. Otherwise send the editor's full
-      // intended policy explicitly rather than relying on preservation.
-      if (!removeRequestPolicy.checked) {
+      // any populated policy controls: it submits an explicit null so
+      // the server clears the block (resubmitting the old policy
+      // instead would report "unchanged" and leave it in force).
+      // Otherwise send the editor's full intended policy explicitly
+      // rather than relying on preservation.
+      if (removeRequestPolicy.checked) {
+        policy = null;
+      } else {
         var policyDefaultsOut = {};
         var policyCapsOut = {};
         var policyDenyOut = {};

@@ -496,7 +496,9 @@ as before. The block lives in the alias's `policy` entry in the
 configuration. The alias editor shows the current policy and lets the owner
 edit defaults, caps, and deny rules using bounded numeric fields and the
 canonical closed thinking-level vocabulary. Saving sends the editor's
-intended policy explicitly; **Remove request policy** clears it. The save
+intended policy explicitly; **Remove request policy** clears it, submitting
+an explicit `null` so the server drops the block rather than keeping a
+resubmitted copy. The save
 response reports what happened (`preserved`, `set`, `changed`, `cleared` or
 `unchanged`), and the console includes that outcome in its confirmation.
 Integer token counts are carried digit for digit: the console parses and
