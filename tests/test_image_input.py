@@ -22,7 +22,8 @@ import unittest
 from pathlib import Path
 
 from gateway.adapters.base import ProviderRequest, ProviderResponse, TestResult
-from gateway.bridge.requests import convert_request, payload_has_image_input
+from gateway.bridge.model import ConversionError
+from gateway.bridge.requests import convert_request, from_responses, payload_has_image_input
 from gateway.config import (
     Alias,
     JevInference,
@@ -128,6 +129,72 @@ class ImageDetectionTests(unittest.TestCase):
             [p for p in content if p.get("type") == "text"][0]["text"], "look"
         )
 
+    def test_a_top_level_responses_image_item_is_refused_not_served(self) -> None:
+        """A root-level ``input_image`` item is malformed for every route.
+
+        The Responses contract carries an image as an ``input_image``
+        **content part inside a message**. A top-level item claiming to be
+        an image used to bypass capability detection entirely - it has no
+        ``content`` to inspect - and same-dialect pass-through forwarded it
+        to a text-only adapter that silently ignored it. Every read of the
+        root now refuses it instead.
+        """
+        finding = {"model": "m", "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "look"}]},
+            {"type": "input_image", "image_url": "data:image/png;base64,AA"},
+        ]}
+        with self.assertRaises(ConversionError) as ctx:
+            payload_has_image_input(finding, DIALECT_OPENAI_RESPONSES)
+        self.assertEqual(ctx.exception.capability, "image_input")
+        for source, target in (
+            (DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_RESPONSES),
+            (DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_CHAT),
+        ):
+            with self.subTest(source=source, target=target), self.assertRaises(ConversionError):
+                convert_request(finding, source, target)
+
+    def test_every_malformed_top_level_image_shape_is_refused(self) -> None:
+        for item in (
+            {"type": "input_image"},  # no URL at all
+            {"type": "input_image", "image_url": {"url": "data:image/png;base64,AA"}},
+            {"type": "image_url", "image_url": "https://example.com/a.png"},
+            {"image_url": "https://example.com/a.png"},  # no type at all
+            {"type": "input_image", "image_url": "file:///etc/passwd"},
+        ):
+            payload = {"model": "m", "input": [item]}
+            with self.subTest(item=item), self.assertRaises(ConversionError):
+                payload_has_image_input(payload, DIALECT_OPENAI_RESPONSES)
+
+    def test_a_non_object_responses_input_item_is_refused(self) -> None:
+        for entry in (42, [], None, True):
+            payload = {"model": "m", "input": [entry]}
+            with self.subTest(entry=entry), self.assertRaises(ConversionError):
+                payload_has_image_input(payload, DIALECT_OPENAI_RESPONSES)
+
+    def test_detection_keeps_non_image_root_items_the_pass_through_owns(self) -> None:
+        """A typed item that is not an image is not refused by detection.
+
+        Same-dialect pass-through forwards it (the provider defines what it
+        accepts); only a *cross-dialect* conversion refuses what it cannot
+        express. Detection must not over-reject a text request that carries
+        such history.
+        """
+        payload = {"model": "m", "input": [
+            {"role": "user", "content": "hi"},
+            {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+            {"type": "reasoning", "summary": []},
+        ]}
+        self.assertFalse(payload_has_image_input(payload, DIALECT_OPENAI_RESPONSES))
+        forwarded = convert_request(
+            payload, DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_RESPONSES
+        )
+        self.assertEqual(len(forwarded["input"]), 4)
+        # A cross-dialect conversion cannot express that item, so it refuses
+        # rather than silently dropping it from the conversation.
+        with self.assertRaises(ConversionError):
+            from_responses(payload)
+
 
 class ImageCapableAdapter:
     """A provider that answers any request; it records what it was sent."""
@@ -220,9 +287,11 @@ class RouterImageEnforcementTests(unittest.TestCase):
     def test_image_request_with_no_capable_route_fails_closed_at_the_gateway(self) -> None:
         harness, primary = self._harness(primary_images=False, fallback_images=False)
         self.addCleanup(harness.close)
-        status, payload, _ = harness.request("POST", "/v1/chat/completions", body=_image_payload())
+        status, payload, headers = harness.request("POST", "/v1/chat/completions", body=_image_payload())
         self.assertEqual(status, 503)
         self.assertEqual(payload["error"]["type"], "no_eligible_route")
+        self.assertNotIn("retry_after_seconds", payload["error"])
+        self.assertNotIn("Retry-After", dict(headers))
         self.assertEqual(primary.calls, [])
         # The public refusal is generic: no upstream provider or model
         # identifiers may leak into the response payload.
@@ -231,6 +300,18 @@ class RouterImageEnforcementTests(unittest.TestCase):
             self.assertNotIn(identifier, serialized)
         self.assertNotIn("detail", payload["error"])
 
+    def test_circuit_expiry_is_returned_as_bounded_retry_after(self) -> None:
+        harness, primary = self._harness(primary_images=False, fallback_images=False)
+        self.addCleanup(harness.close)
+        harness.router.circuits.set(FAKE_PROVIDER, 900, model="gpt-6-luna")
+        status, payload, headers = harness.request("POST", "/v1/chat/completions", body=_image_payload())
+        self.assertEqual(status, 503)
+        retry_after = int(dict(headers)["Retry-After"])
+        self.assertGreaterEqual(retry_after, 895)
+        self.assertLessEqual(retry_after, 900)
+        self.assertEqual(payload["error"]["retry_after_seconds"], retry_after)
+        self.assertEqual(primary.calls, [])
+
     def test_a_text_only_request_is_unaffected_by_the_image_rule(self) -> None:
         harness, primary = self._harness(primary_images=False, fallback_images=False)
         self.addCleanup(harness.close)
@@ -238,6 +319,136 @@ class RouterImageEnforcementTests(unittest.TestCase):
             "POST", "/v1/chat/completions",
             body={"model": "coding", "messages": [{"role": "user", "content": "synthetic"}]},
         )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(primary.calls), 1)
+
+
+class ResponsesImageAdapter(ImageCapableAdapter):
+    """An image-capable Responses route answering with a Responses object."""
+
+    def invoke(self, request: ProviderRequest) -> ProviderResponse:
+        self.calls.append(request)
+        body = json.dumps({
+            "id": "resp_fake", "object": "response", "model": request.model,
+            "status": "completed",
+            "output": [{"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }).encode("utf-8")
+        return ProviderResponse(200, {}, body, content_type="application/json", dialect=self.dialect)
+
+
+class TopLevelResponsesImageItemTests(unittest.TestCase):
+    """A top-level ``input_image`` item is refused at the API surface.
+
+    Regression for the security finding on candidate ``0696c8c2``: a
+    malformed top-level Responses ``{"type": "input_image", ...}`` item
+    carried no ``content``, so capability detection missed it and
+    same-dialect pass-through forwarded it to a text-only adapter, which
+    silently ignored it (200, one adapter call, image lost). The refusal
+    now happens before any route is chosen, with zero adapter calls.
+    """
+
+    def _harness(self, *, images: bool) -> tuple[GatewayHarness, ResponsesImageAdapter]:
+        harness = GatewayHarness()
+        primary = ResponsesImageAdapter(FAKE_PROVIDER, DIALECT_OPENAI_RESPONSES)
+        harness.registry.register(primary)
+        with harness.config.mutate() as config:
+            config.providers[FAKE_PROVIDER] = ProviderState(
+                provider_id=FAKE_PROVIDER, kind=FAKE_PROVIDER, state="connected",
+                models={"gpt-6-luna": ModelEntry(
+                    model_id="gpt-6-luna", enabled=True, dialect=DIALECT_OPENAI_RESPONSES,
+                    source="discovered", supports_image_input=images)},
+            )
+            config.aliases["coding"] = _alias_with_routes(
+                RouteRef(FAKE_PROVIDER, "gpt-6-luna"), [], name="coding")
+        return harness, primary
+
+    @staticmethod
+    def _finding_payload() -> dict:
+        """The exact probe the security gate reported: text message, then a
+        top-level image-like item, against a text-only configured route."""
+        return {"model": "coding", "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "look"}]},
+            {"type": "input_image", "image_url": "data:image/png;base64,AA"},
+        ]}
+
+    def _assert_refused(self, body: dict) -> None:
+        self.assertEqual(body["error"]["type"], "conversion_refused")
+        self.assertEqual(body["error"]["capability"], "image_input")
+        # The refusal is the gateway's own: no upstream identifiers leak.
+        serialized = json.dumps(body)
+        for identifier in (FAKE_PROVIDER, "gpt-6-luna"):
+            self.assertNotIn(identifier, serialized)
+
+    def test_the_reported_bypass_is_refused_with_zero_adapter_calls(self) -> None:
+        harness, primary = self._harness(images=False)
+        self.addCleanup(harness.close)
+        status, body, _ = harness.request(
+            "POST", "/v1/responses", body=self._finding_payload())
+        self.assertEqual(status, 422)
+        self._assert_refused(body)
+        self.assertEqual(primary.calls, [], "no adapter may see the malformed item")
+
+    def test_an_image_capable_route_does_not_make_the_item_valid(self) -> None:
+        # The item is malformed for every route: an image-capable model
+        # would still be handed a root item its upstream does not accept.
+        harness, primary = self._harness(images=True)
+        self.addCleanup(harness.close)
+        status, body, _ = harness.request(
+            "POST", "/v1/responses", body=self._finding_payload())
+        self.assertEqual(status, 422)
+        self._assert_refused(body)
+        self.assertEqual(primary.calls, [])
+
+    def test_every_malformed_top_level_shape_is_refused_over_http(self) -> None:
+        for item in (
+            {"type": "input_image"},  # no URL at all
+            {"type": "input_image", "image_url": {"url": "data:image/png;base64,AA"}},
+            {"image_url": "https://example.com/a.png"},  # no type at all
+            {"type": "input_image", "image_url": "file:///etc/passwd"},
+        ):
+            with self.subTest(item=item):
+                harness, primary = self._harness(images=False)
+                self.addCleanup(harness.close)
+                status, body, _ = harness.request("POST", "/v1/responses", body={
+                    "model": "coding", "input": [{"role": "user", "content": "hi"}, item]})
+                self.assertEqual(status, 422)
+                self._assert_refused(body)
+                self.assertEqual(primary.calls, [])
+
+    def test_a_valid_responses_image_still_reaches_an_image_capable_route(self) -> None:
+        """No regression of the merged P0 on the Responses entry point."""
+        harness, primary = self._harness(images=True)
+        self.addCleanup(harness.close)
+        status, _, _ = harness.request("POST", "/v1/responses", body={
+            "model": "coding", "input": [{"role": "user", "content": [
+                {"type": "input_text", "text": "look"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AA"},
+            ]}]})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(primary.calls), 1)
+        self.assertTrue(
+            payload_has_image_input(primary.calls[0].payload, DIALECT_OPENAI_RESPONSES))
+        self.assertEqual(harness.router._ledger.recent()[0]["serving_provider"], FAKE_PROVIDER)
+
+    def test_a_valid_responses_image_fails_closed_with_only_text_only_routes(self) -> None:
+        harness, primary = self._harness(images=False)
+        self.addCleanup(harness.close)
+        status, body, _ = harness.request("POST", "/v1/responses", body={
+            "model": "coding", "input": [{"role": "user", "content": [
+                {"type": "input_text", "text": "look"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AA"},
+            ]}]})
+        self.assertEqual(status, 503)
+        self.assertEqual(body["error"]["type"], "no_eligible_route")
+        self.assertEqual(primary.calls, [])
+
+    def test_a_plain_responses_text_request_is_unaffected(self) -> None:
+        harness, primary = self._harness(images=False)
+        self.addCleanup(harness.close)
+        status, _, _ = harness.request(
+            "POST", "/v1/responses", body={"model": "coding", "input": "hello"})
         self.assertEqual(status, 200)
         self.assertEqual(len(primary.calls), 1)
 

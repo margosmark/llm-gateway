@@ -222,6 +222,10 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.stop()
         snapshots.stop()
+        # Give back every pooled provider connection. Without this the
+        # sockets are only reclaimed when the process exits, and a stop
+        # that returns while connections are still open is not a stop.
+        app.registry.close()
     return 0
 
 

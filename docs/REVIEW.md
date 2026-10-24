@@ -1380,12 +1380,202 @@ PYTHONPATH=src python3 -m unittest tests.test_browser_console -v` (1 test
 passed). The console source-string assertion was also updated to reject the
 old short-circuit condition.
 
+### R42 — A half-open recovery probe was claimed during candidate enumeration, so one ineligible request pinned its primary to a fallback — **closed**
+
+**Severity: high availability correctness.** *(closed; the claim moved to the
+invocation boundary and every claim now carries an owner)*
+
+`Router.candidates()` asked the circuit store `check()` for every route while
+it was only *assembling* the candidate list (`src/gateway/core/routing.py`).
+`check()` was not a question — it atomically **claimed** the half-open
+recovery probe as a side effect. Any candidate that was then dropped never
+invoked anything, so nothing ever released that claim, and the route stayed
+excluded until `PROBE_TIMEOUT_SECONDS` (300s) had passed.
+
+The provider had already recovered by then: the window that put the circuit
+half-open had expired, and the probe was the mechanism meant to confirm the
+recovery. Instead the probe was spent on a request that could never have used
+the route, and every compatible request in the next five minutes was served
+by a fallback while the primary sat idle.
+
+Three enumeration paths could do this, and all three were reachable in
+normal operation:
+
+* **capability exclusion** — an image request against a primary that does not
+  publish image input (`supports_image_input`). The primary was excluded one
+  line *after* its probe had been claimed, so one image request pinned the
+  text-serving primary to its fallback;
+* **phase routing** — a caller phase hint that selects a different route. The
+  unselected primary still had its probe claimed, so the route phase routing
+  deliberately did not choose was the one left wedged;
+* **conversion refusal** — `convert_request()` raising `ConversionError`
+  before `adapter.invoke()`. The candidate was refused with its claim held.
+
+A second defect compounded it: `release_probe()` cleared the flag for
+*any* caller. A request that gave up could therefore release a probe that
+**another** request was actively serving, silently admitting a second
+concurrent invocation to a half-open route — the exact condition the probe
+exists to prevent.
+
+**Fix.** `CircuitStore.preview()` is a pure query: it answers eligibility and
+never mutates, so enumeration cannot spend a probe. The claim is
+`CircuitStore.claim()`, called in `Router.invoke()` **immediately before
+`adapter.invoke()`**, after every local check that could decline the route
+has passed. Each claim returns an owner token stored on the entry
+(`CircuitEntry.probe_owner`, in memory only, like the flag itself), and
+`release_probe(provider, model, owner)` refuses to clear a claim whose token
+does not match. A candidate that is skipped now records its skip and
+continues without touching the store, preserving the fallback attribution
+and the skip reason for the primary.
+
+Both the `AdapterError` path and the new `except Exception` path release the
+claim with the owner token. The latter matters because an unexpected failure
+is not evidence that a circuit should open, and it is not a probe that is
+still running: without the release, a crash inside `invoke()` wedged the
+route for the full probe timeout.
+Those two release sites covered only `invoke()` itself; R43 replaced them
+with a single guard that covers every post-claim exit.
+
+**Regression evidence.** `tests/test_probe_claim.py` (10 tests) covers each
+enumeration path above and asserts both the absence of a stuck claim
+(`_probe_held`) and the user-visible property that an immediate compatible
+request reaches the primary rather than waiting out the window. Concurrency
+is covered deterministically with a blocking adapter that reports when it is
+inside `invoke()`: a second request arriving mid-probe is served by the
+fallback, the primary sees exactly one invocation, and the ledger records
+the live-probe skip reason. Ownership is covered at store level: a foreign
+owner token cannot release a live claim. Verified by reverting only
+`candidates()` to the claiming `check()` — 6 of the 10 tests fail, and pass
+again with the fix in place.
+
+`PYTHONPATH=src python3 -m pytest -q` → 491 passed, 2 skipped, 93 subtests
+passed. `ruff check` on the four changed files reports only the pre-existing
+`F401` findings already present on the base revision. `git diff --check`
+clean.
+
+### R43 — An exception raised after a successful probe claim escaped every release path, so the route refused probes until the timeout — **closed**
+
+**Severity: high availability correctness.** *(closed; one guard now
+releases the claim on every post-claim exit)*
+
+`Router.invoke()` claimed the half-open probe and then ran a `try` whose
+handlers were **siblings**, not parents: `except AdapterError` and
+`except Exception` both covered only `candidate.adapter.invoke()`. An
+exception raised *inside* the `AdapterError` handler — while
+`_maybe_open_circuit()` was processing the failure, before that handler's
+own `release_probe()` call — is not caught by a sibling `except`, so it
+escaped with the claim still held. Anything raised after a successful
+invocation, in the post-claim recording (`record_success()`, the ledger
+write), was worse: that code sat outside the `try` altogether.
+
+The security probe reproduced it as an HTTP 500 with the primary's
+in-flight claim still held. The route then refused every compatible
+request for the rest of `PROBE_TIMEOUT_SECONDS` (300s) while nothing was
+probing it — the same wedge R42 set out to remove, re-entered through a
+different path.
+
+**Fix.** The whole post-claim block now runs under one `try ... finally`
+(`src/gateway/core/routing.py`), and the `finally` releases **this claim's
+owner token**: success, a failure that falls back, and every exception all
+pass through it. The two earlier release sites — inside the
+`AdapterError` handler and inside the invoke-only `except Exception` — are
+gone, leaving one release point and one invariant. Releasing an
+already-released claim is a no-op, and `release_probe()` still refuses an
+owner token that does not match, so a foreign request's live probe is
+never cleared by this path and normal success/failure behaviour is
+unchanged.
+
+**Regression evidence.** `tests/test_probe_claim.py` (12 tests) adds
+`test_an_exception_while_the_failure_is_processed_releases_the_claim` — a
+synthetic exception injected into `_maybe_open_circuit()` after a
+half-open claim — and
+`test_an_exception_after_a_successful_probe_releases_the_claim`, where
+`record_success()` raises after a successful probe. Both assert the claim
+is released immediately (`_probe_held`) and that the next compatible
+request claims the probe and closes the circuit. Verified by restoring
+only `src/gateway/core/routing.py` to the candidate revision: both tests
+fail with `AssertionError: True is not false : ... left the probe
+claimed`, and pass again with the fix in place.
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+Ran 494 tests ... OK (skipped=2)
+
+python3 -m compileall -q src tests                        OK
+node tests/console_dom_test.js                            all checks passed
+node tests/test_opencode_catalog.mjs                      OpenCode catalogue checks passed
+PYTHONPATH=src python3 -m gateway --help                  OK
+git diff --check                                          clean
+```
+
+### R44 — The read budget never reached the socket on the streaming path, so every SSE frame was judged by the connect budget — **closed**
+
+**Severity: high availability correctness.** *(closed; the socket is
+armed directly once the head is in, with a socket-level regression)*
+
+`UpstreamClient._open()` armed the connect budget on the socket before
+`getresponse()` — the head of a stream is a stall, by design — and then
+re-armed the read budget **through the connection**:
+`self._arm(connection, self.timeout)`. For a response without a
+`Content-Length` — every SSE stream — `will_close` is true and
+`http.client.HTTPConnection.getresponse()` passes the socket to the
+response by closing the connection's reference to it, so
+`connection.sock` is `None` from then on while the socket itself lives
+on inside the response's file object. The follow-up `_arm` is guarded by
+`if connection.sock is not None:` and became a silent no-op: the socket
+kept the connect budget for the whole stream.
+
+Impact: with stock budgets (read 120s, connect 10s) any inter-frame gap
+over 10s aborted a stream that was still progressing — a long reasoning
+pause is exactly this case — on **every** adapter, since all four
+construct `UpstreamClient(user_agent=USER_AGENT)` with the stock
+budgets. Measured at socket level by QA (`t_099ed4e6`) on candidate
+`72d47b3`: with `timeout=2.0, connect_timeout=0.6`, the timeout in force
+for every frame read was 0.6, never 2.0, and a 12s gap aborted the
+stream at elapsed 10.01s. The module docstring's own contract — every
+frame of a stream judged by the read budget — was violated by the code.
+
+**Fix.** `_open()` holds the socket reference captured just before
+`getresponse()` and arms the read budget on *that* socket once the head
+is in (`src/gateway/adapters/http_client.py`). The connect budget still
+judges the streamed head (unchanged), and the buffered path is untouched:
+a content-length response keeps `will_close` false, so the connection
+still holds its socket there.
+
+**Regression evidence.**
+`tests/test_upstream_timeouts.py::test_a_frame_gap_beyond_the_connect_budget_is_judged_by_the_read_budget`:
+two frames with a single 1.5s inter-frame gap against
+`connect_timeout=0.6, timeout=3.0` — the gap is above the connect budget
+and within the read budget. It asserts (a) a spy on
+`http.client.HTTPResponse.readline` observes the read budget (3.0) as
+the socket timeout in force for every frame read, (b) both frames
+arrive, and (c) the stream is waited out past the gap. Verified by
+running the new test against the unmodified candidate `_open()`: it
+fails with `AdapterError: the provider stream stalled before the response
+finished` at the 0.6s connect budget — the exact defect QA measured — and
+passes with the fix in place. The prior test only used per-frame gaps
+*below* the connect budget (0.35s vs 0.4s), so it could not see which
+budget governed the frames; this one crosses the connect budget with a
+single gap.
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+Ran 563 tests in 57.5s ... OK (skipped=3)
+
+python3 -m compileall -q src tests                        OK
+node tests/console_dom_test.js                            all checks passed
+node tests/test_opencode_catalog.mjs                      OpenCode catalogue checks passed
+PYTHONPATH=src python3 -m gateway --help                  OK
+git diff --check                                          clean
+```
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
 open**; R36 is the explicit
 post-deployment route replacement above, and R38 is the inert per-phase
-reasoning effort, which needs a routing change. R37 and R39 are closed. The register
+reasoning effort, which needs a routing change. R37, R39, R40, R41, R42,
+R43, R44 and R45 are closed. The register
 is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
@@ -1552,3 +1742,39 @@ skip, Origin refusal clears nothing, state policy/telemetry),
 `tests/test_cli.py` (flag/env knob, invalid values refused at parse,
 cap reaches the circuit store). Operator runbook §8/§9 document the
 recovery procedure and the retired legacy systemd unit.
+### R45 — A malformed top-level Responses `input_image` item bypassed capability detection and reached a text-only adapter — **closed**
+
+**Severity: P2 / medium (security).** The security gate on the image
+remediation candidate `0696c8c2` found that a Responses `input` item of the
+exact shape `{"type": "input_image", "image_url": "data:image/png;base64,AA"}`
+placed at the **top level** of the `input` array - i.e. as an item, not as a
+content part inside a message - bypassed every check. The item carries no
+`content` key, so `payload_has_image_input` saw no image and reported the
+request as text-only; same-dialect pass-through then forwarded the item
+verbatim to a text-only adapter, which silently ignored it. The caller
+received `200` and lost the image without an error. The Responses contract
+carries an image as an `input_image` **content part inside a message item**;
+a root-level image-like item is malformed for every route.
+
+**Fix.** The root of a Responses `input` array is now validated by one shared
+check (`_validated_responses_root_items` in `src/gateway/bridge/requests.py`)
+that every reader of the root consults: capability detection
+(`payload_has_image_input`), dialect conversion (`from_responses`) and
+same-dialect pass-through (`convert_request`). A root-level image-like item
+(by `type`, or by carrying an `image_url`/`input_image` key), a non-object
+item, and an item type the conversion cannot express are all refused with a
+`ConversionError` -> HTTP 422 `conversion_refused`, **before route selection
+and with zero adapter calls**. Non-image typed root items (function calls,
+outputs, and unknown types such as `reasoning` history) still pass through
+unchanged in their own dialect - the provider owns its dialect - and are
+refused, never silently dropped, when converting to the other one.
+
+**Regression evidence:**
+`tests/test_image_input.py::TopLevelResponsesImageItemTests` (the gate's
+exact probe over real HTTP: 422 + zero adapter calls, on both a text-only
+and an image-capable route; malformed shape variants; the valid nested image
+still reaches an image-capable route and fails closed 503 with only
+text-only routes; a plain text request is unaffected) and
+`tests/test_image_input.py::ImageDetectionTests` (root-item refusals at the
+detection layer, non-object items, and the pass-through/conversion split for
+non-image typed root items).

@@ -275,6 +275,26 @@ class CircuitStoreTests(unittest.TestCase):
 
     # --- half open -------------------------------------------------------
 
+    def test_preview_does_not_claim_a_half_open_probe(self) -> None:
+        self.store.record_failure("opencode_go", "mimo-v2.6-flash", "exhausted", base_seconds=300)
+        self.clock.advance(EXHAUSTED_BASE_SECONDS + 10)
+        allowed, reason = self.store.preview("opencode_go", "mimo-v2.6-flash")
+        self.assertTrue(allowed, reason)
+        # Previewing a route must leave the atomic claim available to its
+        # eventual selected invocation.
+        allowed, reason = self.store.check("opencode_go", "mimo-v2.6-flash")
+        self.assertTrue(allowed, reason)
+        allowed, reason = self.store.check("opencode_go", "mimo-v2.6-flash")
+        self.assertFalse(allowed)
+        self.assertIn("probe", reason)
+
+    def test_release_probe_allows_retry_after_unexpected_failure(self) -> None:
+        self.store.record_failure("opencode_go", "mimo-v2.6-flash", "exhausted", base_seconds=300)
+        self.clock.advance(EXHAUSTED_BASE_SECONDS + 10)
+        self.assertTrue(self.store.check("opencode_go", "mimo-v2.6-flash")[0])
+        self.store.release_probe("opencode_go", "mimo-v2.6-flash")
+        self.assertTrue(self.store.check("opencode_go", "mimo-v2.6-flash")[0])
+
     def test_exactly_one_probe_is_let_through(self) -> None:
         self.store.record_failure("opencode_go", "mimo-v2.6-flash", "exhausted", base_seconds=300)
         self.clock.advance(EXHAUSTED_BASE_SECONDS + 10)
