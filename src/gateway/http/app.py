@@ -112,6 +112,7 @@ from gateway.http.security import (
     check_host,
     check_origin,
 )
+from gateway.http.request_id import validate_client_request_id
 from gateway.http.state_cache import StateCache
 from gateway.identifiers import ValidationError, validate_alias_name, validate_identifier, validate_profile_id
 from gateway.logging import RequestLogger, operations_logger
@@ -617,6 +618,21 @@ class GatewayApp:
 
         request.params = params
         request.context["surface"] = SURFACE_OWNER
+        if request.path in ("/v1/chat/completions", "/v1/responses"):
+            client_request_ids = request.headers.get_all("X-Request-Id")
+            if len(client_request_ids) > 1:
+                result = json_response({"error": {"message": "invalid X-Request-Id", "type": "malformed_request"}}, 400)
+                self._log_request(request, result, started)
+                return result
+            if client_request_ids:
+                try:
+                    request.context["client_request_id"] = validate_client_request_id(client_request_ids[0])
+                except ValueError:
+                    result = json_response({"error": {"message": "invalid X-Request-Id", "type": "malformed_request"}}, 400)
+                    self._log_request(request, result, started)
+                    return result
+
+        
 
         # Access control runs after routing and before any handler: a
         # refused request never reaches the code it would have exercised,
@@ -1716,6 +1732,7 @@ class GatewayApp:
         # R77.
         request.context["route_context"] = routed.route_context
         request.context["serving_model"] = routed.attribution.serving_model
+        request.context["gateway_request_id"] = request_id
 
         if not stream:
             upstream_dialect = routed.request.dialect or dialect
