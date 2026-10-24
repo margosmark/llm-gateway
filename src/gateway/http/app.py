@@ -26,6 +26,7 @@ from gateway.costs import aggregate_usage, annotate_events, published_prices, re
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
+    OWNER_EDITABLE_FIELDS,
     PHASES,
     STATE_CONFIGURED_UNTESTED,
     STATE_CONNECTED,
@@ -38,6 +39,7 @@ from gateway.config import (
     utc_now_iso,
 )
 from gateway.core.capabilities import (
+    DIALECTS,
     DIALECT_OPENAI_CHAT,
     DIALECT_OPENAI_RESPONSES,
     alias_context_limit,
@@ -46,7 +48,7 @@ from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
-from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
+from gateway.identifiers import ValidationError, validate_alias_name, validate_model_id, validate_profile_id
 from gateway.logging import RequestLogger
 from gateway.routes import validate_alias_routes, validate_phase_routing
 from gateway.observability import (
@@ -617,6 +619,11 @@ class GatewayApp:
                         "limits_source": entry.limits_source,
                         "notes": entry.notes,
                         "reasoning_efforts": entry.reasoning_efforts,
+                        # Which values the owner set by hand, and what the
+                        # provider had published for them. The console shows
+                        # the merged entry, so it must be able to say which
+                        # part of it the owner wrote.
+                        "owner_overrides": entry.owner_overrides,
                     }
                 )
             providers.append(
@@ -750,6 +757,7 @@ class GatewayApp:
         if action == "refresh":
             models = adapter.list_models()
             now = utc_now_iso()
+            superseded_overrides: list[dict[str, Any]] = []
             with self.config.mutate() as config:
                 provider = config.providers.get(provider_id)
                 if provider is None:
@@ -779,13 +787,32 @@ class GatewayApp:
                         limits_source=info.limits_source,
                         limits_observed_at=info.limits_observed_at,
                     )
+                    # A refresh is the same merge discipline applied in the
+                    # other direction: it re-publishes the provider's facts
+                    # and merges an owner's edits into them instead of
+                    # overwriting them with a blank entry.
+                    entry.owner_overrides = _merge_owner_overrides(
+                        entry,
+                        {"dialect": info.dialect or None, "notes": info.notes or None},
+                        existing.owner_overrides if existing else {},
+                        superseded_overrides,
+                    )
                     provider.models[info.model_id] = entry
                 if provider.state == STATE_NOT_CONFIGURED:
                     provider.state = STATE_CONFIGURED_UNTESTED
             # Publish the published limits as snapshots, so the Status view
             # can show them with their source and an as-of time.
             self._publish_limits(provider_id, now)
-            return json_response({"ok": True, "model_count": len(models), "observed_at": now})
+            return json_response(
+                {
+                    "ok": True,
+                    "model_count": len(models),
+                    "observed_at": now,
+                    # The owner edits this refresh took back, reported
+                    # rather than reverted in silence.
+                    "owner_overrides_superseded": superseded_overrides,
+                }
+            )
 
         if action == "disconnect":
             handle = self.credentials.provider_handle(provider_id)
@@ -922,9 +949,41 @@ class GatewayApp:
         except ValueError:
             payload = {}
         action = str(payload.get("action") or "")
+        if action not in ("enable", "disable", "manual"):
+            return json_response(
+                {"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400
+            )
         provider_id = str(payload.get("provider_id") or "")
-        model_id = str(payload.get("model_id") or "")
+        raw_model_id = payload.get("model_id")
+        model_id = str(raw_model_id or "")
+        dialect: str | None = None
+        notes: str | None = None
+        enabled: bool | None = None
+        result: dict[str, Any] = {}
+        if action == "manual":
+            # Everything the owner supplies is validated before a
+            # configuration transaction opens, so a bad value is refused
+            # rather than persisted - the console's free-text model field is
+            # exactly where a typo would otherwise become a stored entry.
+            try:
+                model_id = validate_model_id(raw_model_id)
+                dialect = self._validate_dialect(payload.get("dialect"))
+            except ValidationError as exc:
+                return json_response(
+                    {"error": {"message": exc.message, "type": "invalid_model", "field": exc.field}}, 400
+                )
+            notes = payload.get("notes")
+            if notes is not None and (not isinstance(notes, str) or not notes.strip()):
+                return json_response(
+                    {"error": {"message": "the note must be a non-empty string", "type": "invalid_model", "field": "notes"}}, 400
+                )
+            enabled = payload.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                return json_response(
+                    {"error": {"message": "the enabled flag must be true or false", "type": "invalid_model", "field": "enabled"}}, 400
+                )
 
+        now = utc_now_iso()
         with self.config.mutate() as config:
             provider = config.providers.get(provider_id)
             if action in ("enable", "disable"):
@@ -933,41 +992,93 @@ class GatewayApp:
                 entry = provider.models.get(model_id)
                 if entry is None:
                     return json_response({"error": {"message": "unknown model", "type": "unknown_model"}}, 404)
-                entry.enabled = action == "enable"
-            elif action == "manual":
+                # This action is a preference, not a published fact: it
+                # touches the enabled flag in place, so every other field is
+                # carried over by construction.
+                target = action == "enable"
+                changed = {} if entry.enabled == target else {"enabled": {"from": entry.enabled, "to": target}}
+                entry.enabled = target
+                result = {
+                    "action": action,
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "created": False,
+                    "changed": changed,
+                    "preserved": _published_facts(entry),
+                    "conflicts": [],
+                }
+            else:
                 if provider is None:
-                    provider = _new_provider_state(provider_id, "manual")
-                    config.providers[provider_id] = provider
+                    # A model belongs to a provider that is configured. An
+                    # unknown id used to be turned into a "manual" provider
+                    # holding an entry nothing could route.
+                    return json_response(
+                        {
+                            "error": {
+                                "message": "unknown provider - a model can only be added to a provider that is already configured",
+                                "type": "unknown_provider",
+                            }
+                        },
+                        404,
+                    )
                 existing = provider.models.get(model_id)
-                # A manual entry **merges**. It changes only the fields the
-                # owner actually supplied, and preserves the published
-                # metadata it has no opinion about. Rebuilding the entry
-                # would silently blank a discovered model's context limit,
-                # its reasoning levels and its capability flags - and the
-                # README sends the owner here to fix a missing dialect.
-                if existing is None:
+                created = existing is None
+                if created:
                     entry = ModelEntry(
                         model_id=model_id,
-                        enabled=bool(payload.get("enabled", True)),
+                        enabled=True if enabled is None else enabled,
                         notes="entered manually",
+                        source="manual",
+                        observed_at=now,
                     )
                 else:
                     entry = existing
-                    if isinstance(payload.get("enabled"), bool):
-                        entry.enabled = payload["enabled"]
-                dialect = payload.get("dialect")
-                if isinstance(dialect, str) and dialect:
-                    entry.dialect = dialect
-                if isinstance(payload.get("notes"), str) and payload["notes"]:
-                    entry.notes = payload["notes"]
-                entry.source = "manual"
-                entry.observed_at = utc_now_iso()
+                changes: dict[str, dict[str, Any]] = {}
+                conflicts: list[dict[str, Any]] = []
+                if not created and isinstance(enabled, bool) and entry.enabled != enabled:
+                    changes["enabled"] = {"from": entry.enabled, "to": enabled}
+                    entry.enabled = enabled
+                if dialect is not None:
+                    _apply_owner_edit(entry, "dialect", dialect, changes, conflicts)
+                if notes is not None:
+                    _apply_owner_edit(entry, "notes", notes.strip(), changes, conflicts)
+                if created or changes:
+                    # An action that changed nothing also writes nothing: the
+                    # entry's as-of time only moves when the entry does.
+                    entry.observed_at = now
                 provider.models[model_id] = entry
-            else:
-                return json_response(
-                    {"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400
-                )
-        return json_response({"ok": True})
+                result = {
+                    "action": "manual",
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "created": created,
+                    "changed": changes,
+                    "preserved": _published_facts(entry),
+                    "conflicts": conflicts,
+                }
+        if action == "manual":
+            # The Status view renders published limits from the snapshot
+            # store. Re-publish after an owner action so the console cannot
+            # report a limit that the model row it sits next to has lost.
+            self._publish_limits(provider_id, now)
+        return json_response({"ok": True, **result})
+
+    @staticmethod
+    def _validate_dialect(value: Any) -> str | None:
+        """Validate an owner-supplied dialect, or return None when absent.
+
+        An unknown dialect is refused rather than stored: the router would
+        treat it as a dialect it can neither serve nor convert, which is the
+        same failure an undocumented model produces.
+        """
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str):
+            raise ValidationError("the dialect must be a string", "dialect")
+        if value not in DIALECTS:
+            allowed = ", ".join(DIALECTS)
+            raise ValidationError(f"the dialect must be one of: {allowed}", "dialect")
+        return value
 
     # --- alias actions ---------------------------------------------------
 
@@ -1306,6 +1417,109 @@ def _new_provider_state(provider_id: str, kind: str):
     from gateway.config import ProviderState
 
     return ProviderState(provider_id=provider_id, kind=kind)
+
+
+def _apply_owner_edit(entry: ModelEntry, field: str, value: Any, changes: dict[str, Any], conflicts: list[dict[str, Any]]) -> None:
+    """Record one owner-supplied field on an entry.
+
+    The value is applied and the before/after pair is reported in *changes*.
+    When it replaces a value the provider published, the conflict is reported
+    in *conflicts* with both values and the resolution, and the published
+    value is kept on the entry - so a published fact is never dropped, and a
+    later refresh can report the disagreement instead of silently reverting
+    it.
+    """
+    prior = getattr(entry, field)
+    record = entry.owner_overrides.get(field)
+    if isinstance(record, dict):
+        published = record.get("published")
+    else:
+        # The value in place is the provider's for as long as the entry has
+        # not been edited by hand.
+        published = prior if entry.source == "discovered" else None
+    if prior != value:
+        changes[field] = {"from": prior, "to": value}
+    setattr(entry, field, value)
+    entry.owner_overrides[field] = {"owner": value, "published": published}
+    if published is not None and published != value:
+        conflicts.append(
+            {
+                "field": field,
+                "published": published,
+                "owner": value,
+                "resolution": "the owner's value is applied; the published value is kept on the entry and reported here",
+            }
+        )
+
+
+def _published_facts(entry: ModelEntry) -> dict[str, Any]:
+    """Every published fact an entry carries, for an owner action's response.
+
+    The owner is told what survived the action, not only what changed: that
+    is the difference between a merge the owner can verify and one they have
+    to take on trust.
+    """
+    return {
+        field: getattr(entry, field)
+        for field in (
+            "context_window",
+            "context_limit",
+            "max_output_tokens",
+            "reasoning_efforts",
+            "retention_class",
+            "supports_streaming",
+            "supports_function_tools",
+            "supports_builtin_tools",
+            "supports_image_input",
+            "monthly_limit_usd",
+            "limits_source",
+            "limits_observed_at",
+        )
+    }
+
+
+def _merge_owner_overrides(
+    entry: ModelEntry,
+    published: dict[str, Any],
+    overrides: dict[str, Any],
+    superseded: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Merge recorded owner edits into a freshly published entry.
+
+    *published* maps each owner-editable field to the value the provider just
+    published, or None where it publishes nothing. The return value is the
+    set of override records that still apply.
+
+    An owner's value survives while the provider publishes nothing for that
+    field. When the provider publishes a *different* value the published one
+    stands - it is the provider's own evidence about its own endpoint - and
+    the supersession is appended to *superseded* for the response, so an
+    owner's edit is never reverted silently either.
+    """
+    kept: dict[str, Any] = {}
+    for field, record in overrides.items():
+        if field not in OWNER_EDITABLE_FIELDS or not isinstance(record, dict):
+            continue
+        owner_value = record.get("owner")
+        now_published = published.get(field)
+        if now_published is not None and now_published != owner_value:
+            setattr(entry, field, now_published)
+            superseded.append(
+                {
+                    "model_id": entry.model_id,
+                    "field": field,
+                    "owner": owner_value,
+                    "published": now_published,
+                    "resolution": "the published value stands; the owner's value was replaced and is reported here",
+                }
+            )
+            continue
+        if now_published == owner_value:
+            # The provider now agrees with the owner. Nothing left to protect.
+            continue
+        setattr(entry, field, owner_value)
+        kept[field] = {"owner": owner_value, "published": None}
+    return kept
 
 
 def _read_static(name: str) -> bytes | None:

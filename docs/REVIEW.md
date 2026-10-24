@@ -857,6 +857,43 @@ monthly limit and its source, the retention class, the capability flags and
 the enabled state; an explicit enabled flag is honoured; a new manual model
 is created enabled; and the alias's limit survives the edit.
 
+**Amendment.** A merge the owner cannot see is only half a fix. The
+resolution above is completed by three things the original change left out.
+
+1. *The action reports what it did.* The response carries `changed` (each
+   field, with its from and to), `preserved` (every published fact the entry
+   still carries) and `conflicts` (each value that disagreed with a
+   published one, with both values and the resolution). An action that
+   changes nothing returns an empty `changed` *and writes nothing*: the
+   entry's as-of time only moves when the entry does. A bare
+   `{"ok": true}` is gone.
+
+2. *A conflict is explicit, never a silent overwrite.* When the owner's
+   value differs from the provider's, the owner's value is applied - the
+   owner is the administrator and typed it deliberately - and the published
+   value is kept on the entry in the new `ModelEntry.owner_overrides` field
+   (`field -> {"owner": ..., "published": ...}`). The disagreement therefore
+   survives a restart instead of being lost with the response that reported
+   it.
+
+3. *A refused edit is refused.* The model id and the dialect are validated
+   before a configuration transaction opens, an unknown provider id is no
+   longer turned into a "manual" provider holding an entry nothing could
+   route, and each refusal names the field it refused.
+
+**Evidence (extended):** `tests/test_manual_entry_merge.py` - the response
+reports the dialect change from and to, the preserved context limit of
+258,400 with its published source and observation date, and the conflict;
+the published dialect is kept on the entry; an unknown provider, an invalid
+model id and an unknown dialect are refused with nothing persisted; and the
+state the console reads carries the merged entry, its overrides, and a limit
+snapshot that agrees with it.
+
+The discipline applies to the other two owner actions that edit a discovered
+model: `enable` and `disable` touch only the enabled flag in place and report
+the same envelope, and `refresh` now merges rather than replaces - see
+**R40**.
+
 **Planned as** `docs/TODO.md` item **T16**.
 
 ### R28 — Every small response paid a 41ms stall from Nagle and the delayed ACK — **closed**
@@ -1380,12 +1417,64 @@ PYTHONPATH=src python3 -m unittest tests.test_browser_console -v` (1 test
 passed). The console source-string assertion was also updated to reject the
 old short-circuit condition.
 
+### R40 — A refresh silently reverted an owner's manual model edit — **closed**
+**Severity: medium correctness/honesty risk.** *(closed)*
+
+R27's first fix merged the `manual` action, but the merge discipline stopped
+at the door of the action that reads the model back. `refresh` rebuilds
+every `ModelEntry` from the provider's catalogue (the `for info in models:`
+loop in `handle_provider_action`), and three things were lost or reverted
+without a word:
+
+* the owner's **dialect** edit was reverted whenever the provider published
+  a dialect - including the empty string an undocumented model gets, which
+  is the exact case the runbook sends the owner to the manual form for;
+* the owner's **note** was overwritten by `info.notes`, which is usually
+  `None`, so a hand-written note simply vanished;
+* the entry's `source` was reset to `discovered`, so the record no longer
+  said that anything in it had been written by hand, and the next manual
+  action had nothing to tell a hand-edit apart from a pristine discovery.
+
+This is the same failure class as R27: a value the owner supplied is
+dropped, and the record does not say so. The owner sees a model silently
+return to a state they did not choose, and only notices if they happen to
+re-open the row.
+
+**Required fix:** a refresh must apply the same merge discipline in the
+other direction. An owner-supplied value has to be told apart from a
+published one, survive a refresh that publishes nothing for that field, and
+be reported when the provider takes it back.
+
+**Resolution.** `ModelEntry` gained `owner_overrides`, which records each
+value the owner set by hand as `field -> {"owner": ..., "published": ...}`,
+validated on load so a hand-edited state file cannot smuggle a record for a
+field the owner cannot set. A refresh merges those records into the freshly
+published entry: an override survives while the provider publishes nothing
+for that field (the empty-dialect case above included), and when the
+provider publishes a *different* value the published one stands - it is the
+provider's own evidence about its own endpoint - and the supersession is
+listed in the refresh response under `owner_overrides_superseded` with both
+values and the resolution. The enabled flag is not an override: it is an
+owner preference held directly on the entry, and the refresh already
+preserved it.
+
+**Regression evidence:** `tests/test_manual_entry_merge.py::RefreshMergeTests` -
+`test_a_refresh_keeps_an_owner_edit_the_provider_does_not_publish` (the
+provider publishes an empty dialect and no note; the owner's dialect and
+note survive and nothing is reported as superseded),
+`test_a_refresh_reports_the_override_it_took_back` (the provider publishes
+the dialect it published before; the published value stands and the
+supersession is reported in full), `test_a_refresh_keeps_a_model_the_owner_disabled`,
+and `OwnerOverridePersistenceTests` for the state round-trip and the
+validation of a hand-edited record.
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
 open**; R36 is the explicit
 post-deployment route replacement above, and R38 is the inert per-phase
-reasoning effort, which needs a routing change. R37 and R39 are closed. The register
+reasoning effort, which needs a routing change. R37, R39 and R40 are
+closed. The register
 is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.

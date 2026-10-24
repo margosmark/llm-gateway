@@ -123,6 +123,16 @@ class RouteRef:
         return f"{self.provider} → {self.model}"
 
 
+#: The fields an owner may set by hand from the console. A record of each
+#: such value is kept on the entry (see ``ModelEntry.owner_overrides``) so a
+#: later refresh can merge instead of replace: it can tell the owner's value
+#: from a published one, keep the former when the provider publishes nothing,
+#: and report the latter when it takes it back. Nothing else is owner-editable
+#: - ``enabled`` is a preference held directly on the entry, and every other
+#: field is a published fact.
+OWNER_EDITABLE_FIELDS = ("dialect", "notes")
+
+
 @dataclass
 class ModelEntry:
     """One model at one provider.
@@ -152,6 +162,14 @@ class ModelEntry:
     monthly_limit_usd: float | None = None
     limits_source: str = "unknown"
     limits_observed_at: str | None = None
+    #: Provenance for the values the owner set by hand: field name ->
+    #: ``{"owner": <the owner's value>, "published": <the value the provider
+    #: published then, or None>}``. This is what makes an owner action able to
+    #: *merge* and a refresh able to merge back rather than replace: an
+    #: override survives while the provider publishes nothing for that field,
+    #: and when the provider publishes a different value the published one
+    #: stands and the supersession is reported instead of being silent.
+    owner_overrides: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -177,6 +195,20 @@ class ModelEntry:
             return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
         efforts = data.get("reasoning_efforts")
+        # Provenance is validated before persistence, like everything else
+        # here: an unknown field name or a malformed record is dropped rather
+        # than loaded, so a hand-edited state file cannot smuggle a record for
+        # a field the owner cannot set.
+        overrides: dict[str, Any] = {}
+        raw_overrides = data.get("owner_overrides")
+        if isinstance(raw_overrides, dict):
+            for field_name, record in raw_overrides.items():
+                if field_name not in OWNER_EDITABLE_FIELDS or not isinstance(record, dict):
+                    continue
+                overrides[field_name] = {
+                    "owner": record.get("owner"),
+                    "published": record.get("published"),
+                }
         return cls(
             model_id=model_id,
             enabled=bool(data.get("enabled", False)),
@@ -197,6 +229,7 @@ class ModelEntry:
             monthly_limit_usd=as_float("monthly_limit_usd"),
             limits_source=str(data.get("limits_source") or "unknown"),
             limits_observed_at=as_str("limits_observed_at"),
+            owner_overrides=overrides,
         )
 
 
