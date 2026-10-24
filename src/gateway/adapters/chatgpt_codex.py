@@ -121,6 +121,34 @@ IMAGE_INPUT_OBSERVED_AT = {
 #:
 #: Sampling controls have no effect on a reasoning model served through this
 #: backend, so dropping them loses nothing the client can observe.
+#:
+#: The list was re-swept on 2026-10-24 (scripts/probe_codex_param_sweep_round2.py,
+#: run inside the production container), because the set had grown: nine
+#: further fields were rejected with the same 400 and the same
+#: ``Unsupported parameter: <field>`` body on **both** enabled models
+#: (gpt-5.6-terra and gpt-6-luna), with and without an ``input_image``
+#: item. The control held in every run: the identical body minus that one
+#: field reached the account allowance error (``usage_limit_reached``), so
+#: each 400 is a shape rejection, not an exhausted account.
+#:
+#: A follow-up sweep (scripts/probe_codex_param_sweep_round2b.py) then
+#: checked the one spelling the bridge can *emit* for a length control:
+#: ``max_output_tokens``, which is what a converted ``max_tokens`` becomes.
+#: It is accepted. The two Chat spellings are refused, which is why both are
+#: listed: a caller sending ``max_tokens`` on a same-dialect passthrough is
+#: refused by the backend, while a converted request carries the accepted
+#: spelling and is stripped of nothing.
+#:
+#: Fields deliberately **not** listed, though the backend refuses them:
+#:
+#: * ``store`` - the adapter forces ``store: false`` on every request it
+#:   sends, so a client's value can never reach the backend; the sweep's
+#:   400 ("Store must be set to false") is unreachable through the gateway.
+#: * ``previous_response_id`` - this is a capability difference, not a
+#:   preference: the router already excludes a route that cannot honour a
+#:   caller-supplied continuation, and silently dropping it would change
+#:   which conversation the request continued. Such a request must be
+#:   refused, never repaired.
 CODEX_UNSUPPORTED_PAYLOAD_FIELDS = frozenset(
     {
         "temperature",
@@ -141,6 +169,25 @@ CODEX_UNSUPPORTED_PAYLOAD_FIELDS = frozenset(
         "max_tokens",
         "max_completion_tokens",
         "suffix",
+        # Round 2 (2026-10-24). Legacy tool declarations: this backend only
+        # accepts the ``tools`` form, and the bridge never carries these
+        # across, so declaring them keeps a payload built by any other path
+        # from reaching the backend and 400-ing.
+        "functions",
+        "function_call",
+        "max_tool_calls",
+        # Preferences with no observable effect when absent.
+        "prediction",
+        "modalities",
+        "web_search_options",
+        "safety_identifier",
+        "truncation",
+        # The flat spelling of a reasoning preference. This dialect takes
+        # ``reasoning: {"effort": ...}``, which the bridge already produces,
+        # so a converted request never carries the flat form; a caller that
+        # sends it on a same-dialect route has it dropped and recorded
+        # rather than 400-ed.
+        "reasoning_effort",
     }
 )
 
