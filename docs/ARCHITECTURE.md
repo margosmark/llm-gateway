@@ -230,6 +230,23 @@ claim about a provider's window.
 The routing core knows aliases, error classes, model capabilities, and fallback
 policy. Provider-specific behaviour lives in `gateway.adapters`.
 
+Every adapter owns one `UpstreamClient`, which keeps a **bounded keep-alive
+connection pool** keyed by origin (`adapters/http_client.py`). A short
+non-streaming request therefore reuses the previous connection instead of
+paying a fresh TCP and TLS handshake before the provider does any work. The
+existing guarantees are unchanged: redirects are refused, a credential never
+appears in an exception, and the configured timeout applies to a reused
+socket. Timeouts are **two budgets**, not one: the **connect budget** (10s)
+bounds establishing a connection - the TCP handshake and, over TLS, the
+handshake that follows it - and the head of a streamed response, whose head
+precedes generation; the generous **read budget** (120s, per read) bounds
+every wait for the provider's own bytes, so a provider that accepts and
+goes quiet is abandoned in seconds while a response that is still arriving
+is never cut. A connection the peer closed while idle is discarded before the
+request is written, so a request is never replayed. On shutdown
+`AdapterRegistry.close()` releases the pooled sockets, with an `atexit`
+backstop for a process that exits without it.
+
 * **ChatGPT / Codex** uses the device-code flow and the Responses dialect.
   Its upstream is **streaming only** and expects the same request fields
   OpenAI's own client sends. See `CHATGPT_CODEX_CONTRACT.md` and
@@ -300,7 +317,13 @@ most.
   let through to find out whether the provider recovered. A success
   closes it; a failure re-arms it within the bounded window and keeps the
   failure class and count. A probe that never returns is reclaimed after
-  five minutes, and a probe is never remembered across a restart.
+  five minutes, and a probe is never remembered across a restart. The
+  probe is **claimed at the invocation boundary**, immediately before a
+  provider is called - never while candidates are merely being
+  enumerated - and the claim carries an owner token so that only the
+  request that took it can release it. A candidate that is skipped
+  before invocation (an image the primary cannot see, a phase route
+  that was not chosen, a refused conversion) claims nothing.
 * The owner may **clear one provider's cooldowns deliberately** from the
   console or `POST /owner/api/provider` with
   `{"action": "clear_cooldowns", "provider_id": "..."}` - a trusted-LAN

@@ -190,7 +190,13 @@ covered by a regression test. They are listed in full in
 
 `docs/REVIEW.md` holds every finding, with its evidence. R0–R35 are
 closed or superseded; **R36 and R38 are open**. R40 is closed with
-regression tests on the integrated candidate. R26 is planned in
+regression tests on the integrated candidate. R41 (bounded
+confirmed-exhaustion cooldown) is closed with regression tests on the
+cooldown-recovery candidate. R42–R44 (probe claim ownership, post-claim
+release, streaming read budget) are closed with regression tests on the
+wave-1.5/1.6 integration candidate. R45 (malformed top-level Responses
+`input_image` refusal) is closed with regression tests on the wave-1.6
+integration candidate. R26 is planned in
 `docs/TODO.md`; R36 is the explicit post-deployment Go route replacement; R38 tracks the inert per-phase effort. R37 and R39 are closed. **Add a finding when a defect is found**, and
 close it only with a cited fix and a regression test — the register is how
 the next agent avoids repeating the same work.
