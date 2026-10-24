@@ -1380,12 +1380,140 @@ PYTHONPATH=src python3 -m unittest tests.test_browser_console -v` (1 test
 passed). The console source-string assertion was also updated to reject the
 old short-circuit condition.
 
+### R40 — A half-open recovery probe was claimed during candidate enumeration, so one ineligible request pinned its primary to a fallback — **closed**
+
+**Severity: high availability correctness.** *(closed; the claim moved to the
+invocation boundary and every claim now carries an owner)*
+
+`Router.candidates()` asked the circuit store `check()` for every route while
+it was only *assembling* the candidate list (`src/gateway/core/routing.py`).
+`check()` was not a question — it atomically **claimed** the half-open
+recovery probe as a side effect. Any candidate that was then dropped never
+invoked anything, so nothing ever released that claim, and the route stayed
+excluded until `PROBE_TIMEOUT_SECONDS` (300s) had passed.
+
+The provider had already recovered by then: the window that put the circuit
+half-open had expired, and the probe was the mechanism meant to confirm the
+recovery. Instead the probe was spent on a request that could never have used
+the route, and every compatible request in the next five minutes was served
+by a fallback while the primary sat idle.
+
+Three enumeration paths could do this, and all three were reachable in
+normal operation:
+
+* **capability exclusion** — an image request against a primary that does not
+  publish image input (`supports_image_input`). The primary was excluded one
+  line *after* its probe had been claimed, so one image request pinned the
+  text-serving primary to its fallback;
+* **phase routing** — a caller phase hint that selects a different route. The
+  unselected primary still had its probe claimed, so the route phase routing
+  deliberately did not choose was the one left wedged;
+* **conversion refusal** — `convert_request()` raising `ConversionError`
+  before `adapter.invoke()`. The candidate was refused with its claim held.
+
+A second defect compounded it: `release_probe()` cleared the flag for
+*any* caller. A request that gave up could therefore release a probe that
+**another** request was actively serving, silently admitting a second
+concurrent invocation to a half-open route — the exact condition the probe
+exists to prevent.
+
+**Fix.** `CircuitStore.preview()` is a pure query: it answers eligibility and
+never mutates, so enumeration cannot spend a probe. The claim is
+`CircuitStore.claim()`, called in `Router.invoke()` **immediately before
+`adapter.invoke()`**, after every local check that could decline the route
+has passed. Each claim returns an owner token stored on the entry
+(`CircuitEntry.probe_owner`, in memory only, like the flag itself), and
+`release_probe(provider, model, owner)` refuses to clear a claim whose token
+does not match. A candidate that is skipped now records its skip and
+continues without touching the store, preserving the fallback attribution
+and the skip reason for the primary.
+
+Both the `AdapterError` path and the new `except Exception` path release the
+claim with the owner token. The latter matters because an unexpected failure
+is not evidence that a circuit should open, and it is not a probe that is
+still running: without the release, a crash inside `invoke()` wedged the
+route for the full probe timeout.
+Those two release sites covered only `invoke()` itself; R41 replaced them
+with a single guard that covers every post-claim exit.
+
+**Regression evidence.** `tests/test_probe_claim.py` (10 tests) covers each
+enumeration path above and asserts both the absence of a stuck claim
+(`_probe_held`) and the user-visible property that an immediate compatible
+request reaches the primary rather than waiting out the window. Concurrency
+is covered deterministically with a blocking adapter that reports when it is
+inside `invoke()`: a second request arriving mid-probe is served by the
+fallback, the primary sees exactly one invocation, and the ledger records
+the live-probe skip reason. Ownership is covered at store level: a foreign
+owner token cannot release a live claim. Verified by reverting only
+`candidates()` to the claiming `check()` — 6 of the 10 tests fail, and pass
+again with the fix in place.
+
+`PYTHONPATH=src python3 -m pytest -q` → 491 passed, 2 skipped, 93 subtests
+passed. `ruff check` on the four changed files reports only the pre-existing
+`F401` findings already present on the base revision. `git diff --check`
+clean.
+
+### R41 — An exception raised after a successful probe claim escaped every release path, so the route refused probes until the timeout — **closed**
+
+**Severity: high availability correctness.** *(closed; one guard now
+releases the claim on every post-claim exit)*
+
+`Router.invoke()` claimed the half-open probe and then ran a `try` whose
+handlers were **siblings**, not parents: `except AdapterError` and
+`except Exception` both covered only `candidate.adapter.invoke()`. An
+exception raised *inside* the `AdapterError` handler — while
+`_maybe_open_circuit()` was processing the failure, before that handler's
+own `release_probe()` call — is not caught by a sibling `except`, so it
+escaped with the claim still held. Anything raised after a successful
+invocation, in the post-claim recording (`record_success()`, the ledger
+write), was worse: that code sat outside the `try` altogether.
+
+The security probe reproduced it as an HTTP 500 with the primary's
+in-flight claim still held. The route then refused every compatible
+request for the rest of `PROBE_TIMEOUT_SECONDS` (300s) while nothing was
+probing it — the same wedge R40 set out to remove, re-entered through a
+different path.
+
+**Fix.** The whole post-claim block now runs under one `try ... finally`
+(`src/gateway/core/routing.py`), and the `finally` releases **this claim's
+owner token**: success, a failure that falls back, and every exception all
+pass through it. The two earlier release sites — inside the
+`AdapterError` handler and inside the invoke-only `except Exception` — are
+gone, leaving one release point and one invariant. Releasing an
+already-released claim is a no-op, and `release_probe()` still refuses an
+owner token that does not match, so a foreign request's live probe is
+never cleared by this path and normal success/failure behaviour is
+unchanged.
+
+**Regression evidence.** `tests/test_probe_claim.py` (12 tests) adds
+`test_an_exception_while_the_failure_is_processed_releases_the_claim` — a
+synthetic exception injected into `_maybe_open_circuit()` after a
+half-open claim — and
+`test_an_exception_after_a_successful_probe_releases_the_claim`, where
+`record_success()` raises after a successful probe. Both assert the claim
+is released immediately (`_probe_held`) and that the next compatible
+request claims the probe and closes the circuit. Verified by restoring
+only `src/gateway/core/routing.py` to the candidate revision: both tests
+fail with `AssertionError: True is not false : ... left the probe
+claimed`, and pass again with the fix in place.
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+Ran 494 tests ... OK (skipped=2)
+
+python3 -m compileall -q src tests                        OK
+node tests/console_dom_test.js                            all checks passed
+node tests/test_opencode_catalog.mjs                      OpenCode catalogue checks passed
+PYTHONPATH=src python3 -m gateway --help                  OK
+git diff --check                                          clean
+```
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
 open**; R36 is the explicit
 post-deployment route replacement above, and R38 is the inert per-phase
-reasoning effort, which needs a routing change. R37 and R39 are closed. The register
+reasoning effort, which needs a routing change. R37, R39, R40 and R41 are closed. The register
 is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
