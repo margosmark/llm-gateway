@@ -1688,6 +1688,32 @@ renumbered on integration because main's register already uses R32–R44)*
 
 **Evidence:** `tests/test_alias_groups.py` exercises published-state changes, preservation of each alias's route and policy, invalid/empty tags, incomplete group refusal, and legacy/tag round-trips. `AliasGroupHttpTests` in `tests/test_end_to_end.py` drives the HTTP action and asserts only members are affected and that refusal is atomic.
 
+### R40 — A console alias save silently drops a file-configured request policy — **open**
+
+**Found:** 2026-10-24, during T21 (a request policy per alias).
+
+T21 landed an opt-in `policy` block on `Alias` (`src/gateway/config.py`),
+applied by the router on every provider-reaching path. The block
+persists in `config.json` and is visible in the console state (the state
+endpoint renders `alias.to_dict()`), but the console's own alias **save**
+path rebuilds the alias from the submitted fields only:
+`_alias_from_payload` (`src/gateway/http/app.py:1277`) constructs a
+fresh `Alias` with no `policy`, and `handle_alias_action` (`save`,
+`src/gateway/http/app.py:1008-1021`) replaces `config.aliases[name]`
+outright. The only carried-over field is `enabled`.
+
+**Consequence.** An owner who sets a policy in `config.json` and later
+edits *any* field of that alias in the console loses the whole policy
+silently - the exact failure mode T21's own tier rule ("a policy that
+changes a request is recorded, not silent") exists to prevent, applied
+to the configuration itself.
+
+**Fix direction.** Either accept a `policy` block in the save payload
+with the same parse-time validation (`AliasPolicy.from_dict`) plus a
+console editor, or preserve the existing alias's policy on save.
+Whichever is chosen, a save that drops a policy must report it.
+`tests/test_alias_policy.py` should gain the regression.
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are

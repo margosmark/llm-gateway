@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from gateway.stores import atomic_write_json, read_json
+from gateway.thinking import CANONICAL_LEVELS
 
 # Provider connection states. These four are the only states a provider card
 # may display.
@@ -474,6 +475,192 @@ class PhaseRouting:
         return ordered
 
 
+# --- the alias request policy (T21) ------------------------------------
+
+#: The owner's default system instruction is bounded: a policy value is
+#: configuration, not a payload dump, and a bound keeps the config file
+#: readable and a request small.
+MAX_SYSTEM_DEFAULT_LENGTH = 4000
+
+#: The published temperature range. A default outside it is not a
+#: temperature this gateway can ask for, so it is not accepted into the
+#: configuration.
+TEMPERATURE_MIN = 0.0
+TEMPERATURE_MAX = 2.0
+
+
+def _policy_temperature(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not TEMPERATURE_MIN <= number <= TEMPERATURE_MAX:
+        return None
+    return number
+
+
+def _policy_tokens(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _policy_level(value: Any) -> str | None:
+    """Accept a thinking level only from the canonical vocabulary.
+
+    The owner-facing vocabulary is the one ``gateway.thinking``
+    publishes; a level outside it would be a second vocabulary, which is
+    exactly what the canonical model exists to prevent.
+    """
+    return value if isinstance(value, str) and value in CANONICAL_LEVELS else None
+
+
+@dataclass
+class PolicyDefaults:
+    """Owner defaults, applied when the client specified nothing.
+
+    A default fills a silence; it never overrides a client that asked for
+    something. What it changed is recorded per request by
+    ``gateway.policy`` - the ledger, not this file.
+    """
+
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+    thinking_level: str | None = None
+    system: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+        if self.thinking_level is not None:
+            payload["thinking_level"] = self.thinking_level
+        if self.system is not None:
+            payload["system"] = self.system
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "PolicyDefaults | None":
+        if not isinstance(data, dict):
+            return None
+        temperature = _policy_temperature(data.get("temperature"))
+        tokens = _policy_tokens(data.get("max_output_tokens"))
+        level = _policy_level(data.get("thinking_level"))
+        system = data.get("system")
+        system = (
+            system
+            if isinstance(system, str) and system.strip() and len(system) <= MAX_SYSTEM_DEFAULT_LENGTH
+            else None
+        )
+        if temperature is None and tokens is None and level is None and system is None:
+            return None
+        return cls(temperature=temperature, max_output_tokens=tokens, thinking_level=level, system=system)
+
+
+@dataclass
+class PolicyCaps:
+    """Owner ceilings, applied over the client's value.
+
+    A cap is an ordinal ceiling for the thinking level (the canonical
+    order, weakest first) and a numeric one for the output budget. A
+    value the cap clamps is a degradation in the sense R19 established:
+    it goes into the attribution and the ledger, never invisible.
+    """
+
+    max_output_tokens: int | None = None
+    thinking_level: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+        if self.thinking_level is not None:
+            payload["thinking_level"] = self.thinking_level
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "PolicyCaps | None":
+        if not isinstance(data, dict):
+            return None
+        tokens = _policy_tokens(data.get("max_output_tokens"))
+        level = _policy_level(data.get("thinking_level"))
+        if tokens is None and level is None:
+            return None
+        return cls(max_output_tokens=tokens, thinking_level=level)
+
+
+@dataclass
+class PolicyDeny:
+    """A refusal and a forced value.
+
+    ``tools`` is a refusal: a request that carries tools is refused
+    outright with the rule named, never stripped - a silently stripped
+    tool list would break the request the client actually made.
+
+    ``store`` is a *forced value*, not a refusal: ``store: false`` is
+    applied to every request that reaches a provider and the forcing is
+    recorded. Retention is the owner's call, not the caller's.
+    """
+
+    tools: bool = False
+    store: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"tools": self.tools}
+        if self.store is not None:
+            payload["store"] = self.store
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "PolicyDeny | None":
+        if not isinstance(data, dict):
+            return None
+        tools = bool(data.get("tools", False))
+        store = data.get("store")
+        store = store if isinstance(store, bool) else None
+        if not tools and store is None:
+            return None
+        return cls(tools=tools, store=store)
+
+
+@dataclass
+class AliasPolicy:
+    """The owner's request policy for one alias.
+
+    Applied in one place - ``gateway.policy``, called by the router on
+    every path that reaches a provider - in this order: the client's
+    value, the owner's default if the client gave none, the owner's cap
+    if it clamps the value now standing, then the deny rules. It applies
+    before dialect conversion, so the owner writes one vocabulary
+    (``thinking_level: high``) regardless of the dialect a route serves.
+    """
+
+    defaults: PolicyDefaults | None = None
+    caps: PolicyCaps | None = None
+    deny: PolicyDeny | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "defaults": self.defaults.to_dict() if self.defaults else None,
+            "caps": self.caps.to_dict() if self.caps else None,
+            "deny": self.deny.to_dict() if self.deny else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "AliasPolicy | None":
+        if not isinstance(data, dict):
+            return None
+        defaults = PolicyDefaults.from_dict(data.get("defaults"))
+        caps = PolicyCaps.from_dict(data.get("caps"))
+        deny = PolicyDeny.from_dict(data.get("deny"))
+        if defaults is None and caps is None and deny is None:
+            # A block that rules nothing is no policy at all, so the
+            # alias reads as un-policied rather than as an empty shell.
+            return None
+        return cls(defaults=defaults, caps=caps, deny=deny)
+
+
 @dataclass
 class Alias:
     """A friendly name that resolves to a primary route and ordered fallbacks."""
@@ -507,6 +694,11 @@ class Alias:
     budget: float | None = None
     #: Optional group tag; aliases sharing a tag render as one console group.
     tag: str = ""
+    #: An optional, opt-in request policy: owner defaults, caps and deny
+    #: rules applied to every request this alias serves. Absent by
+    #: default: an alias with no policy lets the client dictate every
+    #: parameter, which remains the product's default posture.
+    policy: AliasPolicy | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -522,6 +714,7 @@ class Alias:
             "phase_routing": self.phase_routing.to_dict() if self.phase_routing else None,
             "budget": self.budget,
             "tag": self.tag,
+            "policy": self.policy.to_dict() if self.policy else None,
         }
 
     @classmethod
@@ -546,6 +739,7 @@ class Alias:
         phase_routing = PhaseRouting.from_dict(data.get("phase_routing"))
         budget = data.get("budget")
         tag = data.get("tag", "")
+        policy = AliasPolicy.from_dict(data.get("policy"))
         return cls(
             name=name,
             enabled=bool(data.get("enabled", False)),
@@ -559,6 +753,7 @@ class Alias:
             phase_routing=phase_routing,
             budget=budget if isinstance(budget, (int, float)) and not isinstance(budget, bool) and math.isfinite(budget) and 0 < budget <= 1_000_000 else None,
             tag=tag if isinstance(tag, str) else "",
+            policy=policy,
         )
 
     def all_routes(self) -> list[RouteRef]:
