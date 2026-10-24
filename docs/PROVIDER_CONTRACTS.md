@@ -55,7 +55,12 @@ URLs for PNG/JPEG/GIF/WebP, are accepted. Data URLs are limited to 4 MiB of
 decoded image bytes (and a 6 MiB encoded URL ceiling). The gateway never
 dereferences image URLs, so URL validation does not create a gateway-side
 fetch or SSRF path. Unsupported/malformed content parts fail with a safe 4xx
-instead of being silently discarded or downgraded to text. Non-function tool types require
+instead of being silently discarded or downgraded to text. A Responses
+`input` array carries *items* (messages, function calls, their outputs) -
+never content parts at the top level - so a root-level `input_image`-like
+item is malformed for every route and is refused with a 4xx before route
+selection, in capability detection, dialect conversion **and** same-dialect
+pass-through alike. Non-function tool types require
 `supports_builtin_tools`; function tools continue to require
 `supports_function_tools`. A `previous_response_id` requires
 `supports_previous_response_id`. That metadata is not currently represented
