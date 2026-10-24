@@ -86,9 +86,12 @@ the rest of the state.
    each published route.
 4. `Router` uses deterministic weighted rendezvous-by-conversation selection
    when an alias has a weighted pool, then treats the other pool members and
-   configured fallbacks strictly as failure candidates. Pool selection is
-   stable for the derived conversation identifier and does not persist client
-   content. A candidate must have a configured adapter, an enabled known model,
+   configured fallbacks strictly as failure candidates. A failure inside the
+   pool obeys the opt-in fallback rules, and it never switches route after a
+   stream or a tool-bearing request: a stream failure inside a pool member
+   surfaces on the same alias. Pool selection is stable for the derived
+   conversation identifier and does not persist client content. A candidate
+   must have a configured adapter, an enabled known model,
    a known supported dialect, matching capabilities, and no active local cooldown.
 5. The bridge converts between Chat Completions and Responses only when the
    target capability permits it. Unsupported capability/dialect combinations
