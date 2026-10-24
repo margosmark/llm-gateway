@@ -890,6 +890,40 @@
 
     var cooldown = el("input", { type: "number", value: String(editing ? editing.cooldown_seconds : 300), min: "0" });
 
+    var requestPolicy = editing && editing.policy;
+    var policyDefaults = (requestPolicy && requestPolicy.defaults) || {};
+    var policyCaps = (requestPolicy && requestPolicy.caps) || {};
+    var policyDeny = (requestPolicy && requestPolicy.deny) || {};
+    var removeRequestPolicy = el("input", { type: "checkbox" });
+    var defaultTemperature = el("input", { type: "number", min: "0", max: "2", step: "0.1", value: policyDefaults.temperature === undefined ? "" : String(policyDefaults.temperature) });
+    var defaultTokens = el("input", { type: "number", min: "1", step: "1", value: policyDefaults.max_output_tokens === undefined ? "" : String(policyDefaults.max_output_tokens) });
+    var defaultThinking = el("select", {}, [el("option", { value: "", text: "Not set" })]);
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"].forEach(function (level) {
+      defaultThinking.appendChild(el("option", { value: level, text: level }));
+    });
+    defaultThinking.value = policyDefaults.thinking_level || "";
+    // A textarea's editable content is its .value, which the `value`
+    // content attribute does NOT populate (unlike <input>). Initialising
+    // from the attribute alone leaves the editor blank, and saving then
+    // rebuilds the policy without `system` - silently deleting the
+    // owner's configured default instruction (review finding, Medium).
+    var defaultSystem = el("textarea", { maxlength: "4000", rows: "3" });
+    defaultSystem.value = policyDefaults.system || "";
+    var capTokens = el("input", { type: "number", min: "1", step: "1", value: policyCaps.max_output_tokens === undefined ? "" : String(policyCaps.max_output_tokens) });
+    var capThinking = el("select", {}, [el("option", { value: "", text: "Not set" })]);
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"].forEach(function (level) {
+      capThinking.appendChild(el("option", { value: level, text: level }));
+    });
+    capThinking.value = policyCaps.thinking_level || "";
+    var denyTools = el("input", { type: "checkbox" });
+    denyTools.checked = !!policyDeny.tools;
+    var denyStore = el("select", {}, [
+      el("option", { value: "", text: "Not set" }),
+      el("option", { value: "true", text: "Force true" }),
+      el("option", { value: "false", text: "Force false" })
+    ]);
+    denyStore.value = typeof policyDeny.store === "boolean" ? String(policyDeny.store) : "";
+
     var phasePolicy = editing && editing.phase_routing;
     var phaseEnabled = el("input", { type: "checkbox" });
     phaseEnabled.checked = !!(phasePolicy && phasePolicy.enabled);
@@ -961,6 +995,26 @@
       el("label", {}, [el("span", { text: "When uncertain" }), onUncertain])
     ]));
 
+    card.appendChild(el("h3", { text: "Request policy" }));
+    card.appendChild(el("div", { class: "small muted", text: requestPolicy
+      ? "Current policy: " + JSON.stringify(requestPolicy)
+      : "No request policy is set. A blank policy remains absent." }));
+    card.appendChild(el("div", { class: "small muted", text: "An alias policy controls defaults, output ceilings, denied tools, and forced storage behavior for requests. Leave a field blank to leave that rule unset." }));
+    card.appendChild(el("div", { class: "small muted", text: "Thinking level choices: none, minimal, low, medium, high, xhigh, max." }));
+    card.appendChild(el("div", { class: "row" }, [
+      el("label", {}, [el("span", { text: "Default temperature (0–2)" }), defaultTemperature]),
+      el("label", {}, [el("span", { text: "Default max output tokens" }), defaultTokens]),
+      el("label", {}, [el("span", { text: "Default thinking level" }), defaultThinking])
+    ]));
+    card.appendChild(el("label", {}, [el("span", { text: "Default system instruction (up to 4000 characters)" }), defaultSystem]));
+    card.appendChild(el("div", { class: "row" }, [
+      el("label", {}, [el("span", { text: "Cap max output tokens" }), capTokens]),
+      el("label", {}, [el("span", { text: "Cap thinking level" }), capThinking]),
+      el("label", {}, [el("span", { text: "Deny requests with tools" }), denyTools]),
+      el("label", {}, [el("span", { text: "Force store" }), denyStore])
+    ]));
+    if (requestPolicy) card.appendChild(el("label", {}, [el("span", { text: "Remove request policy" }), removeRequestPolicy]));
+
     card.appendChild(el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "Alias name" }), nameInput]),
       el("label", {}, [el("span", { text: "Primary provider" }), primaryProvider]),
@@ -986,10 +1040,35 @@
           class: "primary", type: "button", text: editing ? "Save changes" : "Save alias",
           disabled: !state.can_mutate,
           onclick: function () {
+            var policyNumericFields = [defaultTemperature, defaultTokens, capTokens];
+            if (policyNumericFields.some(function (field) { return !field.checkValidity(); })) {
+              toast("Request policy numbers are outside their allowed ranges.", "bad");
+              return;
+            }
             var triggers = Object.keys(triggerBoxes).filter(function (key) { return triggerBoxes[key].checked; });
             var confirmed = Array.prototype.slice.call(confirmProviders.querySelectorAll("input:checked"))
               .map(function (box) { return box.value; });
             var phaseRouting = null;
+            var policy = editing && editing.policy ? editing.policy : null;
+            // Removal is an explicit owner action and takes precedence over
+            // any populated policy controls. Otherwise send the editor's full
+            // intended policy explicitly rather than relying on preservation.
+            if (!removeRequestPolicy.checked) {
+              var defaults = {};
+              var caps = {};
+              var deny = {};
+              if (defaultTemperature.value !== "") defaults.temperature = Number(defaultTemperature.value);
+              if (defaultTokens.value !== "") defaults.max_output_tokens = Number(defaultTokens.value);
+              if (defaultThinking.value) defaults.thinking_level = defaultThinking.value;
+              if (defaultSystem.value.trim()) defaults.system = defaultSystem.value;
+              if (capTokens.value !== "") caps.max_output_tokens = Number(capTokens.value);
+              if (capThinking.value) caps.thinking_level = capThinking.value;
+              if (denyTools.checked) deny.tools = true;
+              if (denyStore.value !== "") deny.store = denyStore.value === "true";
+              if (Object.keys(defaults).length || Object.keys(caps).length || Object.keys(deny).length) {
+                policy = { defaults: defaults, caps: caps, deny: deny };
+              }
+            }
             // Removal is an explicit owner action and takes precedence over
             // the enabled toggle. Otherwise retain an existing disabled policy
             // so it can be re-enabled without rebuilding its configuration.
@@ -1033,11 +1112,14 @@
                 fallback_confirmed_providers: confirmed,
                 cooldown_seconds: parseInt(cooldown.value, 10) || 0,
                 enabled: editing ? editing.enabled : false,
-                phase_routing: phaseRouting
+                phase_routing: phaseRouting,
+                policy: policy
               }
-            })).then(function () {
+            })).then(function (result) {
               editingAlias = null;
-              toast(editing ? "Alias updated." : "Alias saved.", "ok");
+              var policyState = result && result.policy && result.policy.state;
+              var policyMessage = policyState ? " Request policy " + policyState + "." : "";
+              toast((editing ? "Alias updated." : "Alias saved.") + policyMessage, "ok");
               return refresh();
             }).catch(function () {});
           }
