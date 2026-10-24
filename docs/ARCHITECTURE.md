@@ -323,6 +323,45 @@ The request ledger records the phase and its source (`caller`, `jev`, or
 `default`) as **metadata only** - never the request content, the Jev question
 text, or the answer distribution.
 
+## Request policy (opt-in)
+
+An alias may carry an optional, **off-by-default** request policy: owner
+`defaults` for values the client did not specify, `caps` that clamp what
+the client did specify, and `deny` rules that refuse or force. The block
+is configuration only, validated at parse time, and applied by
+`gateway.policy` in the router - one place every provider-reaching path
+passes through (the API surface, the alias test, any future caller) -
+**before** dialect conversion, in this order:
+
+1. the client's value,
+2. the owner's default, if the client gave none,
+3. the owner's cap, if it clamps the value now standing,
+4. the deny rules.
+
+The owner writes one vocabulary regardless of the dialect a route
+serves: `temperature`, `max_output_tokens`, `thinking_level` (the
+canonical set in `gateway.thinking`; a level outside it is dropped at
+parse time, so the configuration can never claim a second vocabulary)
+and `system`. The thinking level is read from and written to the source
+dialect's own spelling, so the flat and the nested spelling of one
+request can never disagree, and the cap is ordinal in the canonical
+order: a level the gateway cannot order does not pass the ceiling. With
+no cap configured, an unknown level forwards, as the thinking vocabulary
+requires.
+
+Every value the policy changes is recorded in the attribution and the
+ledger against the route that **actually served** the request, in the
+same form as a dropped reasoning effort, tagged `defaulted`, `clamped`
+or `forced`. The `system` instruction is recorded as its length in
+characters, never as text: the ledger is metadata.
+
+`deny.tools` refuses the request with a 403 that names the rule,
+**before** any provider work happens - never a silently stripped tool
+list. `deny.store` forces the retention flag on every upstream payload;
+it is re-asserted after conversion because the bridge does not model
+`store`, so the force holds on a converted route exactly as it does
+same-dialect.
+
 ## Release identity
 
 `GET /version` returns exactly four keys: `service`, `source_revision`,

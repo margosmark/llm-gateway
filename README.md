@@ -238,6 +238,35 @@ request ledger records the phase and its source (`caller`, `jev`, or
 `default`) as metadata only - never the request content, the Jev question,
 or the answer distribution.
 
+### A request policy is opt-in per alias
+
+An alias may carry an optional **request policy** - owner defaults, caps
+and deny rules - so the client no longer dictates every parameter. It is
+off by default: without one, the client's values stand untouched, exactly
+as before. The block lives in the alias's `policy` entry in the
+configuration. A console editor for it is **not** landed yet, and a
+console alias save currently drops a file-configured policy - see
+`docs/REVIEW.md` R40 before relying on the console for aliases that have
+one.
+
+* **defaults** apply when the client specified nothing: `temperature`,
+  `max_output_tokens`, `thinking_level`, `system`.
+* **caps** apply over the client's value: `max_output_tokens`, and
+  `thinking_level` as an ordinal ceiling in the canonical order (weakest
+  to strongest).
+* **deny** refuses or forces: `tools: true` refuses the request with a
+  403 that names the rule - never a silently stripped tool list - and
+  `store: false` is forced onto every upstream request and recorded.
+
+The order is fixed: the client's value, your default, your cap, then the
+deny rules - applied in the router, before dialect conversion, on every
+path that reaches a provider, including the console's alias test. You
+write one vocabulary regardless of the dialect a route serves. Every
+value the policy changes is recorded in the request ledger against the
+route that served the request, tagged `defaulted`, `clamped` or
+`forced`, so nothing is silent; the `system` instruction is recorded as
+its length, never its text.
+
 ---
 
 ## Using it from OpenCode
