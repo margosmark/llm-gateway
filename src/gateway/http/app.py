@@ -46,6 +46,7 @@ from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
+from gateway.http.request_id import validate_client_request_id
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
 from gateway.logging import RequestLogger
 from gateway.routes import validate_alias_routes, validate_phase_routing
@@ -168,6 +169,21 @@ class GatewayApp:
 
         request.params = params
         request.context["surface"] = SURFACE_OWNER
+        if request.path in ("/v1/chat/completions", "/v1/responses"):
+            client_request_ids = request.headers.get_all("X-Request-Id")
+            if len(client_request_ids) > 1:
+                result = json_response({"error": {"message": "invalid X-Request-Id", "type": "malformed_request"}}, 400)
+                self._log_request(request, result, started)
+                return result
+            if client_request_ids:
+                try:
+                    request.context["client_request_id"] = validate_client_request_id(client_request_ids[0])
+                except ValueError:
+                    result = json_response({"error": {"message": "invalid X-Request-Id", "type": "malformed_request"}}, 400)
+                    self._log_request(request, result, started)
+                    return result
+
+        
 
         # CSRF applies to the cookie-authenticated browser surfaces only.
         # The API authenticates with bearer tokens, which a browser never
@@ -473,6 +489,7 @@ class GatewayApp:
         request.context["streamed"] = stream
         request.context["request_id"] = request_id
         request.context["serving_model"] = routed.attribution.serving_model
+        request.context["gateway_request_id"] = request_id
 
         if not stream:
             upstream_dialect = routed.request.dialect or dialect
