@@ -1505,3 +1505,50 @@ candidate, with its regression:
    redacted; an Anthropic-specific regression drives a fake transport whose
    error body echoes the key in both `error.code` and the message.
    Evidence: `tests/test_anthropic_adapter.py::test_upstream_error_codes_and_credentials_never_echo`.
+
+### R41 — A confirmed exhaustion held a provider for hours, stranding a reopened subscription window — **closed**
+
+**Severity: medium.** *(closed)*
+
+On 2026-10-24 the `chatgpt_codex` upstream reported `exhausted` for the
+third consecutive time after its subscription window had already
+reopened. `CircuitStore.record_failure` gave a confirmed exhaustion a
+1-hour floor and then grew it exponentially with consecutive failures
+(`base * 2^(failures-1)`, capped only at a day), so the third failure
+escalated the persisted provider-wide circuit to a **four-hour** hold.
+Every ChatGPT-primary alias fell back to OpenCode until the locally
+calculated expiry, leaving reopened subscription capacity unused. The
+window was opaque in the console (a raw seconds count), and the only
+recovery was a hand edit of `circuits.json` on the host.
+
+**Required fix.** Bound the confirmed-exhaustion window with a
+configurable cap and no exponential growth; keep the provider/route
+distinction; keep the single half-open recovery probe; give the owner a
+deliberate, Origin-protected per-provider clear action; and surface the
+full recovery telemetry (failure timestamp, scope, failures, hold, next
+probe, probe-in-flight) in state and console, with circuit fallback
+distinguishable from a phase-route selection.
+
+**Resolution.** `gateway.circuits` now floors a confirmed exhaustion at
+`EXHAUSTED_BASE_SECONDS` (15 min) and caps it at `EXHAUSTED_MAX_SECONDS`
+(30 min default, `GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS` /
+`--exhausted-cooldown-max-seconds`), with no exponential growth for this
+class; rate-limit and transient windows are unchanged. The half-open
+single probe is preserved: one claim, concurrent requests skipped with a
+truthful reason, in-memory claim reset on restart, abandoned claim
+reclaimed after five minutes. `POST /owner/api/provider` gained
+`clear_cooldowns` (canonical-Origin mutation) returning the cleared
+metadata-only entries for exactly the named provider, with an optional
+single explicit `probe_alias` request; state and console expose the
+telemetry plus `cooldown_policy`, and the ledger/Status view label
+`phase route`, `held by local circuit`, and cross-provider `fallback`
+distinctly. Evidence: `tests/test_circuits.py` (bounded window across
+repeated failures, cap beats a larger alias cooldown, configurable cap,
+telemetry fields, per-provider clear isolation),
+`tests/test_cooldown_recovery.py` (successful probe restores the primary
+with `fallback_used=false`, failed probe re-arms within the cap keeping
+the class and count, concurrent request receives the probe-in-flight
+skip, Origin refusal clears nothing, state policy/telemetry),
+`tests/test_cli.py` (flag/env knob, invalid values refused at parse,
+cap reaches the circuit store). Operator runbook §8/§9 document the
+recovery procedure and the retired legacy systemd unit.

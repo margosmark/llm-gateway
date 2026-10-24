@@ -1009,6 +1009,38 @@ The no-storage promise stands unchanged: the gateway does not store
 prompts, responses, or response content. The failure-state cache in T32
 remains the only caching, and it stores no content.
 
+### T38 — Reset-aware ChatGPT cooldown recovery — `done`
+
+**Why.** On 2026-10-24 a reopened `chatgpt_codex` subscription window sat
+behind a four-hour provider-wide circuit: a confirmed exhaustion had a
+1-hour floor and grew exponentially with consecutive failures, so the
+third failure escalated the persisted hold and every ChatGPT-primary
+alias kept falling back to OpenCode. See R41 in
+[`REVIEW.md`](REVIEW.md).
+
+**Landed.** The confirmed-exhaustion window is now **bounded**: a floor
+of 15 minutes and a cap of 30 minutes by default, configurable at
+startup with `GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS` (or
+`--exhausted-cooldown-max-seconds`), with no exponential growth for this
+class. Rate-limit and transient windows are unchanged. Recovery stays
+automatic and stampede-safe: when the window ends, exactly one half-open
+probe is let through, concurrent requests are skipped with a truthful
+reason, a successful probe clears the provider and route circuits and
+the primary serves again with `fallback_used=false`, and a failed probe
+re-arms within the cap keeping the failure class and count. The owner
+gained a deliberate per-provider **Clear cooldowns** action (console
+button and `POST /owner/api/provider` `clear_cooldowns`, canonical
+Origin required) that returns the cleared metadata-only entries and
+never touches another provider's circuits; an optional `probe_alias`
+runs exactly one explicit probe. State and console expose the recovery
+telemetry (failure timestamp, scope, failures, hold, next probe,
+probe-in-flight) plus the effective `cooldown_policy`, and the ledger
+labels `phase route` vs `held by local circuit` vs `fallback` distinctly.
+
+**Evidence.** `tests/test_circuits.py`, `tests/test_cooldown_recovery.py`,
+`tests/test_cli.py`; docs updated in README, ARCHITECTURE (cooldowns),
+RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
+
 ---
 
 ## Summary
@@ -1051,6 +1083,7 @@ remains the only caching, and it stores no content.
 | T34 | Decide whether a response cache may exist at all | 4 | declined (owner, 2026-10-23) |
 | T36 | The gateway appears in OpenCode's model selector | 1 | **done** |
 | T37 | Opt-in per-alias phase routing with optional Jev inference | 3 | **done** |
+| T38 | Reset-aware ChatGPT cooldown recovery (bounded exhaustion hold, single probe, owner clear action) | 2 | **done** |
 
 ## Suggested order
 

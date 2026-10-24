@@ -26,10 +26,12 @@ What this store does instead:
 * the state is **persisted**, so a restart during an outage does not
   defeat it;
 * the window **escalates** with consecutive failures and a success resets
-  it;
+  it - except for a confirmed exhaustion, whose window is **bounded**
+  (see ``EXHAUSTED_MAX_SECONDS``), because a reopened subscription window
+  must not be stranded behind an opaque multi-hour circuit;
 * **distinct failure classes get distinct treatment** - a confirmed
-  exhaustion is sticky and opens for a long time, a transient blip needs
-  a pattern before it opens anything;
+  exhaustion opens a bounded window and covers the whole provider, a
+  transient blip needs a pattern before it opens anything;
 * the state is keyed by **route** - provider *and* model - with a
   provider-wide entry for the failures that are account-scoped;
 * when a window ends the circuit is **half-open**: exactly one request is
@@ -61,9 +63,19 @@ from gateway.stores import atomic_write_json, read_json
 STATE_OPEN = "open"
 STATE_HALF_OPEN = "half_open"
 
-#: A confirmed exhaustion is a sticky condition: the allowance is gone, and
-#: minutes cannot bring it back. This is the floor for that window.
-EXHAUSTED_BASE_SECONDS = 3600
+#: A confirmed exhaustion is sticky within its window, but it is also
+#: **bounded**: a subscription window reopens on the provider's own
+#: schedule, and a local hold must never sit behind it for hours. The
+#: window is at least this long, and at most ``EXHAUSTED_MAX_SECONDS`` -
+#: no exponential growth, however many failures have been seen.
+EXHAUSTED_BASE_SECONDS = 900
+
+#: The longest window a confirmed exhaustion may hold a route or a whole
+#: provider, however many failures have happened and whatever the alias
+#: cooldown asks for. A reopened subscription window must not be stranded
+#: behind an opaque multi-hour circuit. Configurable at startup with
+#: ``GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS``.
+EXHAUSTED_MAX_SECONDS = 1800
 
 #: The longest window any circuit may hold a route, however many failures
 #: have happened.
@@ -184,14 +196,28 @@ class CircuitEntry:
 class CircuitStore:
     """The open circuits, and the file they are remembered in."""
 
-    def __init__(self, path: Path | None = None, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        clock: Callable[[], float] = time.time,
+        exhausted_max_seconds: int = EXHAUSTED_MAX_SECONDS,
+    ) -> None:
         self._path = path
         #: The clock, so a test can move time without sleeping.
         self._clock = clock
+        #: The cap on a confirmed-exhaustion window. It is a retry policy,
+        #: so the operator may tune it, but it always wins over a larger
+        #: alias cooldown for this failure class.
+        self._exhausted_max_seconds = max(1, int(exhausted_max_seconds))
         self._entries: dict[str, CircuitEntry] = {}
         self._lock = threading.RLock()
         if path is not None:
             self._load()
+
+    @property
+    def exhausted_max_seconds(self) -> int:
+        """The configured cap on a confirmed-exhaustion window."""
+        return self._exhausted_max_seconds
 
     def _now(self) -> float:
         return self._clock()
@@ -262,7 +288,11 @@ class CircuitStore:
                     "scope": entry.scope,
                     "error_class": entry.error_class,
                     "failures": entry.failures,
+                    "opened_at": entry.opened_at,
+                    "until": entry.until,
                     "remaining_seconds": max(0, int(entry.until - now)),
+                    "next_probe_at": max(now, entry.until),
+                    "probe_in_flight": entry.probe_in_flight,
                     "reason": entry.reason,
                     "state": (
                         "counting"
@@ -337,10 +367,10 @@ class CircuitStore:
 
         The class decides the treatment:
 
-        * ``exhausted`` is a confirmed exhaustion of the allowance. It is
-          sticky, so it opens for at least an hour, and it covers the
-          whole provider, because the account's allowance is gone rather
-          than one route's share of it.
+        * ``exhausted`` is a confirmed exhaustion of the allowance. It
+          opens a bounded window (see ``EXHAUSTED_MAX_SECONDS``) and
+          covers the whole provider, because the account's allowance is
+          gone rather than one route's share of it.
         * ``rate_limited`` opens the route for at least as long as the
           provider asked for, when it said.
         * ``transient`` is a blip. It opens the route only after a pattern
@@ -378,13 +408,27 @@ class CircuitStore:
                 base = max(base_seconds, retry_after or 0)
                 account_scoped = False
             elif error_class == ERROR_EXHAUSTED:
-                base = max(base_seconds, EXHAUSTED_BASE_SECONDS)
+                # A confirmed exhaustion is bounded: the account's own
+                # subscription window may reopen on the provider's
+                # schedule, so a local hold must never outlast it by
+                # hours. The window is the local policy floor, capped at
+                # the configured maximum, and it does not grow
+                # exponentially however many failures have been seen. The
+                # failure count is still recorded, so the operator can see
+                # the pattern.
+                base = min(
+                    max(base_seconds, EXHAUSTED_BASE_SECONDS),
+                    self._exhausted_max_seconds,
+                )
                 account_scoped = True
             else:
                 base = base_seconds
                 account_scoped = False
 
-            window = min(base * (2 ** (failures - 1)), MAX_BACKOFF_SECONDS)
+            if error_class == ERROR_EXHAUSTED:
+                window = base
+            else:
+                window = min(base * (2 ** (failures - 1)), MAX_BACKOFF_SECONDS)
             reason = self._reason_for(error_class, window, failures, retry_after, base)
             # The route's own circuit always opens.
             self._entries[self._route_key(provider, model)] = CircuitEntry(
@@ -431,18 +475,32 @@ class CircuitStore:
             self._entries.pop(self._route_key(provider, model), None)
             self._persist()
 
-    def clear(self, provider: str | None = None, model: str | None = None) -> None:
-        """Forget a circuit, or all of them."""
+    def clear(self, provider: str | None = None, model: str | None = None) -> list[dict[str, Any]]:
+        """Forget a circuit, or all of them.
+
+        Returns the entries that were removed, each with its ``key``, so
+        an owner action can report exactly what it cleared. The entries
+        are metadata only - never a credential or request content.
+        """
         with self._lock:
+            removed: list[dict[str, Any]] = []
+
+            def take(key: str) -> None:
+                entry = self._entries.pop(key, None)
+                if entry is not None:
+                    removed.append({"key": key, **entry.to_dict()})
+
             if provider is None:
-                self._entries.clear()
+                for key in list(self._entries):
+                    take(key)
             elif model is None:
-                self._entries.pop(self._provider_key(provider), None)
+                take(self._provider_key(provider))
                 for key in [k for k in self._entries if k.startswith(f"{provider}/")]:
-                    self._entries.pop(key, None)
+                    take(key)
             else:
-                self._entries.pop(self._route_key(provider, model), None)
+                take(self._route_key(provider, model))
             self._persist()
+            return removed
 
     # --- helpers ---------------------------------------------------------
 
