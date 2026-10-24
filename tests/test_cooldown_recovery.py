@@ -16,11 +16,13 @@ unused. The properties under test:
 
 from __future__ import annotations
 
+import threading
 import unittest
 
 from gateway.circuits import EXHAUSTED_MAX_SECONDS, CircuitStore
 from tests.test_circuits import _Clock
 from tests.test_end_to_end import FAKE_PROVIDER, FakeAdapter, GatewayHarness
+from tests.test_probe_claim import BlockingFakeAdapter
 
 
 class RecoveryProbeTests(unittest.TestCase):
@@ -111,13 +113,27 @@ class RecoveryProbeTests(unittest.TestCase):
     def test_a_concurrent_request_gets_a_truthful_skip_not_a_duplicate_probe(self) -> None:
         self._exhaust_the_primary()
         self.clock.advance(EXHAUSTED_MAX_SECONDS + 10)
-        self.harness.registry.register(FakeAdapter())
 
+        # The probe claim moved to the invocation boundary (R42/R43): only a
+        # request that actually reaches the provider holds it. Drive a real
+        # in-flight probe with a blocking adapter so the concurrent window is
+        # deterministic without sleeping.
+        entered, release = threading.Event(), threading.Event()
+        blocking = BlockingFakeAdapter(FAKE_PROVIDER, entered=entered, release=release)
+        self.harness.registry.register(blocking)
+
+        first: dict = {}
+
+        def probe_request() -> None:
+            first["result"] = self._request()
+
+        worker = threading.Thread(target=probe_request, daemon=True)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=10), "the probe never reached the provider")
+
+        # While the recovery probe is genuinely running, a concurrent request
+        # must not reach the provider and must be told why.
         alias = self.harness.router.resolve_alias("coding")
-        # The first candidate build claims the single recovery probe...
-        self.harness.router.candidates(alias)
-        # ...so a concurrent request must not reach the provider and must
-        # be told why.
         concurrent = self.harness.router.candidates(alias)
         excluded = [c for c in concurrent if not c.eligible]
         self.assertTrue(excluded, "the held route must be excluded while the probe is live")
@@ -125,6 +141,14 @@ class RecoveryProbeTests(unittest.TestCase):
             any("probe" in (c.excluded_reason or "") for c in excluded),
             f"the skip reason must name the live probe: {[c.excluded_reason for c in excluded]}",
         )
+
+        release.set()
+        worker.join(timeout=10)
+        self.assertFalse(worker.is_alive(), "the probing request never finished")
+        self.assertEqual(first["result"][0], 200)
+        # Exactly one invocation reached the primary across both requests:
+        # the probe itself.
+        self.assertEqual(len(blocking.calls), 1)
 
 
 class OwnerRecoveryActionTests(unittest.TestCase):
