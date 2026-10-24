@@ -16,6 +16,10 @@ network access and no credentials:
   handshake of an accepted connection, and the head of a stream;
 * a long but **progressing** stream is *not* abandoned: frames within the
   read budget count as progress, however long the stream runs;
+* once the head of a stream is in, the **read** budget is the one armed
+  on the socket: a single inter-frame gap that exceeds the connect
+  budget but fits the read budget (a long reasoning pause) must not
+  abandon the stream;
 * a buffered body that dribbles in more slowly than the connect budget
   still arrives whole, because the read budget judges it;
 * a silent **buffered** response is deliberately judged by the read
@@ -28,6 +32,7 @@ network access and no credentials:
 
 from __future__ import annotations
 
+import http.client
 import socket
 import threading
 import time
@@ -241,6 +246,56 @@ class ConnectAndReadBudgetTests(unittest.TestCase):
             elapsed,
             1.5,
             "the stream must outlive the connect budget several times over to prove anything",
+        )
+
+    def test_a_frame_gap_beyond_the_connect_budget_is_judged_by_the_read_budget(self):
+        """One long gap - longer than the connect budget - does not kill a progressing stream.
+
+        This is the long-reasoning pause of a real provider: the head is
+        in, one frame has arrived, then the provider thinks for longer
+        than the connect budget before the next frame. The read budget
+        must be the one in force after the head, so the stream survives
+        the gap. When the connect budget is still armed on the socket,
+        the gap read fails at the connect budget and the stream is
+        abandoned mid-progress.
+        """
+        _QuietHandler.stream_frames = 2
+        _QuietHandler.frame_gap = 1.5  # above the 0.6s connect budget, within the 3s read budget
+        client = UpstreamClient(timeout=3.0, connect_timeout=0.6)
+        # Socket-level, observed from inside the response: every frame
+        # read must find the read budget armed on the socket. The head is
+        # read inside begin() through the file object directly, so the
+        # spy sees only the frame reads that follow it.
+        original_readline = http.client.HTTPResponse.readline
+        timeout_in_force: list[float] = []
+
+        def spy(response, *args, **kwargs):
+            timeout_in_force.append(response.fp.raw._sock.gettimeout())
+            return original_readline(response, *args, **kwargs)
+
+        http.client.HTTPResponse.readline = spy  # type: ignore[method-assign]
+        try:
+            started = time.monotonic()
+            response = client.request("GET", self.url, {}, stream=True)
+            self.assertIsNotNone(response.stream)
+            frames = b"".join(response.stream)
+            elapsed = time.monotonic() - started
+        finally:
+            http.client.HTTPResponse.readline = original_readline
+            client.close()
+        for index in range(2):
+            self.assertIn(f"data: frame-{index}".encode(), frames)
+        self.assertTrue(timeout_in_force, "the stream must have been read line by line")
+        for read_timeout in timeout_in_force:
+            self.assertEqual(
+                read_timeout,
+                3.0,
+                "every frame read must be judged by the read budget, not the connect budget",
+            )
+        self.assertGreaterEqual(
+            elapsed,
+            1.4,
+            "the inter-frame gap must have been waited out under the read budget, not cut at the connect budget",
         )
 
     def test_a_slow_buffered_body_is_judged_by_the_read_budget(self):

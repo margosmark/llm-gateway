@@ -1508,12 +1508,73 @@ PYTHONPATH=src python3 -m gateway --help                  OK
 git diff --check                                          clean
 ```
 
+### R42 — The read budget never reached the socket on the streaming path, so every SSE frame was judged by the connect budget — **closed**
+
+**Severity: high availability correctness.** *(closed; the socket is
+armed directly once the head is in, with a socket-level regression)*
+
+`UpstreamClient._open()` armed the connect budget on the socket before
+`getresponse()` — the head of a stream is a stall, by design — and then
+re-armed the read budget **through the connection**:
+`self._arm(connection, self.timeout)`. For a response without a
+`Content-Length` — every SSE stream — `will_close` is true and
+`http.client.HTTPConnection.getresponse()` passes the socket to the
+response by closing the connection's reference to it, so
+`connection.sock` is `None` from then on while the socket itself lives
+on inside the response's file object. The follow-up `_arm` is guarded by
+`if connection.sock is not None:` and became a silent no-op: the socket
+kept the connect budget for the whole stream.
+
+Impact: with stock budgets (read 120s, connect 10s) any inter-frame gap
+over 10s aborted a stream that was still progressing — a long reasoning
+pause is exactly this case — on **every** adapter, since all four
+construct `UpstreamClient(user_agent=USER_AGENT)` with the stock
+budgets. Measured at socket level by QA (`t_099ed4e6`) on candidate
+`72d47b3`: with `timeout=2.0, connect_timeout=0.6`, the timeout in force
+for every frame read was 0.6, never 2.0, and a 12s gap aborted the
+stream at elapsed 10.01s. The module docstring's own contract — every
+frame of a stream judged by the read budget — was violated by the code.
+
+**Fix.** `_open()` holds the socket reference captured just before
+`getresponse()` and arms the read budget on *that* socket once the head
+is in (`src/gateway/adapters/http_client.py`). The connect budget still
+judges the streamed head (unchanged), and the buffered path is untouched:
+a content-length response keeps `will_close` false, so the connection
+still holds its socket there.
+
+**Regression evidence.**
+`tests/test_upstream_timeouts.py::test_a_frame_gap_beyond_the_connect_budget_is_judged_by_the_read_budget`:
+two frames with a single 1.5s inter-frame gap against
+`connect_timeout=0.6, timeout=3.0` — the gap is above the connect budget
+and within the read budget. It asserts (a) a spy on
+`http.client.HTTPResponse.readline` observes the read budget (3.0) as
+the socket timeout in force for every frame read, (b) both frames
+arrive, and (c) the stream is waited out past the gap. Verified by
+running the new test against the unmodified candidate `_open()`: it
+fails with `AdapterError: the provider stream stalled before the response
+finished` at the 0.6s connect budget — the exact defect QA measured — and
+passes with the fix in place. The prior test only used per-frame gaps
+*below* the connect budget (0.35s vs 0.4s), so it could not see which
+budget governed the frames; this one crosses the connect budget with a
+single gap.
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+Ran 563 tests in 57.5s ... OK (skipped=3)
+
+python3 -m compileall -q src tests                        OK
+node tests/console_dom_test.js                            all checks passed
+node tests/test_opencode_catalog.mjs                      OpenCode catalogue checks passed
+PYTHONPATH=src python3 -m gateway --help                  OK
+git diff --check                                          clean
+```
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
 open**; R36 is the explicit
 post-deployment route replacement above, and R38 is the inert per-phase
-reasoning effort, which needs a routing change. R37, R39, R40 and R41 are closed. The register
+reasoning effort, which needs a routing change. R37, R39, R40, R41 and R42 are closed. The register
 is kept so the next agent can see what was already paid for in time.
 
 1. R0 is superseded by the approved trusted-LAN mode, which removes passphrase bootstrap entirely; see candidate update below.
