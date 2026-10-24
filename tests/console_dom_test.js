@@ -807,7 +807,12 @@ check("alias request policy editor exposes the canonical defaults, caps, and den
 
 check("policy save submits explicit policy including deliberate removal and reports server outcome", function () {
   assert(source.includes('text: "Remove request policy"'));
-  assert(source.includes('if (!removeRequestPolicy.checked)'));
+  // Removal is its own branch that nulls the policy: skipping the rebuild
+  // while keeping `policy = editing.policy` would resubmit the old block
+  // and the server would report "unchanged" (review finding, Medium).
+  assert(source.includes("if (removeRequestPolicy.checked) {"));
+  assert(source.includes("policy = null;"));
+  assert(!source.includes("if (!removeRequestPolicy.checked)"));
   assert(source.includes('policy: policy'));
   assert(source.includes('result && result.policy && result.policy.state'));
   assert(source.includes('" Request policy " + policyState + "."'));
@@ -821,7 +826,14 @@ const editorSlice = source.slice(
   source.indexOf("var requestPolicy = editing && editing.policy;"),
   source.indexOf("var capTokens =")
 );
-const rebuildStart = source.indexOf("if (!removeRequestPolicy.checked) {");
+// The slice starts at production's own prelude - `var policy = editing &&
+// editing.policy ? ...` - not a test-only `var policy = null`. A harness
+// prelude that differs from production passes while production fails: the
+// removal bug shipped exactly there (review finding, Medium).
+const rebuildStart = source.indexOf(
+  "var policy = editing && editing.policy ? editing.policy : null;"
+);
+assert(rebuildStart !== -1, "the production policy prelude must be sliceable");
 const rebuildSlice = source.slice(
   rebuildStart,
   source.indexOf("if (!removePhasePolicy.checked && (phaseEnabled.checked || phasePolicy))", rebuildStart)
@@ -850,8 +862,11 @@ function buildSystemTextarea(alias) {
   return buildPolicyControls(alias).defaultSystem;
 }
 
-function rebuildPolicy(controls) {
+// Runs the real save-path slice - production's prelude included - against
+// the given controls and editing context, exactly as the onclick does.
+function rebuildPolicy(controls, editing) {
   return new Function(
+    "editing",
     "removeRequestPolicy",
     "defaultTemperature",
     "defaultTokens",
@@ -862,8 +877,9 @@ function rebuildPolicy(controls) {
     "denyTools",
     "denyStore",
     "policyInt",
-    "var policy = null;\n" + rebuildSlice + "\nreturn policy;"
+    rebuildSlice + "\nreturn policy;"
   )(
+    editing,
     controls.removeRequestPolicy,
     controls.defaultTemperature,
     controls.defaultTokens,
@@ -904,9 +920,37 @@ check("editing another policy control and saving keeps the configured system rul
     capThinking: { value: "" },
     denyTools: { checked: false },
     denyStore: { value: "" },
-  });
+  }, policiedAlias);
   assert.strictEqual(policy.defaults.system, POLICY_SYSTEM);
   assert.strictEqual(policy.defaults.temperature, 0.4);
+});
+
+check("ticking remove request policy submits an explicit policy null", function () {
+  // Regression: the save path only skipped the rebuild when the box was
+  // ticked, so `policy` kept its prelude value - the existing policy
+  // object - and the save resubmitted the old block. The server reported
+  // "unchanged" and the policy stayed in force: the control was a no-op.
+  // The real save-path slice (production prelude included) is run here
+  // with remove ticked and a policied alias in the editor.
+  const controls = buildPolicyControls(policiedAlias);
+  controls.removeRequestPolicy.checked = true;
+  // Even with every policy control populated, removal must win.
+  controls.defaultTemperature.value = "0.9";
+  const policy = rebuildPolicy({
+    removeRequestPolicy: controls.removeRequestPolicy,
+    defaultTemperature: controls.defaultTemperature,
+    defaultTokens: controls.defaultTokens,
+    defaultThinking: controls.defaultThinking,
+    defaultSystem: controls.defaultSystem,
+    capTokens: { value: "16000" },
+    capThinking: { value: "high" },
+    denyTools: { checked: true },
+    denyStore: { value: "false" },
+  }, policiedAlias);
+  assert.strictEqual(policy, null, "removal must submit policy: null, got " + JSON.stringify(policy));
+  // And the wire body carries the explicit null the endpoint needs to clear.
+  const body = helpers.emitJson({ action: "save", name: "coding", policy: policy });
+  assert(body.includes('"policy":null'), "the wire body must carry policy: null: " + body);
 });
 
 check("the policy editor never initialises a textarea from the value attribute", function () {
@@ -971,7 +1015,7 @@ check("an unrelated edit keeps a valid non-tenth temperature through guard and r
     capThinking: { value: "" },
     denyTools: { checked: false },
     denyStore: { value: "" },
-  });
+  }, { policy: { defaults: { temperature: 0.15, system: POLICY_SYSTEM } } });
   assert.strictEqual(policy.defaults.temperature, 0.15);
   assert.strictEqual(policy.defaults.thinking_level, "high");
   assert.strictEqual(policy.defaults.system, POLICY_SYSTEM);
@@ -1060,7 +1104,7 @@ check("an unrelated edit resubmits an unsafe token policy with every digit", fun
     capThinking: { value: "" },
     denyTools: { checked: false },
     denyStore: { value: "" },
-  });
+  }, { policy: loaded });
   assert.strictEqual(policy.defaults.system, POLICY_SYSTEM, "an unrelated edit must not drop other rules");
   assert.strictEqual(policy.defaults.thinking_level, "high");
 
@@ -1082,6 +1126,43 @@ check("serialization keeps digit strings that really are text as strings", funct
   // A marker that cannot be spliced is refused rather than sent on.
   assert.throws(
     function () { helpers.emitJson({ max_output_tokens: { __raw_int__: "not-digits" } }); },
+    /unspliced/
+  );
+});
+
+check("text mentioning the marker name serializes; only an unspliced marker is refused", function () {
+  // Regression: the refusal used to test the bare substring `__raw_int__`
+  // anywhere in the serialized payload, so an alias name or system prompt
+  // containing that text made emitJson throw. It runs synchronously inside
+  // run(api(...)), so the throw escaped .catch and the save silently
+  // no-opped with no toast. The guard is now minted-vs-spliced: only a
+  // marker object this file minted counts, and text can neither mint one
+  // nor match the splice pattern (string quotes are escaped).
+  const withName = helpers.emitJson({ action: "save", name: "a __raw_int__ b" });
+  assert(withName.includes('"name":"a __raw_int__ b"'), withName);
+  const withPrompt = helpers.emitJson({
+    policy: { defaults: { system: "never emit __raw_int__ markers" } },
+  });
+  assert(withPrompt.includes('"system":"never emit __raw_int__ markers"'), withPrompt);
+  // Escaped-quote lookalikes inside text are still text: the payload must
+  // serialize and parse back to the exact string, unspliced and unrefused.
+  const note = 'text with \\"__raw_int__\\" inside';
+  const lookalike = helpers.emitJson({ note: note });
+  assert.strictEqual(JSON.parse(lookalike).note, note, lookalike);
+  // And a real marker still splices to exact digits while a stray
+  // marker-shaped object under a non-integer key counts and splices.
+  assert.strictEqual(
+    helpers.emitJson({ policy: { defaults: { max_output_tokens: { __raw_int__: UNSAFE_TOKEN } } } }),
+    '{"policy":{"defaults":{"max_output_tokens":' + UNSAFE_TOKEN + "}}}"
+  );
+  // Pretty-printed bodies (backup export) splice too.
+  assert.strictEqual(
+    helpers.emitJson({ max_output_tokens: { __raw_int__: UNSAFE_TOKEN } }, 2),
+    '{\n  "max_output_tokens": ' + UNSAFE_TOKEN + "\n}"
+  );
+  // A counted marker left unspliced anywhere in the tree is still refused.
+  assert.throws(
+    function () { helpers.emitJson({ policy: { caps: { max_output_tokens: { __raw_int__: "12x" } } } }); },
     /unspliced/
   );
 });
