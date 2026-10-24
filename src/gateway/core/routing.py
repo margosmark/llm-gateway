@@ -88,6 +88,22 @@ def _requested_reasoning_effort(payload: dict[str, Any]) -> str | None:
     return effort if isinstance(effort, str) and effort != "none" else None
 
 
+def _unsupported_payload_fields(adapter: Adapter | None) -> frozenset[str]:
+    """Request fields this adapter's upstream rejects with a 400.
+
+    Read off the adapter through the same seam as its ``dialect`` and
+    ``provider_id``, so the routing core stays free of provider branches: the
+    knowledge of what a given upstream refuses lives on that upstream's own
+    adapter, and an adapter that declares nothing gets nothing stripped.
+    """
+    if adapter is None:
+        return frozenset()
+    declared = getattr(adapter, "UNSUPPORTED_PAYLOAD_FIELDS", None)
+    if not isinstance(declared, (frozenset, set, tuple, list)):
+        return frozenset()
+    return frozenset(name for name in declared if isinstance(name, str))
+
+
 class RoutingError(Exception):
     """A routing failure that the caller turns into an HTTP response."""
 
@@ -633,6 +649,8 @@ class Router:
             upstream_payload["model"] = candidate.route.model
 
             degradation: dict[str, Any] | None = None
+            degradation_reasons: list[str] = []
+            dropped_fields: list[str] = []
             if candidate.degraded_reason:
                 # Drop what this route cannot honour, and say so.
                 upstream_payload.pop("reasoning_effort", None)
@@ -643,11 +661,34 @@ class Router:
                     }
                     if not upstream_payload["reasoning"]:
                         upstream_payload.pop("reasoning")
+                degradation_reasons.append(candidate.degraded_reason)
+
+            # An adapter may declare request fields its upstream rejects
+            # outright. A caller that sets one is doing nothing unusual -
+            # OpenAI's own Chat dialect accepts all of them - so excluding
+            # the route would fail a request a usable route can serve. The
+            # field is dropped for this route and the substitution is
+            # recorded, never silent.
+            unsupported = _unsupported_payload_fields(candidate.adapter)
+            if unsupported:
+                dropped_fields = sorted(name for name in unsupported if name in upstream_payload)
+                if dropped_fields:
+                    for name in dropped_fields:
+                        upstream_payload.pop(name, None)
+                    degradation_reasons.append(
+                        "this provider's upstream rejects these request fields with a 400 "
+                        f"malformed-request error ({', '.join(dropped_fields)}); "
+                        "they were dropped for this route"
+                    )
+
+            if degradation_reasons:
                 degradation = {
                     "provider": candidate.route.provider,
                     "model": candidate.route.model,
-                    "reason": candidate.degraded_reason,
+                    "reason": " ".join(degradation_reasons),
                 }
+                if dropped_fields:
+                    degradation["dropped_fields"] = dropped_fields
 
             request = ProviderRequest(
                 model=candidate.route.model,
