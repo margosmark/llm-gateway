@@ -282,7 +282,12 @@ most.
   let through to find out whether the provider recovered. A success closes
   it; a failure reopens it for longer. A probe that never returns is
   reclaimed after five minutes, and a probe is never remembered across a
-  restart.
+  restart. The probe is **claimed at the invocation boundary**, immediately
+  before a provider is called — never while candidates are merely being
+  enumerated — and the claim carries an owner token so that only the request
+  that took it can release it. A candidate that is skipped before invocation
+  (an image the primary cannot see, a phase route that was not chosen, a
+  refused conversion) claims nothing.
 * The stored state is **metadata only**, and it is forgotten after a week.
 
 ## Phase routing (opt-in)

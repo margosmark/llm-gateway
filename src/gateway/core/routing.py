@@ -260,7 +260,7 @@ class Router:
                 candidate.excluded_reason = "model is not enabled for exposure"
                 candidates.append(candidate)
                 continue
-            allowed, circuit_reason = self._circuits.check(route.provider, route.model)
+            allowed, circuit_reason = self._circuits.preview(route.provider, route.model)
             if not allowed:
                 candidate.excluded_reason = circuit_reason
                 candidates.append(candidate)
@@ -665,6 +665,42 @@ class Router:
             if needs_tools:
                 request.with_side_effects_possible()
 
+            # The route is claimed **here**, immediately before the provider
+            # is invoked, and only after every local check that could
+            # decline this route has passed. Claiming earlier - while the
+            # candidates were still being assembled - let a route that was
+            # never invoked hold a half-open probe for
+            # ``PROBE_TIMEOUT_SECONDS``, which pinned the primary to its
+            # fallback long after the provider had recovered.
+            claimed, circuit_reason, probe_owner = self._circuits.claim(
+                candidate.route.provider, candidate.route.model
+            )
+            if not claimed:
+                # Another request is probing this route right now, or the
+                # circuit is in cooldown again. The route is skipped, the
+                # same way an ineligible candidate is.
+                attribution.skipped.append(
+                    {
+                        "provider": candidate.route.provider,
+                        "model": candidate.route.model,
+                        "reason": circuit_reason,
+                    }
+                )
+                if is_last:
+                    break
+                if (
+                    not attribution.fallback_used
+                    and alias.primary is not None
+                    and candidate.route == alias.primary
+                ):
+                    # The primary could not be probed, so a later route is
+                    # about to serve the request. The record says why.
+                    attribution.fallback_used = True
+                    attribution.fallback_reason = (
+                        f"the primary route was skipped: {circuit_reason}"
+                    )
+                continue
+
             try:
                 response = candidate.adapter.invoke(request)  # type: ignore[union-attr]
             except AdapterError as exc:
@@ -679,6 +715,12 @@ class Router:
                     }
                 )
                 self._maybe_open_circuit(alias, candidate, exc)
+                # The probe is over - it failed. The claim must not outlive
+                # it, or the route would stay on its fallback for the whole
+                # probe timeout even though nothing is probing it.
+                self._circuits.release_probe(
+                    candidate.route.provider, candidate.route.model, probe_owner
+                )
 
                 if is_last:
                     break
@@ -691,6 +733,15 @@ class Router:
                 attribution.fallback_reason = reason
                 attribution.fallback_used = True
                 continue
+            except Exception:
+                # An unexpected failure is not evidence that the provider
+                # opened a circuit, and it is not a probe that is still
+                # running: release the claim, so a later compatible request
+                # is not wedged behind a probe nobody is serving.
+                self._circuits.release_probe(
+                    candidate.route.provider, candidate.route.model, probe_owner
+                )
+                raise
 
             attribution.serving_provider = candidate.route.provider
             attribution.serving_model = candidate.route.model
