@@ -229,6 +229,13 @@ policy. Provider-specific behaviour lives in `gateway.adapters`.
   The checked-in `data/go_catalog.json` supplies the dated, published mapping
   from model ID to wire dialect. An undocumented dialect is refused rather
   than guessed.
+* **OpenAI API** authenticates to the documented `GET /v1/models`
+  catalogue with a bearer token and serves both OpenAI dialects:
+  `/v1/chat/completions` for a Chat Completions route and `/v1/responses`
+  for a Responses route. The catalogue publishes no wire dialect, so a
+  discovered model keeps an unknown dialect until the owner sets it; an
+  undocumented dialect is refused rather than guessed, both in the router
+  and in the adapter.
 
 Adding a provider requires an adapter, model-capability handling, safe error
 classification, registry registration, UI/state treatment, tests, and an

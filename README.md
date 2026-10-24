@@ -4,13 +4,14 @@ A personal, LAN-only, OpenAI-compatible LLM gateway. It lets one owner manage
 their LLM access through a browser — no editing files, no Docker commands, no
 environment variables, no JSON.
 
-Two providers are in scope:
+Four providers are in scope:
 
 | Provider | Credential | Wire dialect |
 |---|---|---|
 | **ChatGPT / Codex** | user-operated device-code authorisation (beta) | Responses API |
 | **OpenCode Go** | API key | Responses, Chat Completions, Anthropic Messages, or Google v1beta — **per model** |
 | **OpenCode Console Jev** | API key | Native System One structured decisions (`/v1/systemone`), not chat completions |
+| **OpenAI API** | API key | Chat Completions or Responses — **per model**, owner-chosen (the catalogue publishes no dialect) |
 
 ---
 
@@ -83,7 +84,7 @@ Then, from a trusted LAN device:
 6. Create an alias, pick a primary, publish it.
 7. Point a LAN client at the alias.
 
-The console opens on **Set up your gateway** with that checklist. The two
+The console opens on **Set up your gateway** with that checklist. The
 supported provider *cards* are visible so the owner can choose one, but a
 fresh install has zero provider credentials, zero discovered models, zero
 profiles, zero aliases and zero published models.
@@ -142,6 +143,29 @@ explicit action stores the key and then validates it against
 `https://opencode.ai/inference/go/v1/models`; ordinary page loads still never
 call a provider. The key is stored in a private credential store,
 separately from any other provider, and is **never displayed again**.
+
+### OpenAI API
+
+`Providers → OpenAI API`.
+
+Paste the OpenAI platform API key into the write-only form and choose
+**Save and test**. The explicit action stores the key and then validates
+it against `https://api.openai.com/v1/models`; ordinary page loads still
+never call a provider. The key is stored in its own private credential
+file, separately from every other provider, and is **never displayed
+again** — not in state, not in status, not in `/version`, not in the
+request ledger and not in a log line.
+
+After **Refresh model catalog**, each discovered model shows *Unknown* for
+its dialect: OpenAI's catalogue publishes a model id and nothing else, so
+the gateway does not guess which endpoint a model speaks. Use **Enter a
+model id manually** with the same provider and model id to set the dialect
+(Chat Completions or Responses), then enable the row. Until a dialect is
+set, the route is excluded with *"the wire dialect for this model is not
+documented"* rather than failing later. Your dialect choice survives later
+refreshes. Limits, context windows, retention and image input also stay
+**Unknown** for every discovered model, because the catalogue publishes
+none of them and the gateway does not infer them from a model id.
 
 ---
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from gateway.adapters.chatgpt_codex import ChatGPTCodexAdapter
 from gateway.adapters.opencode_go import OpenCodeGoAdapter
 from gateway.adapters.opencode_console import OpenCodeConsoleAdapter
+from gateway.adapters.openai_api import OpenAIApiAdapter
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.buildinfo import release_identity
@@ -89,6 +90,7 @@ def build_application(data_dir: Path, host: str, port: int):
     registry.register(ChatGPTCodexAdapter(credentials.provider_handle("chatgpt_codex")))
     registry.register(OpenCodeGoAdapter(credentials.provider_handle("opencode_go")))
     registry.register(OpenCodeConsoleAdapter(credentials.provider_handle("opencode_console")))
+    registry.register(OpenAIApiAdapter(credentials.provider_handle("openai_api")))
     with config.mutate() as snapshot:
         for provider_id in registry.provider_ids():
             if provider_id not in snapshot.providers:
