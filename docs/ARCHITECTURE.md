@@ -13,7 +13,12 @@ The gateway starts one standard-library HTTP server from `gateway.cli`:
 | Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version` | direct owner console/configuration and anonymous OpenAI-compatible API |
 
 The owner console, credential forms, provider actions, and client API share the
-same listener. `cli.py` refuses wildcard and non-private binds. No setup
+same listener. `cli.py` refuses wildcard and unsupported binds. Supported classes are
+RFC1918 IPv4, IPv6 unique-local (`fc00::/7`), and loopback, subject to the
+address being assigned locally. The HTTP server selects an IPv4 or IPv6
+listener by address family; IPv6 authorities are bracketed for URLs, `Host`,
+and `Origin`. Public (including RFC 5737 TEST-NET),
+multicast, link-local, and unspecified addresses are refused. No setup
 listener or setup-port setting exists. Forwarded headers are rejected rather
 than trusted.
 The gateway port is configurable, but `8766` is reserved and rejected so the

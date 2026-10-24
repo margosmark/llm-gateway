@@ -109,8 +109,16 @@ def check_origin(request: Request, policy: SecurityPolicy) -> None:
 
 
 
+def format_authority_host(host: str) -> str:
+    """Format an IP literal for an HTTP authority (Host/URL) boundary."""
+    value = host.strip()
+    if ":" in value and not (value.startswith("[") and value.endswith("]")):
+        return f"[{value}]"
+    return value
+
+
 def canonical_origin(host: str, port: int, scheme: str = "http") -> str:
-    return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{format_authority_host(host)}:{port}"
 
 
 def build_allowed_hosts(host: str, port: int, extra: Iterable[str] = ()) -> set[str]:
@@ -121,8 +129,9 @@ def build_allowed_hosts(host: str, port: int, extra: Iterable[str] = ()) -> set[
     names the operator configures are accepted verbatim.
     """
     hosts: set[str] = set()
-    hosts.add(f"{host}:{port}".lower())
-    hosts.add(host.lower())
+    authority_host = format_authority_host(host)
+    hosts.add(f"{authority_host}:{port}".lower())
+    hosts.add(authority_host.lower())
     for item in extra:
         item = item.strip().lower()
         if item:
