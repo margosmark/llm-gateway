@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Sequence, TypeVar
+from collections.abc import Sequence
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -13,7 +14,7 @@ def weighted_index(weights: Sequence[int], conversation: str, alias: str) -> int
     if not weights or any(isinstance(weight, bool) or not isinstance(weight, int) or weight <= 0 for weight in weights):
         raise ValueError("weights must be a non-empty sequence of positive integers")
     total = sum(weights)
-    digest = hashlib.sha256(f"{alias}\0{conversation}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{alias}\0{conversation}".encode()).digest()
     slot = int.from_bytes(digest[:8], "big") % total
     for index, weight in enumerate(weights):
         if slot < weight:
