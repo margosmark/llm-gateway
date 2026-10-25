@@ -342,8 +342,11 @@ class RoutingTests(unittest.TestCase):
         payload = self._upstream_calls(harness, GO_PROVIDER)[0].payload
         self.assertNotIn("reasoning", payload)
         self.assertNotIn("reasoning_effort", payload)
-        # A disable is not a preference for a level, so nothing is degraded.
-        self.assertFalse(harness.router._ledger.recent()[0]["degradations"])
+        # Disabled normalizes to `none`; an unpublished level is dropped and
+        # recorded just like any other reasoning preference (R19).
+        degradations = harness.router._ledger.recent()[0]["degradations"]
+        self.assertTrue(degradations)
+        self.assertIn("none", str(degradations))
 
 
 if __name__ == "__main__":
