@@ -55,14 +55,72 @@ complete audit trail and **not a billing system**. A full write queue or
 storage error may drop a persistence update; the request path does not wait
 for disk I/O.
 
+The same append path maintains `request-ledger-rollup.json`, a derived daily
+rollup sidecar: one row per UTC day x alias x provider x model with requests,
+input, output and cached tokens, fallbacks broken out by the closed
+fallback-reason vocabulary (folded **at ingest** from `gateway.fallback_reasons`,
+the same rules the owner analytics reader applies, so a per-second cooldown
+sentence never becomes a sidecar key), errors by `error_class` and a status
+breakdown, alongside a per-day trend. The store's in-memory request index is
+count-capped at 50,000 entries - the only runtime structure that was not
+already bounded - and both the cap and what it evicted are reported in
+`coverage` (`index_entries` / `index_max_entries` / `index_evicted` /
+`index_amendments_dropped`), so totals never depend on unbounded growth and a
+late amendment for an evicted request is reported as dropped rather than
+counted twice.
+
+The sidecar is rebuilt from the ledger on every start, so aggregated history
+survives both a restart and ring eviction, and
+`python3 -m gateway.ledger_persistence` regenerates it from the ledger on
+demand. Its `coverage` block states the first row it covers, how many rows
+could not be represented, and the rebuild status, so an absent day reads as a
+gap rather than as zero usage. The sidecar stores aggregates only - no
+request identifier, no prompt, no response, and no cost estimate (prices are
+applied at read time); it is written 0600 and is not a billing record.
+
 The Status view reports whether persistence is enabled and the declared
 30-day retention window. Local usage aggregates cover the last 24 hours and
 are computed from token counters and published prices, with source and
-observation date; a missing price remains Unknown. Because aggregation uses
-the bounded recent-event ring, evictions that may include in-window events
-mark cost estimates Unknown rather than presenting a partial sum. This
-estimate is not a provider bill. Totals are reconstructed from the restored
-ring, not a lifetime accounting source.
+observation date. Each alias/provider/model row exposes a **known subtotal**
+(`known_amount_usd` / `amount_usd`) plus explicit unknown coverage:
+`known_cost_requests`, `unknown_cost_requests`,
+`unknown_cost_input_tokens`, `unknown_cost_output_tokens`, `cost_incomplete`
+and `cost_reason`. One request without a published price (an unpriced
+provider such as `chatgpt_codex`) no longer nulls the whole group - its
+dollars are excluded from the subtotal and counted as unknown coverage,
+while a group with no priced request at all keeps `amount_usd: null` rather
+than a fabricated `$0.00`. Cached-token completeness holds at every layer:
+a request or rollup row whose cached counter the provider never reported is
+Unknown (`missing_cached_tokens`), never a cached count of zero, while an
+explicit reported zero stays a priced known zero; no ChatGPT price is ever
+inferred from a matching model ID. Because a rollup row holds sums, the
+completeness travels beside them: `cached_tokens_unreported` counts the
+ledger rows in that row that reported usage without a cached count, and
+`requests_without_usage` counts the rows that reported no usage at all
+(unreported usage is Unknown, never `$0.00`). The surface prices a row only
+where both counts are zero; otherwise the row's dollars are Unknown and the
+coverage counters say how much, so an absent cached counter can never become
+a reported zero on its way to the console. Because aggregation uses
+the bounded recent-event ring, a window that lost rows to eviction is
+flagged `coverage.incomplete` instead of being shown as a complete sum: the
+amount still prices exactly the tokens the window counts, on the same basis
+as the token columns beside it, and the flag is what says the window itself
+is partial. This estimate is not a provider bill. Totals are reconstructed
+from the restored ring, not a lifetime accounting source.
+
+`/owner/api/state` also carries an `analytics` block assembled from the
+in-memory rollup - the poll path never opens the ledger file. It reports a
+fallback rate per alias, provider and model with a reason breakdown folded
+onto a closed vocabulary (`cooldown`, `route_ineligible`, `upstream_failure`,
+`other`, `unknown`), and a daily series of requests, input/output/cached
+tokens, fallbacks and errors. The window is `?days=N`, default 7, clamped to
+30; a clamped request is echoed back as `requested_days`. A day with no rows
+inside the recorded window carries the status `gap` with null values, a day
+before the first recorded row is `outside_coverage`, today is `open`, and a
+rollup whose schema this build does not recognise is refused rather than
+interpreted. A rate with no requests behind it is `null`, never `0.0`. The
+console renders this as a fallback card and a day selector on the usage
+table; both state plainly that the data is metadata only.
 
 The open circuits are the exception: they are written to
 `circuits.json` in the state directory, because a gateway that restarts
