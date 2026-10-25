@@ -228,7 +228,8 @@ class RollupStore:
                 entry["errors"] = {}
                 entry["statuses"] = {}
                 totals[day] = entry
-            for key in ("requests", "input_tokens", "output_tokens", "cached_tokens", "fallbacks"):
+            for key in ("requests", "input_tokens", "output_tokens", "cached_tokens",
+                        "cached_tokens_unreported", "requests_without_usage", "fallbacks"):
                 entry[key] += bucket[key]
             for key in ("fallback_reasons", "errors", "statuses"):
                 for name, count in bucket[key].items():
@@ -307,7 +308,8 @@ class RollupStore:
 
     @staticmethod
     def _apply(bucket: dict[str, Any], delta: dict[str, Any], sign: int) -> None:
-        for name in ("requests", "input_tokens", "output_tokens", "cached_tokens"):
+        for name in ("requests", "input_tokens", "output_tokens", "cached_tokens",
+                      "cached_tokens_unreported", "requests_without_usage"):
             bucket[name] += sign * delta[name]
         if delta["fallback"]:
             bucket["fallbacks"] += sign
@@ -503,6 +505,10 @@ def _empty_bucket() -> dict[str, Any]:
         "input_tokens": 0,
         "output_tokens": 0,
         "cached_tokens": 0,
+        # Completeness signals, kept apart from the sums so a sum can never
+        # carry a value the ledger never reported. See ``_row_delta``.
+        "cached_tokens_unreported": 0,
+        "requests_without_usage": 0,
         "fallbacks": 0,
         "fallback_reasons": {},
         "errors": {},
@@ -511,9 +517,23 @@ def _empty_bucket() -> dict[str, Any]:
 
 
 def _row_delta(row: dict[str, Any]) -> dict[str, Any]:
-    """The one-row contribution to a bucket; also what an amendment subtracts."""
+    """The one-row contribution to a bucket; also what an amendment subtracts.
+
+    ``cached_tokens`` is a sum over the keys the provider actually reported,
+    so a row whose cached count is absent would otherwise read as a reported
+    zero. ``cached_tokens_unreported`` counts the ledger rows that reported
+    usage without a cached count (absent key - including the
+    ``cached_tokens_reported`` marker, which withholds the number), and
+    ``requests_without_usage`` counts the rows that reported no usage at all.
+    The surface prices exactly where those counts are zero and says
+    "coverage unknown" where they are not; it never turns either absence
+    into a zero.
+    """
     counters = row.get("token_counters")
     counters = counters if isinstance(counters, dict) else {}
+    usage_reported = any(name in counters for name in
+                         ("prompt_tokens", "input_tokens", "completion_tokens", "output_tokens"))
+    cached_reported = any(name in counters for name in ("cached_read_tokens", "cache_read_input_tokens"))
     fallback = bool(row.get("fallback_used"))
     reason = row.get("fallback_reason")
     error = row.get("error_class")
@@ -523,6 +543,8 @@ def _row_delta(row: dict[str, Any]) -> dict[str, Any]:
         "input_tokens": _token(counters, "prompt_tokens", "input_tokens"),
         "output_tokens": _token(counters, "completion_tokens", "output_tokens"),
         "cached_tokens": _token(counters, "cached_read_tokens", "cache_read_input_tokens"),
+        "cached_tokens_unreported": 1 if usage_reported and not cached_reported else 0,
+        "requests_without_usage": 0 if usage_reported else 1,
         "fallback": (reason if isinstance(reason, str) and reason else UNKNOWN) if fallback else None,
         "error": error if isinstance(error, str) and error else None,
         "status": str(status) if isinstance(status, int) and not isinstance(status, bool) else UNKNOWN,
