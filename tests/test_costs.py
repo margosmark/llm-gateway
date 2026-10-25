@@ -19,7 +19,9 @@ class UsageCostTests(unittest.TestCase):
         self.assertEqual(counters, {"prompt_tokens": 1000, "completion_tokens": 250, "total_tokens": 1250})
         cost = calculate_cost(counters, "claude-haiku-5-5")
         self.assertAlmostEqual(cost["amount_usd"], 0.000225)
-        self.assertEqual(cost["source"], "https://opencode.ai/docs/go/")
+        # Prices are transcribed from the model's own data page, so the
+        # estimate names that page and the date it was read.
+        self.assertEqual(cost["source"], "https://opencode.ai/data/anthropic/claude-haiku-5-5")
         # The dated catalogue snapshot is refreshed, so the as-of date is read
         # from it rather than pinned to one snapshot's date.
         self.assertEqual(cost["observed_at"], published_prices()["claude-haiku-5-5"]["observed_at"])
@@ -31,8 +33,11 @@ class UsageCostTests(unittest.TestCase):
         self.assertEqual(stream_token_counters(chat, DIALECT_OPENAI_CHAT), expected)
         self.assertEqual(stream_token_counters(responses, DIALECT_OPENAI_RESPONSES), expected)
 
-    def test_unpriced_catalogue_model_is_unknown_not_zero(self):
-        cost = calculate_cost({"prompt_tokens": 10, "completion_tokens": 2}, "beam-free")
+    def test_unpriced_catalogue_model_is_unknown_not_zero(self) -> None:
+        # ``omen-alpha``'s data page carries no payload at all, so it stays
+        # unpriced. ``beam-free`` used to be the example here; the 2026-10-25
+        # transcription gave it a list price, which is a price, not a bill.
+        cost = calculate_cost({"prompt_tokens": 10, "completion_tokens": 2}, "omen-alpha")
         self.assertIsNone(cost["amount_usd"])
         self.assertIsNone(cost["source"])
 
@@ -86,12 +91,12 @@ class UsageCostTests(unittest.TestCase):
         self.assertTrue(result["coverage"]["incomplete"])
         self.assertEqual(result["coverage"]["source"], "bounded_recent_events")
 
-    def test_unknown_price_dominates_aggregate_instead_of_underreporting(self):
+    def test_unknown_price_dominates_aggregate_instead_of_underreporting(self) -> None:
         events = [{
-            "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "p",
-            "serving_model": "beam-free", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1},
+            "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "opencode_go",
+            "serving_model": "omen-alpha", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1},
         }]
-        self.assertIsNone(aggregate_usage(events)["model"]["beam-free"]["amount_usd"])
+        self.assertIsNone(aggregate_usage(events)["model"]["omen-alpha"]["amount_usd"])
 
 
 if __name__ == "__main__":

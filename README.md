@@ -290,11 +290,15 @@ capability from different places: OpenCode Go's lives in
 `data/go_catalog.json`, while ChatGPT/Codex's lives in
 `src/gateway/adapters/chatgpt_codex.py` because its catalogue endpoint
 publishes no image field to transcribe. Adding a model to one has no effect
-on the other. Currently evidenced, per exact slug: `minimax-m3.1-flash`
-(MiniMax, read 2026-10-23), `gpt-5.6-terra` (OpenAI, read 2026-10-23), and
-`mimo-v2.6-flash`, `mimo-v2.6-pro`, `mimo-v2.5` and `mimo-v2.5-pro` from
-OpenCode's own per-model data pages (read 2026-10-24) — the last one
-transcribed **false**, because its page lists text only.
+on the other. Currently evidenced, per exact slug: `gpt-5.6-terra`
+(OpenAI, read 2026-10-23) on the Codex side, and **36 of the 40** Go rows —
+24 true and 12 transcribed **false** — each from that model's own data page
+(read 2026-10-25), except `minimax-m3.1-flash` (MiniMax documentation, read
+2026-10-23) and the four `mimo-*` rows read 2026-10-24. `mimo-v2.5-pro` is
+one of the **false** ones, because its page lists text only. The four rows
+nobody could read — `omen-alpha`, `iceman-contributor-free`,
+`gemini-4-argon-contributor` and `longcat-2.5-preview-free` — stay false
+with no source at all.
 
 A verdict that lives only in the catalogue is worth nothing until it
 reaches the stored row the router reads, so every boot re-applies each
