@@ -53,7 +53,9 @@ Image input is detected in Chat Completions (`image_url`), Responses
 `image` block with a `source`, an `input_image` block, and an image nested
 inside a `tool_result`. Capability detection and conversion run the same
 block parser, so routing can never call something an image that rendering
-then drops, or rendering can never invent an image routing excluded.
+then drops, or rendering can never invent an image routing excluded. The
+nested `tool_result` walk is iterative, so nesting depth can never turn
+detection into a 500 before a route is chosen.
 Image URLs are validated without fetching
 anything: only absolute HTTP(S) URLs without embedded userinfo, or base64 data
 URLs for PNG/JPEG/GIF/WebP, are accepted. Data URLs are limited to 4 MiB of
@@ -65,6 +67,10 @@ surface that covers an image whose `source` cannot be read, a
 `tool_use.input` that is not an object, and an image inside a `tool_result`
 on a dialect whose function output is a single string (refused with the
 refusal recorded, or passed through whole by a native Anthropic route).
+A `tool_result` block counts as text by its **type**, never by the mere
+presence of a caption: an `image` block that also carries a `text` field
+is refused as the image it is on a converted route - never coerced to its
+caption and served behind a 200 - while the native route passes it whole.
 A Responses
 `input` array carries *items* (messages, function calls, their outputs) -
 never content parts at the top level - so a root-level `input_image`-like
