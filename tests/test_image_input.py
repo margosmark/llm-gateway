@@ -706,13 +706,29 @@ class SnapshotImageEvidenceTests(unittest.TestCase):
     def test_models_without_evidence_stay_false_and_sourceless(self) -> None:
         """Unknown stays false, and an unsourced row is never a claim."""
         models = json.loads(_DATA.read_text(encoding="utf-8"))["models"]
-        for model_id in ("gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5",
-                         "gemini-4-argon-contributor", "omen-alpha", "glm-5.3",
-                         "deepseek-v4-pro", "kimi-k3"):
+        # The rows whose pages were never read: the one data page that
+        # carries no model payload, and the three ids with no data page at
+        # all. They are the only false-with-no-source rows in the snapshot.
+        for model_id in ("gemini-4-argon-contributor", "omen-alpha",
+                         "iceman-contributor-free", "longcat-2.5-preview-free"):
             with self.subTest(model=model_id):
                 self.assertFalse(models[model_id]["supports_image_input"])
                 self.assertIsNone(models[model_id].get("image_input_source"))
                 self.assertIsNone(models[model_id].get("image_input_observed_at"))
+        # A row whose page WAS read (2026-10-25, except V2.5 Pro which was
+        # read on 10-24) and publishes no image input: false with a source,
+        # which is a claim someone can go and check. These twelve are the
+        # whole false-with-source set.
+        for model_id in ("beam-free", "deepseek-v4-pro", "glm-5.1", "glm-5.2",
+                         "glm-5.3", "hy3", "hy4-preview", "longcat-2.0",
+                         "mimo-v2.5-pro", "minimax-m2.5", "minimax-m2.7",
+                         "qwen3.7-max"):
+            with self.subTest(model=model_id):
+                self.assertFalse(models[model_id]["supports_image_input"])
+                self.assertTrue(models[model_id].get("image_input_source"))
+                self.assertEqual(
+                    models[model_id].get("image_input_observed_at"),
+                    "2026-10-24" if model_id == "mimo-v2.5-pro" else "2026-10-25")
 
     def test_sibling_mimo_slugs_disagree_and_the_verdicts_stay_apart(self) -> None:
         """The regression that family-level inference would have broken.
@@ -849,9 +865,18 @@ class ImageEvidenceReconciliationTests(unittest.TestCase):
         self.assertFalse(evidence["mimo-v2.5-pro"].supports_image_input)
         self.assertEqual(evidence["mimo-v2.5-pro"].source,
                          "https://opencode.ai/data/xiaomi/mimo-v2-5-pro")
-        # An unsourced row is not evidence at all, so it never appears.
-        self.assertNotIn("glm-5.3-flash", evidence)
-        self.assertNotIn("gpt-6-luna", evidence)
+        # The 2026-10-25 transcription: verdicts that the data pages carry
+        # now appear, each with its own slug's URL.
+        self.assertTrue(evidence["glm-5.3-flash"].supports_image_input)
+        self.assertEqual(evidence["glm-5.3-flash"].source,
+                         "https://opencode.ai/data/zhipuai/glm-5-3-flash")
+        self.assertTrue(evidence["gpt-6-luna"].supports_image_input)
+        self.assertEqual(evidence["gpt-6-luna"].source,
+                         "https://opencode.ai/data/openai/gpt-6-luna")
+        # A row with no page read for it is not evidence at all, so it never
+        # appears - never an invented URL.
+        self.assertNotIn("omen-alpha", evidence)
+        self.assertNotIn("iceman-contributor-free", evidence)
 
     def test_the_codex_hook_reports_gpt_5_6_terra_with_its_read_date(self) -> None:
         evidence = image_evidence(ChatGPTCodexAdapter(None))
@@ -871,6 +896,7 @@ class ImageEvidenceReconciliationTests(unittest.TestCase):
             })
         self.assertEqual(sorted(changed), [
             ("chatgpt_codex", "gpt-5.6-terra"),
+            ("opencode_go", "glm-5.3-flash"),
             ("opencode_go", "mimo-v2.5"),
             ("opencode_go", "mimo-v2.6-flash"),
             ("opencode_go", "mimo-v2.6-pro"),
@@ -881,11 +907,11 @@ class ImageEvidenceReconciliationTests(unittest.TestCase):
         self.assertTrue(go["mimo-v2.6-flash"].supports_image_input)
         self.assertTrue(go["mimo-v2.6-pro"].supports_image_input)
         self.assertTrue(go["mimo-v2.5"].supports_image_input)
+        self.assertTrue(go["glm-5.3-flash"].supports_image_input)
         self.assertTrue(codex["gpt-5.6-terra"].supports_image_input)
         # The sourced absence, the never-transcribed model and the model the
         # provider knows nothing about all stay false.
         self.assertFalse(go["mimo-v2.5-pro"].supports_image_input)
-        self.assertFalse(go["glm-5.3-flash"].supports_image_input)
         self.assertFalse(codex["gpt-6-luna"].supports_image_input)
 
     def test_a_second_reconciliation_changes_nothing(self) -> None:
@@ -976,6 +1002,18 @@ class BootReconciliationTests(unittest.TestCase):
             "model_id": "glm-5.3-flash", "enabled": True, "source": "discovered",
             "dialect": "openai_chat",
         }
+        # A discovered row whose page carries no model payload: it has a
+        # catalogue row but no image evidence, so boot must not invent one.
+        providers["opencode_go"]["models"]["omen-alpha"] = {
+            "model_id": "omen-alpha", "enabled": True, "source": "discovered",
+            "dialect": None,
+        }
+        # A documented dialect with no image evidence: a route that exists
+        # and still refuses an image, which is what TEXT_ONLY is for.
+        providers["opencode_go"]["models"]["longcat-2.5-preview-free"] = {
+            "model_id": "longcat-2.5-preview-free", "enabled": True,
+            "source": "discovered", "dialect": "openai_chat",
+        }
         _seed_production_shaped_config(self.data_dir / "config.json", providers)
         with ConfigStore(self.data_dir / "config.json").mutate() as config:
             config.aliases = {
@@ -983,6 +1021,10 @@ class BootReconciliationTests(unittest.TestCase):
                     "chatgpt_codex", "gpt-5.6-terra"), fallbacks=[
                         RouteRef("opencode_go", "mimo-v2.6-flash")]),
                 self.TEXT_ONLY: Alias(name=self.TEXT_ONLY, enabled=True, primary=RouteRef(
+                    "opencode_go", "longcat-2.5-preview-free"), fallbacks=[]),
+                # A discovered row the 2026-10-25 evidence promotes at boot:
+                # the alias flips with it, at the endpoint.
+                "flipped": Alias(name="flipped", enabled=True, primary=RouteRef(
                     "opencode_go", "glm-5.3-flash"), fallbacks=[]),
             }
 
@@ -1003,7 +1045,10 @@ class BootReconciliationTests(unittest.TestCase):
         self.assertTrue(go["mimo-v2.5"].supports_image_input)
         self.assertTrue(codex["gpt-5.6-terra"].supports_image_input)
         self.assertFalse(go["mimo-v2.5-pro"].supports_image_input)
-        self.assertFalse(go["glm-5.3-flash"].supports_image_input)
+        # The discovered row the evidence covers is promoted at boot, and
+        # the row whose page carries no payload stays false.
+        self.assertTrue(go["glm-5.3-flash"].supports_image_input)
+        self.assertFalse(go["omen-alpha"].supports_image_input)
         # The row in the file carries the key too, so a restart does not
         # start over from an unreadable state.
         on_disk = json.loads((self.data_dir / "config.json").read_text(encoding="utf-8"))
@@ -1015,6 +1060,9 @@ class BootReconciliationTests(unittest.TestCase):
             ["supports_image_input"], True)
         self.assertIs(
             on_disk["providers"]["opencode_go"]["models"]["glm-5.3-flash"]
+            ["supports_image_input"], True)
+        self.assertIs(
+            on_disk["providers"]["opencode_go"]["models"]["omen-alpha"]
             ["supports_image_input"], False)
 
     def test_the_alias_catalogue_reports_what_the_rows_say(self) -> None:
@@ -1024,9 +1072,11 @@ class BootReconciliationTests(unittest.TestCase):
             catalog = json.load(response)
         self.assertEqual(catalog["object"], "list")
         by_id = {entry["id"]: entry for entry in catalog["data"]}
-        self.assertEqual(sorted(by_id), ["pm", self.TEXT_ONLY])
+        self.assertEqual(sorted(by_id), ["flipped", "pm", self.TEXT_ONLY])
         # The alias that owns an evidenced image-capable route says so.
         self.assertTrue(by_id["pm"]["supports_image_input"])
+        # An alias whose route was promoted by the boot's evidence says so.
+        self.assertTrue(by_id["flipped"]["supports_image_input"])
         # The alias that owns none says false - the truthful refusal at
         # acceptance, visible before any request is made.
         self.assertFalse(by_id[self.TEXT_ONLY]["supports_image_input"])
@@ -1036,7 +1086,8 @@ class BootReconciliationTests(unittest.TestCase):
         config, _, _ = self._boot()
         rows = config.snapshot().providers["opencode_go"].models
         self.assertTrue(rows["mimo-v2.6-flash"].supports_image_input)
-        self.assertFalse(rows["glm-5.3-flash"].supports_image_input)
+        self.assertTrue(rows["glm-5.3-flash"].supports_image_input)
+        self.assertFalse(rows["omen-alpha"].supports_image_input)
 
     def test_an_image_for_a_capable_alias_reaches_only_capable_routes(self) -> None:
         """The real catalogue's verdict selects the candidates, not a guess.
@@ -1052,6 +1103,13 @@ class BootReconciliationTests(unittest.TestCase):
                          ["gpt-5.6-terra", "mimo-v2.6-flash"])
         self.assertTrue(all(candidate.eligible for candidate in routes),
                         {candidate.excluded_reason for candidate in routes})
+        # The alias the boot promoted now routes its image to that model.
+        promoted = router.candidates(snapshot.aliases["flipped"],
+                                     needs_image_input=True)
+        self.assertEqual([candidate.route.model for candidate in promoted],
+                         ["glm-5.3-flash"])
+        self.assertTrue(all(candidate.eligible for candidate in promoted),
+                        {candidate.excluded_reason for candidate in promoted})
         # The alias whose only route has no evidenced image support keeps no
         # candidate at all, and every one of them says why in the same words
         # the refusal is built from.
