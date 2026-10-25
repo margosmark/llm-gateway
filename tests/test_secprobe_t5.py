@@ -472,6 +472,46 @@ class ImageCapabilityGateTests(unittest.TestCase):
         parts = converted["messages"][0]["content"]
         self.assertIn({"type": "image_url", "image_url": {"url": "https://x/y.png"}}, parts)
 
+    def test_deep_tool_result_nesting_is_never_answered_with_a_500(self) -> None:
+        """F6 regression: capability detection walks the chain iteratively.
+
+        A ~1200-deep nested ``tool_result`` chain used to blow Python's
+        recursion limit *inside* ``payload_has_image_input``, before any
+        route was chosen, and the dispatcher's defensive layer turned
+        that into a generic 500 ``gateway_error``. The walk no longer
+        recurses, so depth answers like depth always did: the same clean,
+        recorded refusal a 900-deep chain gets, with zero adapter calls -
+        and a native Anthropic route, which speaks the dialect, passes
+        the whole chain through and serves it.
+        """
+        def body_of(depth: int) -> dict:
+            block: dict = {"type": "text", "text": "bottom"}
+            for _ in range(depth):
+                block = {"type": "tool_result", "tool_use_id": "t1", "content": [block]}
+            return _messages_body([block])
+
+        adapter, harness = self._alias(image_capable=True)
+        status, payload, _ = harness.request(
+            "POST", "/v1/messages", body=body_of(1200))
+        self.assertNotEqual(status, 500, payload)
+        self.assertEqual(status, 502, payload)
+        self.assertEqual(payload["error"]["type"], "policy")
+        attempts = payload["error"]["detail"]["attempts"]
+        self.assertEqual([entry["outcome"] for entry in attempts],
+                         ["conversion_refused"])
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(harness.router._ledger.recent()[0]["attempts"][0]["outcome"],
+                         "conversion_refused")
+
+        native = FakeAnthropicAdapter(provider_id=FAKE_PROVIDER)
+        native_harness = _harness(native, DIALECT_ANTHROPIC_MESSAGES, image=True)
+        self.addCleanup(native_harness.close)
+        status, payload, _ = native_harness.request(
+            "POST", "/v1/messages", body=body_of(1200))
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(len(native.calls), 1)
+        self.assertIn("bottom", json.dumps(native.calls[0].payload))
+
 
 class SilentDropTests(unittest.TestCase):
     """Blocks the surface accepts must not vanish inside the bridge."""
@@ -585,6 +625,61 @@ class SilentDropTests(unittest.TestCase):
         self.assertEqual(len(native.calls), 1)
         self.assertIn("y.png", json.dumps(native.calls[0].payload))
         self.assertIn("caption", json.dumps(native.calls[0].payload))
+
+    def test_a_hybrid_image_text_tool_result_block_is_never_served_as_its_caption(self) -> None:
+        """F5 regression: a ``text`` field on an image block is not a text block.
+
+        The ``tool_result`` reader counts blocks by **type**, so an
+        ``image`` block that also carries a caption is still an image.
+        On a converted route it is refused and the refusal is *recorded*
+        (``attempts[].outcome = conversion_refused``) - never a bare 200
+        whose provider payload holds the caption and nothing else - while
+        a native Anthropic route passes the block through whole. On a
+        text-only alias the gate refuses it first, exactly like the same
+        image without a caption.
+        """
+        content = [
+            {"type": "tool_result", "tool_use_id": "t1", "content": [
+                {"type": "image", "text": "caption field",
+                 "source": {"type": "url", "url": "https://cdn.example/vision.png"}},
+            ]},
+        ]
+
+        # text-only alias: the image gate answers first (parity with the
+        # same block stripped of its caption).
+        status, payload = self._send(content)
+        self.assertEqual(status, 503, payload)
+        self.assertEqual(payload["error"]["capability"], "image_input")
+        self.assertEqual(self.adapter.calls, [])
+
+        # image-capable converted route: refused and recorded, never
+        # coerced to the caption string.
+        adapter = FakeChatAdapter(provider_id=FAKE_PROVIDER, dialect=DIALECT_OPENAI_CHAT)
+        harness = _harness(adapter, DIALECT_OPENAI_CHAT, image=True)
+        self.addCleanup(harness.close)
+        status, payload, _ = harness.request(
+            "POST", "/v1/messages", body=_messages_body(content))
+        self.assertNotEqual(status, 200, payload)
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(payload["error"]["type"], "policy")
+        attempts = payload["error"]["detail"]["attempts"]
+        self.assertEqual([entry["outcome"] for entry in attempts],
+                         ["conversion_refused"])
+        ledger = harness.router._ledger.recent()[0]
+        self.assertEqual(ledger["attempts"][0]["outcome"], "conversion_refused")
+
+        # native Anthropic route: the block is handed over whole - the
+        # provider payload carries the URL and the caption together.
+        native = FakeAnthropicAdapter(provider_id=FAKE_PROVIDER)
+        native_harness = _harness(native, DIALECT_ANTHROPIC_MESSAGES, image=True)
+        self.addCleanup(native_harness.close)
+        status, payload, _ = native_harness.request(
+            "POST", "/v1/messages", body=_messages_body(content))
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(len(native.calls), 1)
+        rendered = json.dumps(native.calls[0].payload)
+        self.assertIn("vision.png", rendered)
+        self.assertIn("caption field", rendered)
 
     def test_a_non_dict_block_is_refused_rather_than_dropped(self) -> None:
         status, payload = self._send(["just a string"])

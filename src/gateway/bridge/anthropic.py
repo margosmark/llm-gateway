@@ -243,8 +243,12 @@ def _anthropic_tool_result_text(content: Any) -> str:
     non-text block therefore cannot be expressed on a converted route and
     is refused with an actionable message instead of being skipped by a
     text-only reader - which is what happened before, silently, on every
-    path. On an Anthropic-dialect route this function never runs: the
-    block is passed through whole, so the native path still serves it.
+    path. That rule is by **type**, not by the presence of a caption: a
+    hybrid block that is an ``image`` yet also carries a ``text`` field is
+    the image it is typed as, so it is refused here rather than coerced
+    to its caption and dropped. On an Anthropic-dialect route this
+    function never runs: the block is passed through whole, so the
+    native path still serves it.
     """
     if content is None:
         return ""
@@ -254,7 +258,11 @@ def _anthropic_tool_result_text(content: Any) -> str:
     for block in _as_list(content):
         if isinstance(block, str):
             chunks.append(block)
-        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+        elif (
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ):
             chunks.append(block["text"])
         else:
             raise ConversionError(
@@ -597,21 +605,26 @@ def _anthropic_content_carries_image(content: Any) -> bool:
     refused here, with a :class:`~gateway.bridge.model.ConversionError`
     before a route is chosen, instead of being dropped later on a route
     that could have served it.
+
+    The walk is **iterative**: a nested ``tool_result`` chain is pushed
+    onto a worklist instead of recursed into, so a chain deeper than the
+    interpreter's recursion limit cannot turn detection into a 500
+    before route selection. Every block in every visited list is
+    examined regardless of what has been found already, so a malformed
+    image is still refused even when an earlier block already counted.
     """
-    if content is None or isinstance(content, str):
-        return False
     found = False
-    for block in _as_list(content):
-        if not isinstance(block, dict):
-            continue
-        kind = block.get("type")
-        if kind in ("image", "input_image") or "image_url" in block:
-            _anthropic_block_to_part(block)
-            found = True
-        elif kind == "tool_result":
-            # Evaluated first, so a malformed image inside a tool result is
-            # still refused even when an earlier block already counted.
-            found = _anthropic_content_carries_image(block.get("content")) or found
+    pending: list[Any] = [content]
+    while pending:
+        for block in _as_list(pending.pop()):
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind in ("image", "input_image") or "image_url" in block:
+                _anthropic_block_to_part(block)
+                found = True
+            elif kind == "tool_result":
+                pending.append(block.get("content"))
     return found
 
 

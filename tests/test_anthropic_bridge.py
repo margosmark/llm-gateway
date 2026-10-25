@@ -373,6 +373,63 @@ class ImageAndToolBlockRefusalTests(unittest.TestCase):
         rendered = json.dumps(request)
         self.assertIn("y.png", rendered)
 
+    def test_a_hybrid_image_text_tool_result_block_is_refused_not_captioned(self) -> None:
+        """F5 regression: a caption never turns an image into text.
+
+        ``_anthropic_tool_result_text`` counts blocks by **type**, so an
+        ``image`` block that also carries a ``text`` field is still the
+        image it is typed as: a converted route refuses it - never a bare
+        200 with the picture reduced to its caption - while detection
+        still counts it and the native Anthropic target passes it whole.
+        """
+        hybrid = {"type": "image", "text": "caption field",
+                  "source": {"type": "url", "url": "https://cdn.example/vision.png"}}
+        block = {"type": "tool_result", "tool_use_id": "t1", "content": [hybrid]}
+        with self.assertRaises(ConversionError) as ctx:
+            self._request(block)
+        self.assertEqual(ctx.exception.capability, "tool_result")
+        self.assertTrue(payload_has_image_input(self._payload(block),
+                                                DIALECT_ANTHROPIC_MESSAGES))
+        native = self._request(block, dialect=DIALECT_ANTHROPIC_MESSAGES)
+        rendered = json.dumps(native)
+        self.assertIn("vision.png", rendered)
+        self.assertIn("caption field", rendered)
+
+    def test_deep_tool_result_nesting_is_walked_iteratively(self) -> None:
+        """F6 regression: detection depth cannot blow into a 500.
+
+        The walk used to recurse once per ``tool_result`` level, so a
+        chain deeper than the interpreter's recursion limit raised
+        RecursionError inside capability detection - before a route was
+        chosen - and the dispatcher answered a generic 500. The walk is
+        iterative now: deep chains answer like shallow ones, an image at
+        the very bottom is still found, a malformed image at the bottom
+        is still refused before route selection, and the converted route
+        refuses the nesting itself instead of serving it.
+        """
+        def nest(depth: int, leaf: dict) -> dict:
+            block = leaf
+            for _ in range(depth):
+                block = {"type": "tool_result", "tool_use_id": "t1", "content": [block]}
+            return block
+
+        text = {"type": "text", "text": "bottom"}
+        image = {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}
+        broken = {"type": "image", "source": {"type": "unknown_format"}}
+        for depth in (5, 900, 1200, 5000):
+            with self.subTest(depth=depth):
+                self.assertFalse(payload_has_image_input(
+                    self._payload(nest(depth, text)), DIALECT_ANTHROPIC_MESSAGES))
+        self.assertTrue(payload_has_image_input(
+            self._payload(nest(1200, image)), DIALECT_ANTHROPIC_MESSAGES))
+        with self.assertRaises(ConversionError) as ctx:
+            payload_has_image_input(self._payload(nest(1200, broken)),
+                                    DIALECT_ANTHROPIC_MESSAGES)
+        self.assertEqual(ctx.exception.capability, "image_input")
+        with self.assertRaises(ConversionError) as ctx:
+            self._request(nest(1200, text))
+        self.assertEqual(ctx.exception.capability, "tool_result")
+
     def test_input_image_also_converts_on_the_responses_target(self) -> None:
         request = self._request({"type": "input_image", "image_url": "https://x/y.png"},
                                 dialect=DIALECT_OPENAI_RESPONSES)
