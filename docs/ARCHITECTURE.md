@@ -72,10 +72,26 @@ The Status view reports whether persistence is enabled and the declared
 30-day retention window. Local usage aggregates cover the last 24 hours and
 are computed from token counters and published prices, with source and
 observation date; a missing price remains Unknown. Because aggregation uses
-the bounded recent-event ring, evictions that may include in-window events
-mark cost estimates Unknown rather than presenting a partial sum. This
-estimate is not a provider bill. Totals are reconstructed from the restored
-ring, not a lifetime accounting source.
+the bounded recent-event ring, a window that lost rows to eviction is
+flagged `coverage.incomplete` instead of being shown as a complete sum: the
+amount still prices exactly the tokens the window counts, on the same basis
+as the token columns beside it, and the flag is what says the window itself
+is partial. This estimate is not a provider bill. Totals are reconstructed
+from the restored ring, not a lifetime accounting source.
+
+`/owner/api/state` also carries an `analytics` block assembled from the
+in-memory rollup - the poll path never opens the ledger file. It reports a
+fallback rate per alias, provider and model with a reason breakdown folded
+onto a closed vocabulary (`cooldown`, `route_ineligible`, `upstream_failure`,
+`other`, `unknown`), and a daily series of requests, input/output/cached
+tokens, fallbacks and errors. The window is `?days=N`, default 7, clamped to
+30; a clamped request is echoed back as `requested_days`. A day with no rows
+inside the recorded window carries the status `gap` with null values, a day
+before the first recorded row is `outside_coverage`, today is `open`, and a
+rollup whose schema this build does not recognise is refused rather than
+interpreted. A rate with no requests behind it is `null`, never `0.0`. The
+console renders this as a fallback card and a day selector on the usage
+table; both state plainly that the data is metadata only.
 
 The open circuits are the exception: they are written to
 `circuits.json` in the state directory, because a gateway that restarts

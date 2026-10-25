@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,7 +29,15 @@ from gateway.circuits import (
     PROBE_TIMEOUT_SECONDS,
     TRANSIENT_FAILURE_THRESHOLD,
 )
-from gateway.costs import aggregate_usage, annotate_events, published_prices, response_token_counters, stream_token_counters
+from gateway.costs import (
+    aggregate_rollup_rows,
+    aggregate_usage,
+    annotate_events,
+    published_prices,
+    response_token_counters,
+    stream_token_counters,
+)
+from gateway.ledger_persistence import ROLLUP_SCHEMA
 from gateway.stores import atomic_write_json
 from gateway.config import (
 
@@ -70,6 +79,254 @@ from gateway.observability import (
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 SURFACE_OWNER = "owner"
+
+# --- analytics: the durable daily rollup, surfaced ----------------------
+
+#: The analytics window the console asks for by default, and the hard cap.
+#: The rollup retains exactly the ledger's 30-day window, so a longer window
+#: would be a claim the data cannot support.
+ANALYTICS_DEFAULT_DAYS = 7
+ANALYTICS_MAX_DAYS = 30
+
+#: A recorded fallback reason is a full sentence that changes by the second
+#: ("... the provider chatgpt_codex is in a local cooldown for 771s (...)"),
+#: so counting raw strings would open a new bucket for every request. The
+#: rules below are ordered, first match wins, and the vocabulary is closed:
+#: anything unmatched is reported as ``other``, never dropped and never
+#: guessed at. The console shows the label; the API reports the key.
+FALLBACK_REASON_RULES: tuple[tuple[str, str], ...] = (
+    ("cooldown", "in a local cooldown"),
+    ("route_ineligible", "not eligible"),
+    ("route_ineligible", "does not support"),
+    ("route_ineligible", "is not enabled"),
+    ("route_ineligible", "is not configured"),
+    ("route_ineligible", "is not known"),
+    ("route_ineligible", "no adapter is registered"),
+    ("route_ineligible", "no model at this provider"),
+    ("route_ineligible", "not documented"),
+    ("upstream_failure", "trigger is enabled"),
+    ("upstream_failure", "safe fallback policy"),
+)
+
+
+def fallback_reason_class(reason: Any) -> str:
+    """Map a recorded fallback reason onto the closed label vocabulary."""
+    if not isinstance(reason, str) or not reason.strip():
+        return "unknown"
+    if reason.strip().lower() == "unknown":
+        return "unknown"
+    text = reason.lower()
+    for label, marker in FALLBACK_REASON_RULES:
+        if marker in text:
+            return label
+    return "other"
+
+
+def analytics_days(request: Request) -> tuple[int, int | None]:
+    """The requested analytics window: ``?days=N``, default 7, clamped to 1..30.
+
+    An unparseable value falls back to the default; a value outside the
+    clamp is applied clamped and reported back in ``requested_days`` so the
+    console can say it did not get what it asked for.
+    """
+    raw = request.query_one("days")
+    if raw is None:
+        return ANALYTICS_DEFAULT_DAYS, None
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError):
+        return ANALYTICS_DEFAULT_DAYS, None
+    applied = max(1, min(ANALYTICS_MAX_DAYS, requested))
+    return applied, (requested if requested != applied else None)
+
+
+def _nonnegative(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _rate(fallbacks: int | None, requests: int | None) -> float | None:
+    """Fallbacks / requests, or None when either side is unknown or empty.
+
+    A rate with no requests is unknown - never ``0.0``, which would read as
+    "no fallbacks happened" rather than "nothing was measured". The same
+    applies to a fallback count the payload did not carry: an absent count
+    is not a count of zero.
+    """
+    if not requests or fallbacks is None:
+        return None
+    return round(fallbacks / requests, 6)
+
+
+def _reason_breakdown(counts: Any) -> list[dict[str, Any]] | None:
+    """The bounded, sorted by-reason view of a raw ``fallback_reasons`` map."""
+    if not isinstance(counts, dict) or not counts:
+        return [] if isinstance(counts, dict) else None
+    totals: dict[str, int] = {}
+    for reason, count in counts.items():
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            continue
+        label = fallback_reason_class(reason)
+        totals[label] = totals.get(label, 0) + count
+    total = sum(totals.values())
+    return [
+        {"reason": label, "count": count, "share": round(count / total, 6) if total else None}
+        for label, count in sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _fallback_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Requests, fallbacks, the rate and the reasons for one group of rows."""
+    requests = 0
+    fallbacks = 0
+    reasons: dict[str, int] = {}
+    for row in rows:
+        requests += _nonnegative(row.get("requests")) or 0
+        fallbacks += _nonnegative(row.get("fallbacks")) or 0
+        breakdown = _reason_breakdown(row.get("fallback_reasons")) or []
+        for entry in breakdown:
+            reasons[entry["reason"]] = reasons.get(entry["reason"], 0) + entry["count"]
+    total = sum(reasons.values())
+    top = [
+        {"reason": label, "count": count, "share": round(count / total, 6) if total else None}
+        for label, count in sorted(reasons.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return {
+        "requests": requests,
+        "fallbacks": fallbacks,
+        "fallback_rate": _rate(fallbacks, requests),
+        "fallback_reasons": top,
+    }
+
+
+def _fallback_groups(rows: list[dict[str, Any]], dimension: str) -> dict[str, Any]:
+    """``_fallback_group`` for every distinct value of one rollup dimension."""
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = row.get(dimension)
+        if isinstance(key, str):
+            buckets.setdefault(key, []).append(row)
+    return {key: _fallback_group(buckets[key]) for key in sorted(buckets)}
+
+
+def _empty_series_entry(day: str, status: str) -> dict[str, Any]:
+    return {"day": day, "status": status, "requests": None, "input_tokens": None,
+            "output_tokens": None, "cached_tokens": None, "fallbacks": None,
+            "errors": None, "fallback_rate": None, "fallback_reasons": None}
+
+
+def build_analytics(
+    rollup: dict[str, Any] | None,
+    *,
+    days: int = ANALYTICS_DEFAULT_DAYS,
+    requested_days: int | None = None,
+    prices: dict[str, dict[str, Any]] | None = None,
+    today: datetime | None = None,
+) -> dict[str, Any]:
+    """Assemble the owner state's analytics block from the durable rollup.
+
+    This runs on every ``/owner/api/state`` poll, so it reads only the
+    in-memory rollup the ledger already maintains - it never opens the
+    ledger file. The block keeps the rollup's own ``coverage`` contract: a
+    day without rows is reported with its status and null values, never as
+    a zero, and a schema this build does not recognise is refused rather
+    than interpreted.
+
+    ``prices`` is the caller's price snapshot, so the catalogue is loaded
+    once per state request no matter how many days are aggregated.
+    """
+    moment = today if today is not None else datetime.now(UTC)
+    window = [(moment - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(days - 1, -1, -1)]
+    today_text = window[-1]
+    schema = rollup.get("schema") if isinstance(rollup, dict) else None
+    # A sidecar whose schema this build does not recognise is refused rather
+    # than interpreted: a missing field would otherwise read as a zero.
+    data: dict[str, Any] | None = rollup if isinstance(rollup, dict) and schema == ROLLUP_SCHEMA else None
+    available = data is not None
+    reason = None if available else ("durable_rollup_disabled" if rollup is None else "unrecognised_rollup_schema")
+
+    raw_coverage = data.get("coverage") if data is not None else None
+    coverage = raw_coverage if isinstance(raw_coverage, dict) else None
+    first_row = coverage.get("first_row_ts") if coverage else None
+    first_day = first_row[:10] if isinstance(first_row, str) and len(first_row) >= 10 else None
+
+    rows: list[dict[str, Any]] = []
+    daily_map: dict[str, dict[str, Any]] = {}
+    if data is not None:
+        for row in data.get("rows") or []:
+            if isinstance(row, dict) and isinstance(row.get("day"), str) and window[0] <= row["day"] <= today_text:
+                rows.append(row)
+        for entry in data.get("daily") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("day"), str):
+                daily_map[entry["day"]] = entry
+
+    series: list[dict[str, Any]] = []
+    rows_by_day: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        rows_by_day.setdefault(row["day"], []).append(row)
+    for day in window:
+        entry = daily_map.get(day)
+        if not available:
+            series.append(_empty_series_entry(day, "unknown"))
+            continue
+        if entry is not None:
+            series.append(_series_entry(day, entry, "open" if day == today_text else "ok"))
+            continue
+        if day == today_text:
+            # The day has not finished; no rows yet is expected, not a hole.
+            series.append(_empty_series_entry(day, "no_rows"))
+        elif first_day is None or day < first_day:
+            # History starts later than this day: nothing was ever recorded
+            # here, so this is not a gap in recorded data.
+            series.append(_empty_series_entry(day, "outside_coverage"))
+        else:
+            series.append(_empty_series_entry(day, "gap"))
+
+    usage = {day: (aggregate_rollup_rows(rows_by_day[day], _prices=prices)
+                   if available and day in rows_by_day else None)
+             for day in window}
+
+    payload: dict[str, Any] = {
+        "available": available,
+        "unavailable_reason": reason,
+        "source": data.get("source") if data is not None else None,
+        "schema": data.get("schema") if data is not None else None,
+        "generated_at": data.get("generated_at") if data is not None else None,
+        "coverage": coverage,
+        "days": days,
+        "window": {"from": window[0], "to": today_text},
+        "gaps": [entry["day"] for entry in series if entry["status"] == "gap"],
+        "fallback": {
+            "overall": _fallback_group(rows),
+            "alias": _fallback_groups(rows, "alias"),
+            "provider": _fallback_groups(rows, "provider"),
+            "model": _fallback_groups(rows, "model"),
+        },
+        "series": series,
+        "usage": usage,
+    }
+    if requested_days is not None:
+        payload["requested_days"] = requested_days
+    return payload
+
+
+def _series_entry(day: str, entry: dict[str, Any], status: str) -> dict[str, Any]:
+    requests = _nonnegative(entry.get("requests"))
+    fallbacks = _nonnegative(entry.get("fallbacks"))
+    errors = entry.get("errors")
+    error_total = (sum(count for count in errors.values() if isinstance(count, int) and not isinstance(count, bool))
+                   if isinstance(errors, dict) else None)
+    return {
+        "day": day,
+        "status": status,
+        "requests": requests,
+        "input_tokens": _nonnegative(entry.get("input_tokens")),
+        "output_tokens": _nonnegative(entry.get("output_tokens")),
+        "cached_tokens": _nonnegative(entry.get("cached_tokens")),
+        "fallbacks": fallbacks,
+        "errors": error_total,
+        "fallback_rate": _rate(fallbacks, requests),
+        "fallback_reasons": _reason_breakdown(entry.get("fallback_reasons")),
+    }
 
 
 
@@ -675,6 +932,16 @@ class GatewayApp:
         price_snapshot = published_prices()
         recent_ledger = self.ledger.recent(limit=25) if self.ledger else []
         usage_ledger = self.ledger.recent(limit=10_000) if self.ledger else []
+        # Analytics come from the durable rollup the ledger keeps in memory;
+        # this path never opens the ledger file, because it runs on every
+        # console poll. The catalogue is loaded once above and reused here.
+        days, requested_days = analytics_days(request)
+        analytics = build_analytics(
+            self.ledger.rollup() if self.ledger else None,
+            days=days,
+            requested_days=requested_days,
+            prices=price_snapshot,
+        )
         return json_response(
             {
                 "initialized": config.initialized,
@@ -694,6 +961,7 @@ class GatewayApp:
                 "ledger": annotate_events(recent_ledger, _prices=price_snapshot),
                 "totals": self.ledger.totals() if self.ledger else {},
                 "usage_costs": aggregate_usage(usage_ledger, window_hours=24, evicted_events=self.ledger.evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
+                "analytics": analytics,
                 "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),

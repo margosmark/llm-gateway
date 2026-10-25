@@ -142,6 +142,18 @@ incomplete (rows it could not represent) and `2` when there is no ledger;
 no request identifier, no prompt, no response, no cost estimate - is written
 0600, and is not a billing record.
 
+The Status page reads that rollup. The usage table keeps the live 24-hour
+ring as its default window and adds a selector for every day in the
+requested window (`?days=N` on `/owner/api/state`, default 7, clamped to 30),
+including its fallbacks, cost estimate and price source. The **Fallback
+analytics** card reports the overall fallback rate, the reasons behind it,
+the per-alias, per-provider and per-model split, and the daily trend. A day
+with no recorded rows is drawn as a gap and a day before the first recorded
+row is labelled outside the recorded history - neither is ever drawn as
+zero - and a day still in progress is labelled as such. The poll reads the
+in-memory rollup, never the ledger file, and the whole view is metadata
+only: prompts, responses, tokens and secrets are never stored.
+
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Anthropic uses the
 native Messages API with a separately stored API key; its catalogue is loaded

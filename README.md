@@ -414,9 +414,16 @@ which alias was asked for, which provider and model actually served it, how
 long it took and how it ended — never what it said. Token counters come from
 reported provider usage; local cost estimates use published prices only and
 are not provider bills. The Status page aggregates usage for the last 24 hours
-and displays the price source and observation date. No published price means
-**Unknown**, never zero. Request metadata is retained on the state volume for
-up to 30 days; it is not a billing system.
+and displays the price source and observation date, and it can show any
+recorded UTC day from the durable daily rollup through the window selector.
+No published price means **Unknown**, never zero. Request metadata is
+retained on the state volume for up to 30 days; it is not a billing system.
+
+The same state payload carries a **Fallback analytics** block: the fallback
+rate overall and per alias, provider and model, the reasons behind it, and a
+daily series of requests, tokens, fallbacks and errors. Days are reported
+with their own status, so a day with no recorded rows is a gap rather than
+zero, and a rate with no requests behind it is unknown rather than `0.0`.
 
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
