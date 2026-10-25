@@ -1778,3 +1778,67 @@ text-only routes; a plain text request is unaffected) and
 `tests/test_image_input.py::ImageDetectionTests` (root-item refusals at the
 detection layer, non-object items, and the pass-through/conversion split for
 non-image typed root items).
+
+
+### R46 — The image verdicts never reached the stored rows, and four MiMo slugs had never been transcribed — **closed**
+
+**Severity: medium capability correctness, with a client-visible symptom.**
+*(closed)*
+
+Observed live on 2026-10-24: on the deployed gateway (`59d6f9f`, `/health`
+200), `GET /v1/alias-catalog` reported `supports_image_input: false` for
+**every** published alias — `coding`, `flash`, `hermando`, `pm` — so an
+image attached to any Hermes profile message found no route and was
+refused. R37 had already made image evidence per-exact-id and
+source-backed; two separate drops kept that from mattering.
+
+1. **A catalogue verdict that never reaches a stored row reads as false.**
+   The rows in the deployed `config.json` were written before
+   `supports_image_input` existed and were never rewritten: the union of
+   stored model keys held no image field at all, so `ModelEntry.from_dict`
+   filled the declared default `False` for every row. That includes
+   `minimax-m3.1-flash`, which the source-backed catalogue already marked
+   capable — the evidence existed in the file and nowhere else.
+2. **Four MiMo slugs had never been transcribed.** All four rows read
+   `image: False` with `image_input_source: None`, which is *never read*,
+   not *read and false*. `mimo-v2.6-flash` is the fallback on all four
+   aliases, so its unwritten row is what made every alias text-only.
+
+**Fix.** Each adapter now exposes its evidence as data —
+`image_input_evidence()` returning
+`{exact_slug: ImageEvidence(supports_image_input, source, observed_at)}`
+for the slugs it has actually read (`OpenCodeGoAdapter` from the dated
+snapshot, `ChatGPTCodexAdapter` from `IMAGE_INPUT_SOURCES`) — and
+`image_evidence()` / `apply_image_evidence()` in `core/capabilities.py`
+carry it into the stored rows. `build_application()` re-applies it inside
+the boot transaction, so a corrected catalogue reaches `config.json` on
+the next start with no hand-edited state. The rules are deliberately
+narrow: **promotion only** (a restart never demotes), **exact slug only**
+(never a family, never a name match), **no row added, enabled or
+disabled**, **no provider call**, and **fail closed** — a missing hook, a
+hook that raises, or a verdict without a source contributes nothing and
+never stops boot.
+
+The OpenCode evidence now transcribes the four MiMo slugs from OpenCode's
+own per-model data pages (`https://opencode.ai/data/xiaomi/<slug>`, read
+2026-10-24): `mimo-v2.6-flash`, `mimo-v2.6-pro` and `mimo-v2.5` accept
+images, `mimo-v2.5-pro` does **not** — its page lists text only, and that
+sourced *absence* is stored as `false` beside its source rather than left
+blank. Audio and Video on the same pages are deliberately not transcribed:
+the capability model is a single image boolean, and no field may be read
+as an audio or video guarantee.
+
+**Regression evidence:** `tests/test_image_input.py` —
+`SnapshotImageEvidenceTests` (the verdict, source and read date of all five
+evidenced slugs; unsourced rows staying false and sourceless; the sibling
+`mimo-v2.5` / `mimo-v2.5-pro` disagreement kept apart; the builder's table
+and the JSON it writes agreeing slug for slug; no audio/video field),
+`ImageEvidenceReconciliationTests` (promoting exactly the evidenced rows,
+idempotence, never demote, never add/enable/disable, fail-closed hook, a
+verdict without a source dropped) and `BootReconciliationTests` (a real
+`build_application` boot over a production-shaped `config.json` that
+carries no image key: rows and file both updated, `/v1/alias-catalog` read
+over HTTP reporting the capable alias `true` and the unevidenced one
+`false`, a second boot changing nothing, and
+`candidates(..., needs_image_input=True)` keeping only image-capable
+routes).

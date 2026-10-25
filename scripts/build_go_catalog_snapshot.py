@@ -212,17 +212,67 @@ REASONING_EFFORTS = {
     "minimax-m3.1-flash": ("low", "medium", "high", "xhigh", "max"),
 }
 
-#: Image-input support is a hard capability. These entries are deliberately
-#: source-backed per *exact upstream model ID* rather than inferred from a
-#: provider name, model family, or wire dialect. A model absent from this map
-#: remains false/unknown-to-the-router and cannot be advertised for image use.
+#: Image-input support is a hard capability, so every verdict below is
+#: transcribed per **exact upstream model ID** from the source named in its
+#: own row - never inferred from a provider name, a model family, a tier
+#: name, or the wire dialect. A model absent from this table remains false
+#: (unknown to the router) and cannot be advertised for image use.
 #:
-#: MiniMax documents that MiniMax-M3.1-Flash and MiniMax-M3 accept OpenAI
-#: ``image_url`` parts; OpenCode Go's published endpoint table establishes
-#: that its exact ``minimax-m3.1-flash`` id is served over that compatibility
-#: endpoint. The model-provider page was read 2026-10-23.
-IMAGE_INPUT_SOURCES = {
-    "minimax-m3.1-flash": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+#: A row carries the verdict *and* the page it was read from, because the
+#: two together are what makes the claim reviewable: a verdict with no
+#: source is not evidence, and a source URL on its own is not a claim. The
+#: ``observed_at`` date is the date that page was read, which is not always
+#: the catalogue-wide ``OBSERVED_AT`` above.
+#:
+#: Sibling slugs disagree, which is exactly why this is keyed by exact ID:
+#: ``mimo-v2.5-pro`` publishes Inputs: Text only while its sibling
+#: ``mimo-v2.5`` publishes Text, Image, Audio and Video. Never copy a
+#: verdict from one MiMo row to another.
+#:
+#: Sources and what they say (all read 2026-10-24 unless noted):
+#:
+#: * ``minimax-m3.1-flash`` - MiniMax documents that MiniMax-M3.1-Flash and
+#:   MiniMax-M3 accept OpenAI ``image_url`` parts (read 2026-10-23);
+#:   OpenCode Go's published endpoint table establishes that the exact
+#:   ``minimax-m3.1-flash`` id is served over that compatibility endpoint.
+#: * the MiMo rows - OpenCode's per-model data pages for models served by
+#:   the same platform as the catalogue endpoint above. The live
+#:   ``/v1/models`` response publishes no modalities field (only ``id``,
+#:   ``object``, ``created``, ``owned_by``), so the data page is the
+#:   citation. ``mimo-v2.6-flash``, ``mimo-v2.6-pro`` and ``mimo-v2.5``
+#:   list Inputs "Text, Image, Audio, and Video"; ``mimo-v2.5-pro`` lists
+#:   Inputs "Text".
+#:
+#: Only the **image** bit is carried into the capability model. Those pages
+#: also list Audio and Video inputs; the gateway has no capability flag the
+#: router could act on for them, so inventing one would be a claim nothing
+#: checks.
+IMAGE_INPUT_EVIDENCE: dict[str, dict[str, Any]] = {
+    "minimax-m3.1-flash": {
+        "supports_image_input": True,
+        "source": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+        "observed_at": "2026-10-23",
+    },
+    "mimo-v2.6-flash": {
+        "supports_image_input": True,
+        "source": "https://opencode.ai/data/xiaomi/mimo-v2-6-flash",
+        "observed_at": "2026-10-24",
+    },
+    "mimo-v2.6-pro": {
+        "supports_image_input": True,
+        "source": "https://opencode.ai/data/xiaomi/mimo-v2-6-pro",
+        "observed_at": "2026-10-24",
+    },
+    "mimo-v2.5": {
+        "supports_image_input": True,
+        "source": "https://opencode.ai/data/xiaomi/mimo-v2-5",
+        "observed_at": "2026-10-24",
+    },
+    "mimo-v2.5-pro": {
+        "supports_image_input": False,
+        "source": "https://opencode.ai/data/xiaomi/mimo-v2-5-pro",
+        "observed_at": "2026-10-24",
+    },
 }
 
 
@@ -259,6 +309,7 @@ def build() -> dict[str, Any]:
         if dialect is None:
             notes.append("served by the provider but absent from the published endpoint table")
 
+        image_input = IMAGE_INPUT_EVIDENCE.get(model_id, {})
         model_limits = MODEL_LIMITS.get(model_id, {})
         model_note = model_limits.get("note")
         if isinstance(model_note, str):
@@ -281,8 +332,9 @@ def build() -> dict[str, Any]:
             "supports_streaming": True,
             "supports_function_tools": True,
             "supports_builtin_tools": False,
-            "supports_image_input": model_id in IMAGE_INPUT_SOURCES,
-            "image_input_source": IMAGE_INPUT_SOURCES.get(model_id),
+            "supports_image_input": bool(image_input.get("supports_image_input", False)),
+            "image_input_source": image_input.get("source"),
+            "image_input_observed_at": image_input.get("observed_at"),
             "deprecated": model_id in DEPRECATED,
             "notes": "; ".join(notes) if notes else None,
             "source": SOURCE_URL,

@@ -46,6 +46,7 @@ from gateway.core.capabilities import (
     DIALECT_GOOGLE_V1BETA,
     DIALECT_OPENAI_CHAT,
     DIALECT_OPENAI_RESPONSES,
+    ImageEvidence,
     ModelInfo,
 )
 
@@ -123,6 +124,31 @@ class OpenCodeGoAdapter:
         models = self.snapshot().get("models")
         return models if isinstance(models, dict) else {}
 
+    def image_input_evidence(self) -> dict[str, ImageEvidence]:
+        """The image verdicts the dated catalogue transcribed, per exact id.
+
+        The catalogue is the capability authority for Go routes, so its rows
+        are what the gateway reconciles into stored state at boot. A row
+        counts only when it carries both a verdict and the source URL that
+        was read for it: a verdict with no source is not evidence, and a
+        source URL alone is never turned into a claim.
+        """
+        evidence: dict[str, ImageEvidence] = {}
+        for model_id, row in self._snapshot_models().items():
+            if not isinstance(model_id, str) or not isinstance(row, dict):
+                continue
+            verdict = row.get("supports_image_input")
+            source = row.get("image_input_source")
+            if not isinstance(verdict, bool) or not isinstance(source, str) or not source:
+                continue
+            observed_at = row.get("image_input_observed_at")
+            evidence[model_id] = ImageEvidence(
+                supports_image_input=verdict,
+                source=source,
+                observed_at=observed_at if isinstance(observed_at, str) else None,
+            )
+        return evidence
+
     def _api_key(self) -> str | None:
         payload = self._credentials.read()
         if not payload:
@@ -173,6 +199,10 @@ class OpenCodeGoAdapter:
 
         snapshot = self._snapshot_models()
         observed_at = self.snapshot().get("observed_at")
+        # Image support is a claim only when the catalogue also carries the
+        # source that was read for it; a verdict with no source never reaches
+        # a route.
+        evidence = self.image_input_evidence()
         models: list[ModelInfo] = []
         for entry in entries:
             if not isinstance(entry, dict):
@@ -203,8 +233,12 @@ class OpenCodeGoAdapter:
                     supports_builtin_tools=bool(published.get("supports_builtin_tools", False)),
                     # The dated, source-backed catalogue is the capability
                     # authority for Go routes. Do not invent vision support
-                    # from a model name or its wire dialect.
-                    supports_image_input=bool(published.get("supports_image_input", False)),
+                    # from a model name or its wire dialect, and do not carry
+                    # a verdict the catalogue gives no source for.
+                    supports_image_input=bool(
+                        (verdict := evidence.get(model_id)) is not None
+                        and verdict.supports_image_input
+                    ),
                     retention_class=str(published.get("retention_class") or "unknown"),
                     monthly_limit_usd=published.get("monthly_limit_usd")
                     if isinstance(published.get("monthly_limit_usd"), (int, float))

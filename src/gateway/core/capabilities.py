@@ -244,3 +244,108 @@ def merge_capabilities(infos: Iterable[ModelInfo]) -> dict[str, ModelInfo]:
     for info in infos:
         merged.setdefault(info.model_id, info)
     return merged
+
+
+# --- image evidence: discovery authority -> stored state -------------------
+
+
+@dataclass(frozen=True)
+class ImageEvidence:
+    """One exact slug's documented image verdict, with the page it came from.
+
+    ``supports_image_input`` is the verdict the source states for **that
+    model id** - it is false both for "the page says text only" and for "no
+    page was ever read", and ``source`` tells them apart: a verdict without a
+    source is not evidence and is never carried through. Audio and video
+    modalities are deliberately not represented - the capability model has one
+    image flag, and inventing flags the router cannot act on would be a claim
+    of support nothing checks.
+    """
+
+    supports_image_input: bool
+    source: str
+    observed_at: str | None = None
+
+
+def image_evidence(adapter: Any) -> dict[str, ImageEvidence]:
+    """The exact-slug image evidence an *adapter* can vouch for.
+
+    An adapter is the seam that holds a provider's own documentation: the
+    OpenCode Go adapter reads the dated catalogue snapshot, the ChatGPT/Codex
+    adapter carries its own transcription (its catalogue endpoint publishes no
+    image field at all). Both expose it through the optional
+    ``image_input_evidence`` hook, keyed by the **exact** upstream model id.
+    An adapter that declares nothing - or a slug declared without a source -
+    contributes no evidence, so the stored row keeps its fail-closed default.
+    Nothing here is ever inferred from a provider name, a model family or a
+    wire dialect.
+    """
+    hook = getattr(adapter, "image_input_evidence", None)
+    if not callable(hook):
+        return {}
+    try:
+        declared = hook()
+    except Exception:
+        # Reconciliation is fail-closed: an adapter that cannot answer
+        # contributes nothing, and a broken hook must never stop the gateway
+        # from booting or be read as a claim of image support.
+        return {}
+    if not isinstance(declared, dict):
+        return {}
+    evidence: dict[str, ImageEvidence] = {}
+    for model_id, row in declared.items():
+        if not isinstance(model_id, str) or not model_id or not isinstance(row, ImageEvidence):
+            continue
+        if not isinstance(row.supports_image_input, bool) or not isinstance(row.source, str) or not row.source:
+            continue
+        evidence[model_id] = row
+    return evidence
+
+
+def apply_image_evidence(
+    config: Any,
+    evidence_by_provider: dict[str, dict[str, ImageEvidence]],
+) -> list[tuple[str, str]]:
+    """Bring stored model rows up to the evidence their provider holds.
+
+    A capability that exists in the source-backed catalogue but not in the
+    stored state is indistinguishable from ``false``: the router, the alias
+    catalogue and every client read the **stored** row. A row written before
+    the evidence field existed - or before the evidence was transcribed -
+    stays text-only forever otherwise, which is how every published alias
+    came to advertise ``supports_image_input: false`` while the catalogue
+    already named image-capable models.
+
+    So each boot re-applies the evidence that is already on disk (the dated
+    catalogue snapshot, an adapter's own transcription). The rules:
+
+    * **Exact slug only, promotion only.** A stored row flips to
+      image-capable only when its own provider vouches for *that* model id
+      with a source URL. Sibling slugs never share a verdict - the MiMo rows
+      disagree with one another on image support - and a restart never
+      removes a capability: a row whose evidence says "text only" or says
+      nothing at all is left exactly as the owner has it, because "unknown
+      stays false" is about not inventing a claim, not about revoking one.
+    * **No new rows.** Exposure is owner policy: reconciliation never adds,
+      enables or disables a model, and never touches a provider that has no
+      stored rows yet.
+    * **No provider call.** It reads local files and local maps only.
+
+    Returns the ``(provider_id, model_id)`` rows that changed, so the caller
+    reports the reconciliation instead of performing it silently.
+    """
+    changed: list[tuple[str, str]] = []
+    for provider_id, evidence in evidence_by_provider.items():
+        if not evidence:
+            continue
+        provider = config.providers.get(provider_id)
+        if provider is None:
+            continue
+        for model_id, entry in provider.models.items():
+            verdict = evidence.get(model_id)
+            if verdict is None or not verdict.supports_image_input:
+                continue
+            if not entry.supports_image_input:
+                entry.supports_image_input = True
+                changed.append((provider_id, model_id))
+    return changed
