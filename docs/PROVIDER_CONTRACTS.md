@@ -227,15 +227,23 @@ hand-edited. **An undocumented model is refused, not guessed.**
   `image_url` content parts over the Chat Completions compatibility
   endpoint (`platform.minimax.io/docs/api-reference/text-openai-api`, read
   2026-10-23), and the published Go endpoint table establishes that the
-  exact `minimax-m3.1-flash` ID is served over that endpoint. That is the
-  only Go model currently claimed as image-capable, because it is the only
-  one with this evidence. The snapshot records the flag and its source URL
-  together (`supports_image_input` / `image_input_source`), and a regression
-  test asserts the two always agree. **No capability is inferred from a
-  model name, a model family, or a wire dialect** - MiMo-V2.5 is documented
-  as omni-modal while MiMo-V2-Flash is documented as text-only, so a
-  family-level rule would have been wrong in both directions. A model
-  without evidence stays false and sourceless; `/v1/alias-catalog` reports
+  exact `minimax-m3.1-flash` ID is served over that endpoint. OpenCode's
+  own per-model data pages — the platform of record behind the Go
+  catalogue, `https://opencode.ai/data/xiaomi/<slug>`, read 2026-10-24 —
+  record `mimo-v2.6-flash`, `mimo-v2.6-pro` and `mimo-v2.5` as accepting
+  Text, Image, Audio and Video, and `mimo-v2.5-pro` as accepting **Text
+  only**. Those five slugs are the whole evidenced set. The snapshot
+  records the flag, its source URL and the read date together
+  (`supports_image_input` / `image_input_source` /
+  `image_input_observed_at`), and a regression test asserts the three
+  always agree. The same pages list Audio and Video: the gateway capability
+  model is a single image boolean, so those modalities are deliberately
+  **not** transcribed and no field in the API may be read as an audio or
+  video guarantee. **No capability is inferred from a model name, a model
+  family, or a wire dialect** - `mimo-v2.5` accepts images while its sibling
+  `mimo-v2.5-pro` does not, so a family-level rule would be wrong for one
+  of them. A model without evidence stays false and sourceless;
+  `/v1/alias-catalog` reports
   an alias as image-capable when **any** route that can serve it has the
   evidence. That is deliberately looser than the all-routes rule the tools
   flag uses, because the router enforces image capability per request: an
@@ -243,6 +251,13 @@ hand-edited. **An undocumented model is refused, not guessed.**
   for that request with the reason recorded, and an image request with no
   capable route fails closed at the gateway. An alias whose routes are all
   unevidenced therefore stays text-only.
+
+  A verdict that exists only in the catalogue is indistinguishable from
+  `false` until it reaches the stored row, because the router, the alias
+  catalogue and every client read the row — that drop is what R46 covers.
+  Every boot therefore re-applies each adapter's evidence inside the boot
+  transaction: promotion only, exact slug only, no provider call, no row
+  added, enabled or demoted.
 * Retention: 30 days for the GPT/Luna, Grok, Claude and Beam models; 0 days
   for GLM, Kimi, MiMo, LongCat, Qwen and Hy; **training permitted** for the
   Gemini and Muse models. This is why cross-provider fallback is a privacy

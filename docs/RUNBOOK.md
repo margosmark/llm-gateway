@@ -288,9 +288,10 @@ without editing this file by hand.
 | A request failed with *no eligible route* | Every route was excluded | The error names each excluded route and why |
 | The published catalogue is empty | No alias is published yet | Publish one in Models & Routes |
 | OpenCode shows no gateway models | The plugin cannot read `/v1/alias-catalog` - the gateway is unreachable, or it predates the endpoint | `curl` the endpoint; redeploy with `scripts/release.py`; the plugin warns in the OpenCode log and recovers on its own |
+| An inbound image reaches the gateway but is refused | The client sent pixels while the deployment still reports every alias text-only | Expected until this release is deployed: the refusal is the gateway's own `no_eligible_route` with `capability: image_input`, not a provider error. Deploy, then re-check `GET /v1/alias-catalog` |
 | An OpenCode model says *200k client budget* | The alias has a route whose context limit is not published | That is the owner-chosen client budget, not a provider guarantee. The gateway reports Unknown on purpose |
 | An OpenCode reasoning variant had no effect | The serving route does not publish that level | Expected: the level is dropped **for that route** and the substitution is recorded in the request ledger |
-| OpenCode offers no image input for a model you know accepts images | No route of that alias has *source-backed* image evidence | The gateway records image support per exact model ID from official model-provider docs only, and never infers it from a model name or dialect. Check `data/go_catalog.json` for `supports_image_input` and `image_input_source`, then re-run `scripts/build_go_catalog_snapshot.py` and redeploy |
+| OpenCode offers no image input for a model you know accepts images | No route of that alias has *source-backed* image evidence | The gateway records image support per exact model ID from official model-provider docs only, and never infers it from a model name or dialect. Check `data/go_catalog.json` for `supports_image_input` and `image_input_source`, then re-run `scripts/build_go_catalog_snapshot.py` and redeploy — every boot re-applies that evidence to the stored rows, so a redeploy is what makes a new verdict visible |
 | An image request failed with *no eligible route* | No route of the alias accepts image input | Expected: the gateway excludes an image-incapable route rather than letting the provider reject it opaquely. The error names the excluded routes and the reason |
 | `/version` reports `unknown` | The deployment was not released properly | Deploy with `scripts/release.py --build`; it publishes the identity. The gateway also warns about this at startup |
 | A client reports *an empty stream with no finish reason* | The stream was not framed correctly | Update to a build that emits terminated SSE frames; check the raw bytes for `\n\n` between frames |
@@ -298,6 +299,71 @@ without editing this file by hand.
 | A fallback did not run and the record says *skipped* | The primary was in a local cooldown | The cooldown is local policy, not evidence the provider reset. A confirmed exhaustion expires on its own within the bounded window (default 30 minutes); the Status view shows the hold and the next probe. Use **Clear cooldowns** on the provider card if you have confirmed the reset window yourself |
 | A request was served by a phase route, not the primary | The alias has an enabled phase-routing policy and a phase applied (from the caller's `metadata.personal_gateway.phase` hint or from Jev inference) | Expected. The ledger records `phase` and `phase_source` (`caller`/`jev`/`default`) as metadata only. A phase route is the primary for that phase, **not** a fallback |
 | Jev did not pick a phase | Inference is off for the alias, the request carried tools, Jev was uncertain, or Jev failed | Expected and safe: the ordinary route is used and the ledger records why. Raise `minimum_confidence` only if you accept more guessing, never to force a route |
+
+### Hermes profile vision routing (where an inbound image goes)
+
+The gateway publishes image capability; the **client** decides whether an
+attached image travels as pixels or is pre-described into text first. On
+this LAN that client is Hermes, and the decision lives in each profile's
+`config.yaml`, not in the gateway. It reads, in order: an explicit
+`agent.image_input_mode`, then an explicit `auxiliary.vision` backend
+(which forces the describing path), then a `supports_vision` override,
+then catalog probes. With none of those the verdict is *unknown*, which
+Hermes treats as "describe it" — and `auxiliary.vision.provider: auto`
+then has no backend to describe with, so the image went nowhere. That was
+the undefined state this release reconciles.
+
+Every profile whose main model is a gateway alias now declares, for all
+four published aliases:
+
+```yaml
+providers:
+  personal-llm-gateway:
+    models:
+      coding:    {supports_vision: true}
+      flash:     {supports_vision: true}
+      hermando:  {supports_vision: true}
+      pm:        {supports_vision: true}
+```
+
+The value is not a new claim: it repeats what `GET /v1/alias-catalog`
+reports for those aliases, so a profile and the gateway cannot disagree.
+Applied with `hermes config set providers.personal-llm-gateway.models.<alias>.supports_vision true`
+per profile (never by hand). The exact choice per profile, verified by
+calling `decide_image_input_mode()` against that profile's own config:
+
+| Profile (channel) | Main model | Image path |
+|---|---|---|
+| default (base `mattermost`) | `personal-llm-gateway/hermando` | **native** pixels → gateway → image-capable route |
+| pm | `personal-llm-gateway/pm` | **native** pixels → gateway |
+| designer, qa, security, tester, ux | `personal-llm-gateway/coding` | **native** pixels → gateway; the primary is text-only, so the image-capable MiMo fallback serves it |
+| coding (no channel; CLI and kanban sessions) | `personal-llm-gateway/coding` | **native** pixels → gateway, as above |
+| soft-dev | `personal-llm-gateway/coding` | **described** by `opencode-go/mimo-v2.6-flash` — its explicit `auxiliary.vision` override, deliberately kept because it resolves without the gateway |
+| researcher | `opencode-go/gpt-6-luna` | **native** pixels; the verdict comes from the models.dev catalog, not this gateway — *configured separately* |
+| vacation-planner | `opencode-go/kimi-k3` | **native** pixels; same — *configured separately* |
+
+* `researcher` and `vacation-planner` do not use this gateway as their main
+  provider, so nothing in the gateway's evidence reaches them; re-check them
+  when the model changes.
+* Until this release is deployed the gateway reports every alias
+  text-only, so the native path ends in the gateway's own deterministic
+  refusal (`503 no_eligible_route` with `capability: image_input`) rather
+  than a silent drop. Deploy before expecting an image to be answered.
+* No gateway restart is needed: Hermes re-reads `config.yaml` on its file
+  signature, so `hermes config set` applies to the next image.
+* Re-check one profile:
+
+```sh
+HERMES_HOME=/home/hermes/.hermes/profiles/pm \
+  /home/hermes/.hermes/hermes-agent/venv/bin/python - <<'PY'
+import sys
+sys.path.insert(0, "/home/hermes/.hermes/hermes-agent")
+from hermes_cli.config import load_config
+from agent.image_routing import decide_image_input_mode
+cfg = load_config()
+print(decide_image_input_mode(cfg["model"]["provider"], cfg["model"]["default"], cfg))
+PY
+```
 
 ---
 
