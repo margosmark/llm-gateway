@@ -65,7 +65,7 @@ from gateway.http.core import Request, Response, Router as HttpRouter, StreamRes
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
 from gateway.logging import RequestLogger
-from gateway.routes import validate_alias_routes, validate_phase_routing
+from gateway.routes import single_provider_warning, validate_alias_routes, validate_phase_routing
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -892,6 +892,13 @@ class GatewayApp:
                 route_limits.append((ref.label(), entry.context_limit if entry else None))
             alias_payload = alias.to_dict()
             alias_payload["context_limit"] = alias_context_limit(route_limits)
+            # A loud, non-fatal config-validation warning: an enabled alias
+            # whose routes all sit on one provider can be emptied by a single
+            # cooldown. It rides on every owner-state read so the console can
+            # show it next to the alias instead of only at save time. It is
+            # owner-surface data - never returned on /v1/* - because it names
+            # providers, exactly as the rest of this payload does.
+            alias_payload["route_warning"] = single_provider_warning(alias)
             aliases.append(alias_payload)
 
         profiles = []
@@ -1315,7 +1322,7 @@ class GatewayApp:
             cooldown = payload.get("cooldown_seconds")
             with self.config.mutate() as config:
                 existing = config.aliases.get(alias_name)
-                config.aliases[alias_name] = _alias_from_payload(
+                alias = _alias_from_payload(
                     alias_name,
                     primary,
                     fallbacks,
@@ -1327,7 +1334,8 @@ class GatewayApp:
                     enabled=bool(payload.get("enabled", existing.enabled if existing else False)),
                     phase_routing=phase_routing,
                 )
-            return json_response({"ok": True})
+                config.aliases[alias_name] = alias
+            return json_response(_with_warning({"ok": True}, alias))
 
         if action == "publish":
             # Publishing is the last chance to refuse an alias that cannot
@@ -1349,7 +1357,7 @@ class GatewayApp:
                         {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}}, 400
                     )
                 alias.enabled = bool(payload.get("enabled", True))
-            return json_response({"ok": True, "enabled": alias.enabled})
+            return json_response(_with_warning({"ok": True, "enabled": alias.enabled}, alias))
 
         if action == "delete":
             with self.config.mutate() as config:
@@ -1606,6 +1614,20 @@ def _validate_systemone_request(payload: Any) -> str | None:
         if kind == "score" and (not isinstance(criteria, list) or not criteria or len(criteria) > 10):
             return "a System One score question requires one to ten criteria"
     return None
+
+
+def _with_warning(payload: dict[str, Any], alias) -> dict[str, Any]:
+    """Attach the config-validation warning to an owner-surface response.
+
+    The warning is loud - it rides on the very response that saved or
+    published the alias - but the action still succeeds: a single-provider
+    chain is fragile, not invalid. See
+    ``gateway.routes.single_provider_warning``.
+    """
+    warning = single_provider_warning(alias)
+    if warning is not None:
+        payload["warning"] = warning
+    return payload
 
 
 def _alias_from_payload(
