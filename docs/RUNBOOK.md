@@ -125,6 +125,49 @@ is the live view. Local usage aggregates cover the last 24 hours; costs use
 published prices only and display their source and observation date. A model
 without published prices reports **Unknown**. This is not a billing system.
 
+The same append path also maintains `request-ledger-rollup.json` beside the
+ledger: one row per UTC day, alias, provider and model with requests, input,
+output and cached tokens, fallbacks by reason, errors by class and statuses,
+plus a per-day trend. Reasons are folded onto a closed vocabulary when the
+row is written - `cooldown`, `route_ineligible`, `upstream_failure`, `other`,
+`unknown` - so a per-second cooldown sentence never becomes a bucket or a
+sidecar key. Its `coverage` block also reports the in-memory request index
+bound (`index_entries` / `index_max_entries`, default 50,000) and anything
+that bound evicted (`index_evicted` / `index_amendments_dropped`), so totals
+are auditable on a long-running appliance. It is rebuilt from the ledger at
+every start, so daily history survives restarts and ring eviction. To
+regenerate it by hand after restoring or moving a state volume:
+
+```sh
+PYTHONPATH=src python3 -m gateway.ledger_persistence /var/lib/gateway/request-ledger.jsonl
+```
+
+The command prints the rollup's `coverage` and exits `1` when coverage is
+incomplete (rows it could not represent) and `2` when there is no ledger;
+`--dry-run` reports without writing. The sidecar holds aggregates only -
+no request identifier, no prompt, no response, no cost estimate - is written
+0600, and is not a billing record.
+
+The Status page reads that rollup. The usage table keeps the live 24-hour
+ring as its default window and adds a selector for every day in the
+requested window (`?days=N` on `/owner/api/state`, default 7, clamped to 30),
+including its fallbacks, cost estimate and price source. Cost cells show the
+**known subtotal** for the group with the unknown coverage next to it
+(`known subtotal; N of M requests unpriced (x in / y out tokens)`); a group
+with no priced request renders **Unknown** with its coverage rather than a
+bare `Unknown`, an unpriced provider is labelled "no published actual/list
+price - never inferred", a cached count the upstream never reported is named
+instead of guessed (`cached count missing on N request(s)`, never read as a
+reported zero), and a request that reported no usage is Unknown, never
+`$0.00`. The **Fallback
+analytics** card reports the overall fallback rate, the reasons behind it,
+the per-alias, per-provider and per-model split, and the daily trend. A day
+with no recorded rows is drawn as a gap and a day before the first recorded
+row is labelled outside the recorded history - neither is ever drawn as
+zero - and a day still in progress is labelled as such. The poll reads the
+in-memory rollup, never the ledger file, and the whole view is metadata
+only: prompts, responses, tokens and secrets are never stored.
+
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Anthropic uses the
 native Messages API with a separately stored API key; its catalogue is loaded

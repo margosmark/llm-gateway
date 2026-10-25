@@ -798,7 +798,7 @@ class ConsoleApiTests(unittest.TestCase):
             self.harness.router._ledger.record(RequestEvent(
                 request_id=f"price-cache-{index}", timestamp=utc_now_iso(),
                 requested_alias="sample", serving_provider="opencode_go",
-                serving_model="claude-haiku-5-5", token_counters={"prompt_tokens": 100, "completion_tokens": 10},
+                serving_model="claude-haiku-5-5", token_counters={"prompt_tokens": 100, "completion_tokens": 10, "cached_read_tokens": 0},
             ))
         from gateway.costs import published_prices
         with patch("gateway.http.app.published_prices", wraps=published_prices) as load_prices:
