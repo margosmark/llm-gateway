@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from gateway.bridge.streams import iter_sse_frames, normalise_usage
 
@@ -115,12 +116,12 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
 
 def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evicted_events: int = 0, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Aggregate usage from supplied events; report when the hot ring is incomplete."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
     prices = published_prices() if _prices is None else _prices
     groups: dict[str, dict[str, Any]] = {key: {} for key in ("alias", "provider", "model")}
     for event in events:
         try:
-            timestamp = datetime.fromisoformat(str(event.get("timestamp", "")).replace("Z", "+00:00"))
+            timestamp = datetime.fromisoformat(str(event.get("timestamp", "")))
             if timestamp < cutoff:
                 continue
         except (ValueError, TypeError):
