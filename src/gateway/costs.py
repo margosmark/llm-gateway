@@ -104,6 +104,17 @@ COST_MISSING_CACHED_PRICE = "missing_cached_price"
 COST_MISSING_CACHED_TOKENS = "missing_cached_tokens"
 
 
+#: The keys a provider can report for cached reads, and for usage at all.
+#: Absence of every cached key means "not reported", never zero.
+CACHED_COUNTER_KEYS = ("cached_read_tokens", "cache_read_input_tokens")
+USAGE_COUNTER_KEYS = ("prompt_tokens", "input_tokens", "completion_tokens", "output_tokens")
+
+
+def _cached_key(counters: dict[str, Any]) -> str | None:
+    """The cached-count key the provider reported, or None when it reported none."""
+    return next((key for key in CACHED_COUNTER_KEYS if key in counters), None)
+
+
 def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | None = "opencode_go", *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Estimate one request's cost from published prices, or say why it is unknown.
 
@@ -125,20 +136,24 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
         return {"amount_usd": None, "source": None, "observed_at": None, "reason": COST_NO_PRICE}
     source, observed_at = price["source"], price["observed_at"]
     if counters is None:
-        # Usage was never reported. The published price is still known, and
-        # there is no evidence that any billable tokens were counted.
-        return {"amount_usd": 0.0, "source": source, "observed_at": observed_at, "reason": COST_NO_USAGE}
+        # Usage was never reported: Unknown, never $0.00 (R26). The price is
+        # known, so its source still travels with the reason; what is unknown
+        # is whether the provider counted billable tokens this window never
+        # saw. ``requests_without_usage`` says how many requests did this.
+        return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_NO_USAGE}
     input_tokens = counters.get("prompt_tokens", counters.get("input_tokens", 0))
     output_tokens = counters.get("completion_tokens", counters.get("output_tokens", 0))
-    cached_key = "cached_read_tokens" if "cached_read_tokens" in counters else (
-        "cache_read_input_tokens" if "cache_read_input_tokens" in counters else None
-    )
+    cached_key = _cached_key(counters)
     cached = counters.get(cached_key, 0) if cached_key else 0
     if any(not isinstance(value, int) or value < 0 for value in (input_tokens, output_tokens, cached)):
         return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_INVALID_USAGE}
-    if counters.get("cached_tokens_reported") is True and cached_key is None:
-        # The response said cached tokens were involved but never said how
-        # many; pricing them as zero would fabricate a smaller bill.
+    if cached_key is None:
+        # Absent is not zero. The ledger stores only the keys the provider
+        # reported, so a missing cached count says nothing about whether
+        # input was served from cache; pricing it as zero cached reads would
+        # invent a figure and assume cached reads are free. This covers both
+        # the silent absence and the explicit ``cached_tokens_reported``
+        # marker, which names the accounting and withholds the number.
         return {"amount_usd": None, "source": source, "observed_at": observed_at,
                 "reason": COST_MISSING_CACHED_TOKENS}
     cached_rate = price.get("cached_read_per_m")
@@ -154,12 +169,15 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
 def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evicted_events: int = 0, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Aggregate usage from supplied events; report when the hot ring is incomplete.
 
-    The amount is the cost of the tokens this window *counts*, at the
-    published price for the model - the same basis the token columns use. It
-    is ``null`` only when the price itself is missing from the catalogue (or
-    cannot be applied at all); a request that reported no usage contributes
-    no tokens and no cost, and the window-level ``requests_without_usage``
-    counter says how many there were. An evicted window stays incomplete in
+    ``amount_usd`` is the *known subtotal*: the cost of the requests whose
+    price could be applied exactly, at the published price for the model -
+    the same basis the token columns use. ``known_cost_requests`` and
+    ``unknown_cost_requests`` say how much of the group that subtotal covers,
+    with the unknown requests' token counts and the strongest ``cost_reason``
+    beside it, so one unpriced request can no longer erase a subtotal the
+    catalogue does price. A request that reported no usage is Unknown, never
+    $0.00 (R26), and neither is a request whose cached-read count the provider
+    never reported: absence is not zero. An evicted window stays incomplete in
     ``coverage`` - exactly like the token columns, which are partial too -
     rather than blanking a price that does exist.
     """
@@ -192,6 +210,10 @@ def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evi
             row["requests"] += 1
             row["input_tokens"] += counters.get("prompt_tokens", counters.get("input_tokens", 0))
             row["output_tokens"] += counters.get("completion_tokens", counters.get("output_tokens", 0))
+            if counters and _cached_key(counters) is None:
+                # Usage reported, cached count absent: counted here so the
+                # console can show the coverage instead of a silent zero.
+                row["cached_tokens_unreported"] += 1
             _fold_cost(row, cost, raw_counters if isinstance(raw_counters, dict) else None)
     for dimension in groups.values():
         for key in dimension:
@@ -229,8 +251,20 @@ def aggregate_rollup_rows(rows: list[dict[str, Any]], *, _prices: dict[str, dict
         tokens_out = _counter(row.get("output_tokens"))
         cached = _counter(row.get("cached_tokens"))
         fallbacks = _counter(row.get("fallbacks"))
+        # Completeness signals the rollup stores beside the sums (the row's
+        # cached sum silently skips rows that never reported a cached count).
+        unreported = _counter(row.get("cached_tokens_unreported"))
+        without_usage = _counter(row.get("requests_without_usage"))
         cost = calculate_cost({"prompt_tokens": tokens_in, "completion_tokens": tokens_out,
                                "cached_read_tokens": cached}, model, provider, _prices=prices)
+        if unreported and cost.get("reason") != COST_NO_PRICE:
+            # Some request in this row never reported a cached count, and a
+            # row's tokens cannot be split back apart: pricing it would turn
+            # that absence into a $0.00 cached assumption. The row's dollars
+            # are Unknown; the coverage counters carry the rest. A missing
+            # price still wins, as everywhere else.
+            cost = {**cost, "amount_usd": None, "reason": COST_MISSING_CACHED_TOKENS}
+        token_counters = {"input_tokens": tokens_in, "output_tokens": tokens_out}
         dimensions = (("alias", row.get("alias")), ("provider", provider), ("model", model))
         for dimension, key in dimensions:
             if not isinstance(key, str):
@@ -246,9 +280,26 @@ def aggregate_rollup_rows(rows: list[dict[str, Any]], *, _prices: dict[str, dict
             entry["output_tokens"] += tokens_out
             entry["cached_tokens"] += cached
             entry["fallbacks"] += fallbacks
+            entry["cached_tokens_unreported"] += unreported
             requests_in_row = _counter(row.get("requests")) or 1
-            _fold_cost(entry, cost, {"input_tokens": tokens_in, "output_tokens": tokens_out},
-                       requests_in_row, amount_stands_for_count=False)
+            if unreported:
+                # Indivisible: every request in this row carries unknown
+                # coverage, and its tokens are counted as unknown tokens.
+                _fold_cost(entry, cost, token_counters, requests_in_row,
+                           amount_stands_for_count=False)
+                continue
+            priced = requests_in_row - min(without_usage, requests_in_row)
+            if priced > 0:
+                _fold_cost(entry, cost, token_counters, priced,
+                           amount_stands_for_count=False)
+            if without_usage:
+                # Requests that reported no usage contributed no tokens and an
+                # Unknown amount, never $0.00 (R26); a missing price still
+                # dominates the reason.
+                withheld = COST_NO_PRICE if cost.get("reason") == COST_NO_PRICE else COST_NO_USAGE
+                _fold_cost(entry, {**cost, "amount_usd": None, "reason": withheld},
+                           {"input_tokens": 0, "output_tokens": 0},
+                           requests_in_row - priced, amount_stands_for_count=False)
     for dimension in groups.values():
         for key in dimension:
             dimension[key] = _finish_group_row(dimension[key])
@@ -266,6 +317,7 @@ def _empty_group_row() -> dict[str, Any]:
         "unknown_cost_requests": 0,
         "unknown_cost_input_tokens": 0,
         "unknown_cost_output_tokens": 0,
+        "cached_tokens_unreported": 0,
         "cost_incomplete": False,
         "cost_reason": None,
         "source": None,
@@ -290,9 +342,10 @@ def _fold_cost(row: dict[str, Any], cost: dict[str, Any],
     """
     reason = cost.get("reason")
     amount = cost.get("amount_usd")
-    if reason in (None, COST_NO_USAGE):
-        # A published price with no reported usage is a known $0.00, not an
-        # unknown: the request contributed no billable tokens to this window.
+    if reason is None:
+        # An exactly priced contribution: the subtotal only ever holds
+        # amounts whose reason is None, so an Unknown can never be added as
+        # $0.00 (R26).
         row["known_amount_usd"] += (amount or 0.0) * (count if amount_stands_for_count else 1)
         row["known_cost_requests"] += count
     else:

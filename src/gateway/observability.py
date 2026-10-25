@@ -195,8 +195,23 @@ class RequestLedger:
             raise ValueError("latency_ms must be a non-negative integer or None")
         if "token_counters" in fields and fields["token_counters"] is not None:
             counters = fields["token_counters"]
-            if not isinstance(counters, dict) or any(not isinstance(k, str) or not isinstance(v, int) or v < 0 for k, v in counters.items()):
-                raise ValueError("token_counters must contain non-negative integer metadata")
+            # Only keys the provider reported belong here: the rollup reads a
+            # missing cached key as "not reported", never as zero. The one
+            # non-integer value allowed is ``cached_tokens_reported``, a
+            # boolean completeness marker for "cached accounting named, count
+            # withheld"; every other counter stays a non-negative integer
+            # (``bool`` is an ``int`` subclass, so it has to be excluded
+            # explicitly rather than by accident).
+            if not isinstance(counters, dict) or any(
+                not isinstance(k, str)
+                or (k == "cached_tokens_reported" and not isinstance(v, bool))
+                or (k != "cached_tokens_reported" and (not isinstance(v, int) or isinstance(v, bool) or v < 0))
+                for k, v in counters.items()
+            ):
+                raise ValueError(
+                    "token_counters must contain non-negative integer metadata "
+                    "or the cached_tokens_reported flag"
+                )
         with self._lock:
             matches = [item for item in self._events if item.request_id == request_id]
             if len(matches) != 1:
