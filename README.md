@@ -170,6 +170,11 @@ bounded rotation and a 30-day retention window when durable ledger storage is
 enabled; otherwise only the bounded in-memory ring is available and is lost
 when the gateway restarts. The Status view reports the current durability
 mode and marks aggregates Unknown when evictions may omit in-window events.
+The same append path maintains `request-ledger-rollup.json`, a derived daily
+rollup (one row per day, alias, provider and model, with tokens, fallbacks by
+reason, errors by class and statuses) that is rebuilt from the ledger on
+every start, so daily history survives restarts and ring eviction; its
+`coverage` block says what it covers instead of reporting a gap as zero.
 This is not a billing system.
 
 ```text

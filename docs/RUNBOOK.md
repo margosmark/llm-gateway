@@ -125,6 +125,23 @@ is the live view. Local usage aggregates cover the last 24 hours; costs use
 published prices only and display their source and observation date. A model
 without published prices reports **Unknown**. This is not a billing system.
 
+The same append path also maintains `request-ledger-rollup.json` beside the
+ledger: one row per UTC day, alias, provider and model with requests, input,
+output and cached tokens, fallbacks by reason, errors by class and statuses,
+plus a per-day trend. It is rebuilt from the ledger at every start, so daily
+history survives restarts and ring eviction. To regenerate it by hand after
+restoring or moving a state volume:
+
+```sh
+PYTHONPATH=src python3 -m gateway.ledger_persistence /var/lib/gateway/request-ledger.jsonl
+```
+
+The command prints the rollup's `coverage` and exits `1` when coverage is
+incomplete (rows it could not represent) and `2` when there is no ledger;
+`--dry-run` reports without writing. The sidecar holds aggregates only -
+no request identifier, no prompt, no response, no cost estimate - is written
+0600, and is not a billing record.
+
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Anthropic uses the
 native Messages API with a separately stored API key; its catalogue is loaded

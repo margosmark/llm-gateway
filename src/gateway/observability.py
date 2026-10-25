@@ -21,12 +21,14 @@ import re
 import secrets
 import threading
 import time
-from pathlib import Path
-from .ledger_persistence import LedgerPersistence
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Iterable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from .ledger_persistence import LedgerPersistence
 
 # Sources for a limit snapshot. Ordered by decreasing authority.
 SOURCE_PROVIDER_REPORTED = "provider_reported"
@@ -52,7 +54,7 @@ DEFAULT_LEDGER_CAPACITY = 10_000
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 #: A random per-process component of every request identifier. An identifier
@@ -221,6 +223,18 @@ class RequestLedger:
     def durability(self) -> dict[str, Any]:
         return {"enabled": self._persistence is not None, "retention_days": 30, "billing_system": False}
 
+    def rollup(self) -> dict[str, Any] | None:
+        """The durable daily rollup derived from this ledger, or None when persistence is off.
+
+        Unlike :meth:`recent`, the rollup does not depend on the bounded ring:
+        rows the ring has evicted, and days from before a restart, are already
+        aggregated. Its ``coverage`` block says what it actually covers - the
+        first row's timestamp, rows that could not be represented, and the
+        rebuild status - so a consumer can tell "no data before this point"
+        apart from "no usage", instead of reading a gap as a zero.
+        """
+        return self._persistence.rollup() if self._persistence else None
+
     def flush(self, timeout: float = 5.0) -> bool:
         return self._persistence.flush(timeout) if self._persistence else True
 
@@ -282,7 +296,7 @@ class LimitSnapshot:
         }
 
     @classmethod
-    def unknown(cls, provider: str, window: str, note: str | None = None) -> "LimitSnapshot":
+    def unknown(cls, provider: str, window: str, note: str | None = None) -> LimitSnapshot:
         """An explicitly unknown observation.
 
         Used when a provider offers no machine-readable limits. The value

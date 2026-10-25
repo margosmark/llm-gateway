@@ -1,5 +1,6 @@
 import unittest
 
+from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
 from gateway.costs import (
     aggregate_usage,
     calculate_cost,
@@ -7,7 +8,6 @@ from gateway.costs import (
     response_token_counters,
     stream_token_counters,
 )
-from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
 
 
 class UsageCostTests(unittest.TestCase):

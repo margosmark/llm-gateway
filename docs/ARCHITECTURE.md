@@ -55,6 +55,19 @@ complete audit trail and **not a billing system**. A full write queue or
 storage error may drop a persistence update; the request path does not wait
 for disk I/O.
 
+The same append path maintains `request-ledger-rollup.json`, a derived daily
+rollup sidecar: one row per UTC day x alias x provider x model with requests,
+input, output and cached tokens, fallbacks broken out by `fallback_reason`,
+errors by `error_class` and a status breakdown, alongside a per-day trend.
+The sidecar is rebuilt from the ledger on every start, so aggregated history
+survives both a restart and ring eviction, and
+`python3 -m gateway.ledger_persistence` regenerates it from the ledger on
+demand. Its `coverage` block states the first row it covers, how many rows
+could not be represented, and the rebuild status, so an absent day reads as a
+gap rather than as zero usage. The sidecar stores aggregates only - no
+request identifier, no prompt, no response, and no cost estimate (prices are
+applied at read time); it is written 0600 and is not a billing record.
+
 The Status view reports whether persistence is enabled and the declared
 30-day retention window. Local usage aggregates cover the last 24 hours and
 are computed from token counters and published prices, with source and
