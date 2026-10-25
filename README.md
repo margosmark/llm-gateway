@@ -230,6 +230,27 @@ The gateway **never** switches provider:
 When no eligible route remains, the gateway fails closed and names the
 routes it excluded and why. It never silently serves a different model.
 
+### Fallback depth comes from a second provider, not a second route
+
+Circuits open at two scopes: one route, and the whole provider — a
+confirmed allowance exhaustion holds `provider/*`. A fallback chain whose
+routes all sit on **one** provider therefore adds retries, not resilience:
+one cooldown, rate limit or outage empties the alias's whole eligible set,
+and every caller receives `503 no eligible route` at the same moment. That
+is the shape behind the 2026-10-23 fleet-wide stall.
+
+Depth comes only from a second provider. A chain that spans two providers
+survives a **single** provider's outage, rate limit or cooldown — and
+nothing beyond that: if both providers fail at once, the gateway still
+fails closed. No console or document here claims more than that.
+
+The gateway reports, rather than refuses, an enabled alias of two or more
+routes whose routes all name one provider: as `warning` on the alias save
+and publish responses, as `route_warning` beside the alias in owner state,
+and as a warning notice on the alias card. It is reported instead of
+refused because an owner with one live provider has no legal two-provider
+chain to choose.
+
 ### Phase routing is opt-in per alias
 
 An alias may carry an optional **phase-routing** policy that picks a
@@ -675,6 +696,15 @@ them.
   call the gateway natively; the inbound surface is planned as T5 in
   `docs/TODO.md`. The native Anthropic provider is outbound only: it
   serves Anthropic-dialect upstreams through the OpenAI-compatible API.
+* **Fallback depth covers one provider failing, not both.** A fallback
+  chain that spans two providers survives a single provider's outage, rate
+  limit or cooldown — the class behind the 2026-10-23 fleet-wide 503 —
+  and a chain whose routes all share one provider survives none of it
+  (circuits also open provider-wide). Only the providers the owner has
+  connected exist, so a simultaneous failure of both providers still fails
+  closed with `503 no eligible route`; that ceiling is stated here and in
+  the fallback section above, and the console warns beside any
+  single-provider alias instead of implying protection it cannot provide.
 
 R1, R8 and R9 are closed in `docs/REVIEW.md`: device-code polling
 completes, ChatGPT model refresh follows the shared adapter contract,
