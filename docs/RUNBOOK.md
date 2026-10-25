@@ -128,9 +128,15 @@ without published prices reports **Unknown**. This is not a billing system.
 The same append path also maintains `request-ledger-rollup.json` beside the
 ledger: one row per UTC day, alias, provider and model with requests, input,
 output and cached tokens, fallbacks by reason, errors by class and statuses,
-plus a per-day trend. It is rebuilt from the ledger at every start, so daily
-history survives restarts and ring eviction. To regenerate it by hand after
-restoring or moving a state volume:
+plus a per-day trend. Reasons are folded onto a closed vocabulary when the
+row is written - `cooldown`, `route_ineligible`, `upstream_failure`, `other`,
+`unknown` - so a per-second cooldown sentence never becomes a bucket or a
+sidecar key. Its `coverage` block also reports the in-memory request index
+bound (`index_entries` / `index_max_entries`, default 50,000) and anything
+that bound evicted (`index_evicted` / `index_amendments_dropped`), so totals
+are auditable on a long-running appliance. It is rebuilt from the ledger at
+every start, so daily history survives restarts and ring eviction. To
+regenerate it by hand after restoring or moving a state volume:
 
 ```sh
 PYTHONPATH=src python3 -m gateway.ledger_persistence /var/lib/gateway/request-ledger.jsonl

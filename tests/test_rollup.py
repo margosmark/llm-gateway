@@ -11,20 +11,35 @@ import stat
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from gateway.ledger_persistence import main, rebuild_rollups, rollup_path_for
-from gateway.observability import RequestEvent, RequestLedger, scan_for_secrets
+from gateway.fallback_reasons import FALLBACK_LABELS
+from gateway.ledger_persistence import (
+    INDEX_MAX_ENTRIES,
+    RollupStore,
+    main,
+    rebuild_rollups,
+    rollup_path_for,
+)
+from gateway.observability import (
+    DEFAULT_LEDGER_CAPACITY,
+    RequestEvent,
+    RequestLedger,
+    scan_for_secrets,
+)
 
 # Hand-computed expectation for the three-row fixture below, serialised the
 # way the sidecar serialises rows (sorted keys, compact separators): one row
 # per day x alias x provider x model, tokens summed, the 502 fallback broken
-# out by reason, and the amended request counted exactly once.
+# out by reason, and the amended request counted exactly once. The fixture's
+# raw reason (``primary_exhausted``) matches none of the shared rules, so it
+# folds to the closed vocabulary's ``other`` bucket at ingest - counted, never
+# dropped, and never persisted as a raw sentence.
 EXPECTED_ROWS = (
     '[{"alias":"coding","cached_tokens":4,"cached_tokens_unreported":0,"day":"2026-10-23","errors":{},"fallback_reasons":{},"fallbacks":0,"input_tokens":100,"model":"m-one","output_tokens":20,"provider":"opencode_go","requests":1,"requests_without_usage":0,"statuses":{"200":1}},'
-    '{"alias":"coding","cached_tokens":0,"cached_tokens_unreported":0,"day":"2026-10-23","errors":{"exhausted":1},"fallback_reasons":{"primary_exhausted":1},"fallbacks":1,"input_tokens":0,"model":"m-two","output_tokens":0,"provider":"p-two","requests":1,"requests_without_usage":1,"statuses":{"502":1}},'
+    '{"alias":"coding","cached_tokens":0,"cached_tokens_unreported":0,"day":"2026-10-23","errors":{"exhausted":1},"fallback_reasons":{"other":1},"fallbacks":1,"input_tokens":0,"model":"m-two","output_tokens":0,"provider":"p-two","requests":1,"requests_without_usage":1,"statuses":{"502":1}},'
     '{"alias":"flash","cached_tokens":0,"cached_tokens_unreported":1,"day":"2026-10-24","errors":{},"fallback_reasons":{},"fallbacks":0,"input_tokens":50,"model":"m-one","output_tokens":10,"provider":"opencode_go","requests":1,"requests_without_usage":0,"statuses":{"200":1}}]'
 )
 
@@ -118,7 +133,7 @@ class RollupAggregationTests(unittest.TestCase):
                 "day": "2026-10-23", "requests": 2, "input_tokens": 100,
                 "output_tokens": 20, "cached_tokens": 4, "fallbacks": 1,
                 "cached_tokens_unreported": 0, "requests_without_usage": 1,
-                "fallback_reasons": {"primary_exhausted": 1},
+                "fallback_reasons": {"other": 1},
                 "errors": {"exhausted": 1}, "statuses": {"200": 1, "502": 1},
             })
             self.assertEqual(daily[1], {
@@ -491,6 +506,169 @@ class RollupIntegrationTests(unittest.TestCase):
         self.assertNotIn("zqx-prompt-marker", text)
         self.assertNotIn("request_id", text)
         self.assertEqual(scan_for_secrets(text), [])
+
+
+def row_for(request_id: str, *, day: str, reason: str | None = None,
+            tokens: dict[str, int] | None = None) -> dict[str, Any]:
+    """One ledger-shaped row, optionally carrying a raw fallback reason."""
+    return {
+        "request_id": request_id,
+        "timestamp": f"{day}T10:00:00Z",
+        "requested_alias": "coding",
+        "serving_provider": "p",
+        "serving_model": "m",
+        "status": 502 if reason else 200,
+        "fallback_used": reason is not None,
+        "fallback_reason": reason,
+        "token_counters": tokens if tokens is not None else {"prompt_tokens": 10, "completion_tokens": 1},
+    }
+
+
+def store_in(directory: str) -> RollupStore:
+    return RollupStore(Path(directory) / "request-ledger-rollup.json", "request-ledger.jsonl")
+
+
+class RollupIndexBoundTests(unittest.TestCase):
+    """Security gate t_eb1846b6 / S-1: the request index is count-bounded.
+
+    The index maps a request id to its contribution so a later amendment can
+    replace it instead of being counted twice. It used to grow one entry per
+    request for the whole 30-day retention (measured 300k rows -> +187 MB
+    RSS), the only runtime structure in the ledger with no count bound.
+    """
+
+    def test_the_index_stays_bounded_under_a_synthetic_flood(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = store_in(directory)
+            total = INDEX_MAX_ENTRIES + 10_000
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            for index in range(total):
+                store.ingest(row_for(f"req_{index}", day=today), appended=True)
+            payload = store.snapshot()
+            coverage = payload["coverage"]
+            self.assertEqual(coverage["index_entries"], INDEX_MAX_ENTRIES)
+            self.assertEqual(coverage["index_max_entries"], INDEX_MAX_ENTRIES)
+            self.assertEqual(coverage["index_evicted"], total - INDEX_MAX_ENTRIES)
+            # The cap evicts index entries, never counted requests: every
+            # request's contribution stays in its bucket and in the totals.
+            self.assertEqual(coverage["requests"], total)
+            self.assertEqual(sum(row["requests"] for row in payload["rows"]), total)
+            # The remembered amendment window is bounded by the same cap.
+            self.assertLessEqual(len(store._evicted_ids), INDEX_MAX_ENTRIES)
+
+    def test_a_late_amendment_for_an_evicted_request_is_dropped_and_reported(self) -> None:
+        """An evicted id must never be counted a second time (S-1 decision)."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = store_in(directory)
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            early = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%d")
+            original = {"prompt_tokens": 10, "completion_tokens": 2}
+            store.ingest(row_for("req_early", day=early, tokens=dict(original)), appended=True)
+            for index in range(INDEX_MAX_ENTRIES + 10):
+                store.ingest(row_for(f"req_{index}", day=today), appended=True)
+            coverage = store.snapshot()["coverage"]
+            self.assertGreater(coverage["index_evicted"], 0)
+            total = INDEX_MAX_ENTRIES + 11
+            self.assertEqual(coverage["requests"], total)
+
+            # The amendment arrives anyway (a direct store write, or a ring
+            # that outlives the cap): the original contribution stands, the
+            # late row is dropped, and coverage says so instead of silently
+            # double-counting one request.
+            late = row_for("req_early", day=early,
+                           tokens={"prompt_tokens": 99, "completion_tokens": 9})
+            self.assertFalse(store.ingest(late, appended=True))
+            payload = store.snapshot()
+            coverage = payload["coverage"]
+            self.assertEqual(coverage["index_amendments_dropped"], 1)
+            self.assertEqual(coverage["requests"], total)
+            early_rows = [row for row in payload["rows"] if row["day"] == early]
+            self.assertEqual(len(early_rows), 1)
+            self.assertEqual(early_rows[0]["requests"], 1)
+            self.assertEqual(early_rows[0]["input_tokens"], original["prompt_tokens"])
+            self.assertEqual(early_rows[0]["output_tokens"], original["completion_tokens"])
+
+    def test_the_cap_stays_wider_than_the_ring_that_gates_amendments(self) -> None:
+        """The product invariant behind the bound.
+
+        ``RequestLedger.amend`` only writes an amendment row while the event
+        is still in the bounded ring, so an id can only be amended within the
+        ring window. The index cap is at least twice that window and evicts
+        oldest-first by last touch, so the product can never amend an entry it
+        has already evicted.
+        """
+        self.assertGreaterEqual(INDEX_MAX_ENTRIES, 2 * DEFAULT_LEDGER_CAPACITY)
+
+
+class RollupReasonVocabularyTests(unittest.TestCase):
+    """Security gate t_eb1846b6 / S-2: reasons fold to the closed vocabulary at ingest.
+
+    A recorded reason embeds a per-second cooldown counter, a climbing
+    failure count and a provider-supplied retry-after, so raw strings are
+    effectively unique per request. Counting them verbatim opened one bucket
+    per request and rewrote an ever-growing sidecar from the writer thread.
+    """
+
+    def test_distinct_reasons_fold_to_the_closed_vocabulary_with_counts_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = store_in(directory)
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            cooldown = 3_000
+            ineligible = 2_000
+            unmatched = 1_000
+            unclassified = 1
+            for index in range(cooldown):
+                store.ingest(row_for(f"req_c{index}", day=today, reason=(
+                    f"the provider p is in a local cooldown for {index}s "
+                    f"({index} consecutive failures); this route is held for {index}s"
+                )), appended=True)
+            for index in range(ineligible):
+                store.ingest(row_for(f"req_i{index}", day=today, reason=(
+                    f"the primary route was skipped: route {index} not eligible for alias coding"
+                )), appended=True)
+            for index in range(unmatched):
+                store.ingest(row_for(f"req_o{index}", day=today, reason=(
+                    f"something went sideways in attempt {index}"
+                )), appended=True)
+            # A fallback with no recorded reason at all: reported as
+            # ``unknown``, never as an absent bucket.
+            silent = row_for("req_u", day=today)
+            silent["fallback_used"] = True
+            silent["fallback_reason"] = None
+            store.ingest(silent, appended=True)
+
+            payload = store.snapshot()
+            bucket = payload["rows"][0]
+            counts = bucket["fallback_reasons"]
+            # Bounded by the vocabulary, never by the number of requests...
+            self.assertLessEqual(len(counts), len(FALLBACK_LABELS))
+            self.assertEqual(set(counts), {"cooldown", "route_ineligible", "other", "unknown"})
+            # ...with every event counted exactly once.
+            total = cooldown + ineligible + unmatched + unclassified
+            self.assertEqual(sum(counts.values()), total)
+            self.assertEqual(bucket["fallbacks"], total)
+            self.assertEqual(payload["coverage"]["requests"], total)
+
+    def test_the_sidecar_stays_small_under_a_reason_flood(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar = Path(directory) / "request-ledger-rollup.json"
+            store = store_in(directory)
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            total = 6_000
+            for index in range(total):
+                store.ingest(row_for(f"req_{index}", day=today, reason=(
+                    f"the provider p is in a local cooldown for {index}s "
+                    f"({index} consecutive failures); this route is held for {index}s"
+                )), appended=True)
+            payload = store.save()
+            assert payload is not None, "an in-memory save must produce a payload"
+            # 6,000 distinct raw reasons used to serialise ~1.3-2.5 MB and
+            # rewrite the whole file from the ledger writer thread.
+            size = sidecar.stat().st_size
+            self.assertLess(size, 64 * 1024, f"sidecar grew to {size} bytes")
+            counts = payload["rows"][0]["fallback_reasons"]
+            self.assertLessEqual(len(counts), len(FALLBACK_LABELS))
+            self.assertEqual(sum(counts.values()), total)
 
 
 if __name__ == "__main__":

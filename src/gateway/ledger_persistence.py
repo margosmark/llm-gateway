@@ -10,12 +10,21 @@ Two durable artifacts share the state directory:
 ``request-ledger-rollup.json``
     The daily rollup sidecar maintained from the *same* append path: one row
     per UTC day x alias x provider x model carrying requests, input, output
-    and cached tokens, fallbacks broken out by ``fallback_reason``, errors by
+    and cached tokens, fallbacks broken out by the closed fallback-reason
+    vocabulary (folded at ingest - see :mod:`gateway.fallback_reasons`, so
+    raw per-second sentences never become sidecar keys), errors by
     ``error_class`` and a status breakdown, plus a ``coverage`` block that
     states exactly what the rollup covers. The ledger stays the source of
     truth; :func:`rebuild_rollups` regenerates the sidecar from it, and the
     store is rebuilt from the ledger on every start so aggregated history
     never begins at deploy time.
+
+The store's two growth bounds are deliberate and both are visible in
+``coverage``: the request index is count-capped at
+:data:`INDEX_MAX_ENTRIES` entries (oldest-by-last-touch eviction, evicted
+ids remembered for a late amendment), and every persisted structure derives
+from either that cap or the durable ledger's own 5 MiB x 3 rotation, so an
+appliance that runs for months does not grow without limit.
 
 Both artifacts are metadata only. Neither holds a prompt, a response, a
 credential, a provider account identifier, or - in the rollup's case - even
@@ -37,6 +46,8 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from gateway.fallback_reasons import fallback_reason_class
 
 RETENTION_SECONDS = 30 * 24 * 60 * 60
 MAX_BYTES = 5 * 1024 * 1024
@@ -63,6 +74,36 @@ ROLLUP_SNAPSHOT_SECONDS = 15.0
 #: into a real name and never silently dropped.
 UNKNOWN = "unknown"
 DEFAULT_LEDGER_PATH = "/var/lib/gateway/request-ledger.jsonl"
+
+#: Hard count bound on the in-memory request index (security gate
+#: t_eb1846b6, S-1). The index maps a request id to its contribution so a
+#: later amendment replaces it instead of counting it twice, and it used to
+#: hold one entry per request for the whole 30-day retention: measured
+#: 300k rows -> +187 MB RSS, i.e. 30k requests/day -> ~540 MB and
+#: 100k/day -> ~1.8 GB on an appliance whose uptime is effectively
+#: unbounded. Every other ledger structure is count-bounded (ring 10_000,
+#: writer queue 20_000, ledger file 5 MiB x 3); this is the only runtime one
+#: that was not.
+#:
+#: 50_000 was chosen so that:
+#:
+#: * a normal boot never evicts - the whole durable ledger (5 MiB x 3 =
+#:   15 MiB, ~40k rows at a typical row size, the bound the security gate
+#:   already accepted for rebuild) fits under the cap;
+#: * it stays several times wider than the 10_000-record ledger ring that
+#:   gates amendments: ``RequestLedger.amend`` only writes an amendment row
+#:   while the event is still in the ring, so an id the product can still
+#:   amend is always among the newest index entries and is evicted only
+#:   after at least this many *other* requests - by which time the ring no
+#:   longer holds it and the amendment cannot be issued at all;
+#: * worst-case memory stays ~30 MB at the measured ~0.6 KB per entry.
+#:
+#: Eviction drops the *entry*, never the counted request: the contribution
+#: stays in its bucket, and the evicted id is remembered in a second
+#: bounded set of the same size so a late amendment is dropped and reported
+#: in ``coverage`` (``index_evicted`` / ``index_amendments_dropped``) rather
+#: than silently double-counted.
+INDEX_MAX_ENTRIES = 50_000
 
 DimensionKey = tuple[str, str, str, str]
 
@@ -93,6 +134,13 @@ class RollupStore:
         self._lock = threading.RLock()
         self._rows: dict[DimensionKey, dict[str, Any]] = {}
         self._index: dict[str, tuple[DimensionKey, dict[str, Any], float]] = {}
+        #: Ids the count cap evicted, newest last, bounded by
+        #: ``INDEX_MAX_ENTRIES`` too: they exist only so a late amendment for
+        #: an evicted request is recognised and dropped instead of counted a
+        #: second time.
+        self._evicted_ids: dict[str, None] = {}
+        self._index_evicted = 0
+        self._index_amendments_dropped = 0
         self._rows_skipped = 0
         self._rows_expired = 0
         self._rows_superseded = 0
@@ -111,6 +159,12 @@ class RollupStore:
         A row that cannot be represented (no identifier, no usable timestamp,
         or an unknown field the loader would also refuse) is counted as
         skipped rather than dropped, so the coverage block can say so.
+
+        A row whose request id the count cap has already evicted is a late
+        amendment of a request that is still counted: folding it again would
+        double-count one request, so it is dropped and reported through
+        ``coverage["index_amendments_dropped"]`` instead. Returning False
+        means "nothing was folded", never "this request does not exist".
         """
         with self._lock:
             if not isinstance(row, dict) or set(row) - FIELDS:
@@ -125,6 +179,9 @@ class RollupStore:
                 return False
             request_id = row["request_id"]
             previous = self._index.get(request_id)
+            if previous is None and request_id in self._evicted_ids:
+                self._index_amendments_dropped += 1
+                return False
             if previous is None:
                 key = (
                     stamp.strftime("%Y-%m-%d"),
@@ -139,6 +196,9 @@ class RollupStore:
                 key, _old_delta, epoch = previous
                 self._rows_superseded += 1
                 self._apply(self._rows[key], previous[1], -1)
+                # Amend = last touch, so an amended request is the newest
+                # entry in eviction order rather than the oldest.
+                del self._index[request_id]
             delta = _row_delta(row)
             bucket = self._rows.get(key)
             if bucket is None:
@@ -146,6 +206,7 @@ class RollupStore:
                 self._rows[key] = bucket
             self._apply(bucket, delta, +1)
             self._index[request_id] = (key, delta, epoch)
+            self._evict_overflow()
             if self._first is None or epoch < self._first:
                 self._first = epoch
             if self._last is None or epoch > self._last:
@@ -154,6 +215,22 @@ class RollupStore:
                 self._rows_appended += 1
             self._pending += 1
             return True
+
+    def _evict_overflow(self) -> None:
+        """Enforce ``INDEX_MAX_ENTRIES``: oldest by last touch first.
+
+        Only the *entry* is evicted - the request stays counted in its
+        bucket, so totals never lose data to the cap - and the id moves to
+        the bounded ``_evicted_ids`` set, which is what turns a later
+        amendment of it from a silent double count into a reported drop.
+        """
+        while len(self._index) > INDEX_MAX_ENTRIES:
+            oldest = next(iter(self._index))
+            self._index.pop(oldest)
+            self._index_evicted += 1
+            self._evicted_ids[oldest] = None
+            if len(self._evicted_ids) > INDEX_MAX_ENTRIES:
+                self._evicted_ids.pop(next(iter(self._evicted_ids)))
 
     def rebuild(self, files: Iterable[Path], *, trigger: str = "manual") -> dict[str, Any]:
         """Regenerate the whole rollup from ledger files.
@@ -164,6 +241,11 @@ class RollupStore:
         with self._lock:
             self._rows.clear()
             self._index.clear()
+            # The ledger replay re-establishes every amendment relationship,
+            # so the eviction bookkeeping starts over with it.
+            self._evicted_ids.clear()
+            self._index_evicted = 0
+            self._index_amendments_dropped = 0
             self._rows_skipped = 0
             self._rows_expired = 0
             self._rows_superseded = 0
@@ -265,9 +347,11 @@ class RollupStore:
 
     def _snapshot_locked(self) -> dict[str, Any]:
         rows = []
+        covered_requests = 0
         for key in sorted(self._rows):
             day, alias, provider, model = key
             bucket = self._rows[key]
+            covered_requests += bucket["requests"]
             entry = {name: value for name, value in bucket.items() if not isinstance(value, dict)}
             entry.update({name: dict(value) for name, value in bucket.items() if isinstance(value, dict)})
             entry.update({"day": day, "alias": alias, "provider": provider, "model": model})
@@ -279,7 +363,19 @@ class RollupStore:
             "coverage": {
                 "first_row_ts": _iso(self._first) if self._first is not None else None,
                 "last_row_ts": _iso(self._last) if self._last is not None else None,
-                "requests": len(self._index),
+                # Requests currently aggregated: the buckets, not the index.
+                # The count cap evicts index entries while their contribution
+                # stays counted, so ``len(self._index)`` would understate what
+                # this rollup actually covers.
+                "requests": covered_requests,
+                # The S-1 growth bound, stated rather than implied: how many
+                # entries the index holds, its cap, how many the cap has
+                # evicted, and how many late amendments that evicted instead
+                # of double-counting.
+                "index_entries": len(self._index),
+                "index_max_entries": INDEX_MAX_ENTRIES,
+                "index_evicted": self._index_evicted,
+                "index_amendments_dropped": self._index_amendments_dropped,
                 "rows_skipped": self._rows_skipped,
                 "rows_expired": self._rows_expired,
                 "rows_superseded": self._rows_superseded,
@@ -293,15 +389,32 @@ class RollupStore:
         }
 
     def _prune_expired(self) -> None:
-        """Drop contributions the ledger itself would already have pruned."""
+        """Drop contributions the ledger itself would already have pruned.
+
+        Entries still in the index expire by age, exactly as before. A
+        bucket whose *day* is past the retention window can additionally
+        still hold requests the count cap evicted from the index - those
+        contributions have no entry left to age out - so the day itself is
+        the bound that keeps finished days from accumulating forever on a
+        long-running appliance.
+        """
         now = time.time()
         expired = [request_id for request_id, (_key, _delta, epoch) in self._index.items() if now - epoch > RETENTION_SECONDS]
-        if not expired:
+        cutoff_day = datetime.fromtimestamp(now - RETENTION_SECONDS, UTC).strftime("%Y-%m-%d")
+        stale_days = [key for key in self._rows if key[0] < cutoff_day]
+        if not expired and not stale_days:
             return
         for request_id in expired:
             key, delta, _epoch = self._index.pop(request_id)
             self._apply(self._rows[key], delta, -1)
-        self._rows = {key: bucket for key, bucket in self._rows.items() if bucket["requests"] > 0}
+        # Every row in a stale day is older than the retention window, so no
+        # surviving index entry can still point at a bucket dropped here.
+        self._rows = {key: bucket for key, bucket in self._rows.items()
+                      if bucket["requests"] > 0 and key[0] >= cutoff_day}
+        # ``first_row_ts``/``last_row_ts`` describe the window the index
+        # still tracks: under count-cap eviction the evicted entries are no
+        # longer enumerated here, but their days are bounded by the rule
+        # above.
         epochs = [epoch for _key, _delta, epoch in self._index.values()]
         self._first = min(epochs) if epochs else None
         self._last = max(epochs) if epochs else None
@@ -545,7 +658,14 @@ def _row_delta(row: dict[str, Any]) -> dict[str, Any]:
         "cached_tokens": _token(counters, "cached_read_tokens", "cache_read_input_tokens"),
         "cached_tokens_unreported": 1 if usage_reported and not cached_reported else 0,
         "requests_without_usage": 0 if usage_reported else 1,
-        "fallback": (reason if isinstance(reason, str) and reason else UNKNOWN) if fallback else None,
+        # Folded at ingest onto the shared closed vocabulary: a raw reason
+        # embeds a per-second cooldown counter, a climbing failure count and
+        # a provider-supplied retry-after, so persisting it verbatim would
+        # open one sidecar key (and one rewrite) per request. The fold only
+        # changes which bucket a count lands under - never how many counts
+        # there are - and it is idempotent, so the reader-side fold in
+        # ``gateway.http.app`` is a no-op on rows this store produced.
+        "fallback": fallback_reason_class(reason) if fallback else None,
         "error": error if isinstance(error, str) and error else None,
         "status": str(status) if isinstance(status, int) and not isinstance(status, bool) else UNKNOWN,
     }
