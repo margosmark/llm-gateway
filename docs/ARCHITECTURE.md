@@ -71,7 +71,24 @@ applied at read time); it is written 0600 and is not a billing record.
 The Status view reports whether persistence is enabled and the declared
 30-day retention window. Local usage aggregates cover the last 24 hours and
 are computed from token counters and published prices, with source and
-observation date; a missing price remains Unknown. Because aggregation uses
+observation date. Each alias/provider/model row exposes a **known subtotal**
+(`known_amount_usd` / `amount_usd`) plus explicit unknown coverage:
+`known_cost_requests`, `unknown_cost_requests`,
+`unknown_cost_input_tokens`, `unknown_cost_output_tokens`, `cost_incomplete`
+and `cost_reason`. One request without a published price (an unpriced
+provider such as `chatgpt_codex`) no longer nulls the whole group - its
+dollars are excluded from the subtotal and counted as unknown coverage,
+while a group with no priced request at all keeps `amount_usd: null` rather
+than a fabricated `$0.00`. Cached-token counts a response reports but does
+not quantify mark that request unknown (`missing_cached_tokens`) instead of
+being priced as zero; no ChatGPT price is ever inferred from a matching
+model ID. **Known limitation:** the live ring sees that flag per request,
+but the daily rollup row (`daily-rollup/v1`) aggregates only
+`cached_tokens`, so a rollup day currently prices such a request at a cached
+count of zero - a conservative overestimate the live ring refuses to make.
+The surface card has asked the rollup owner for a per-row
+`cached_tokens_unreported` counter; until it lands, day-level rows are
+priced on the aggregated counters alone. Because aggregation uses
 the bounded recent-event ring, a window that lost rows to eviction is
 flagged `coverage.incomplete` instead of being shown as a complete sum: the
 amount still prices exactly the tokens the window counts, on the same basis

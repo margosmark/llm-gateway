@@ -262,10 +262,13 @@ function fixtureState() {
       window_hours: 24,
       coverage: { source: "bounded_recent_events", events_considered: 8, requests_without_usage: 2, incomplete: false },
       alias: {
-        coding: { requests: 6, input_tokens: 3110, output_tokens: 315, amount_usd: 0.00045, cost_reason: null, source: PUBLISHED, observed_at: "2026-10-22" },
-        pm: { requests: 2, input_tokens: 0, output_tokens: 0, amount_usd: null, cost_reason: "no_published_price", source: null, observed_at: null }
+        coding: { requests: 6, input_tokens: 3110, output_tokens: 315, amount_usd: 0.00045, known_amount_usd: 0.00045, known_cost_requests: 5, unknown_cost_requests: 1, unknown_cost_input_tokens: 500, unknown_cost_output_tokens: 100, cost_incomplete: true, cost_reason: "no_published_price", source: PUBLISHED, observed_at: "2026-10-22" },
+        pm: { requests: 2, input_tokens: 0, output_tokens: 0, amount_usd: null, known_amount_usd: 0.0, known_cost_requests: 0, unknown_cost_requests: 2, unknown_cost_input_tokens: 0, unknown_cost_output_tokens: 0, cost_incomplete: true, cost_reason: "no_published_price", source: null, observed_at: null }
       },
-      provider: {},
+      provider: {
+        opencode_go: { requests: 6, input_tokens: 3110, output_tokens: 315, amount_usd: 0.00045, known_amount_usd: 0.00045, known_cost_requests: 5, unknown_cost_requests: 1, unknown_cost_input_tokens: 500, unknown_cost_output_tokens: 100, cost_incomplete: true, cost_reason: "missing_cached_tokens", source: PUBLISHED, observed_at: "2026-10-22" },
+        chatgpt_codex: { requests: 2, input_tokens: 0, output_tokens: 0, amount_usd: null, known_amount_usd: 0.0, known_cost_requests: 0, unknown_cost_requests: 2, unknown_cost_input_tokens: 0, unknown_cost_output_tokens: 0, cost_incomplete: true, cost_reason: "no_published_price", source: null, observed_at: null }
+      },
       model: {}
     },
     analytics: {
@@ -363,7 +366,28 @@ check("the usage table keeps the live ring as the default window", function () {
   assert.strictEqual(options[0].attributes.selected, "", "the live ring is the default window");
   assert(options[0].textContent.includes("Last 24 hours (live ring)"));
   assert(options.filter(function (o) { return o.attributes.value === "2026-10-21"; })[0].textContent.includes("no data"));
-  assert(renderedText.includes("Unknown price source"), "an unpriced group stays Unknown");
+  assert(renderedText.includes("No published actual/list price"), "an unpriced group says the price is not published");
+  assert(!renderedText.includes("Unknown price source"), "a priced-by-reason group gets a specific label, not the generic one");
+});
+
+check("a mixed priced/unpriced group shows its known subtotal plus unknown coverage", function () {
+  const text = collectText(rendered).join("\n");
+  assert(text.includes("$0.000450"), "the known subtotal must render as dollars");
+  assert(text.includes("known subtotal; 1 of 6 requests unpriced (500 in / 100 out tokens)"),
+    "the unknown request/token coverage must be stated beside the subtotal");
+  assert(text.includes("no published price and are excluded"), "the exclusion reason is named");
+  assert(text.includes("cached-token count missing on some requests"),
+    "cached-token incompleteness is explicit");
+  const unknownGroup = text.includes("0 of 2 requests priced; 2 unknown (0 in / 0 out)");
+  assert(unknownGroup, "an all-unpriced group states its unknown coverage instead of a bare Unknown");
+});
+
+check("limits are labelled as enforced caps, never as catalogue metadata", function () {
+  const text = collectText(rendered).join("\n");
+  assert(text.includes("No cost limit is configured"), "an empty limits snapshot states that plainly");
+  assert(text.includes("reference metadata, not configured budgets"),
+    "catalogue monthly_limit_usd is not presented as a cost limit");
+  assert(text.includes("Enforceable spend caps"), "the card says what a limit here actually is");
 });
 
 check("selecting a rollup day renders that day's priced rows and fallbacks", function () {

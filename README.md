@@ -416,7 +416,16 @@ reported provider usage; local cost estimates use published prices only and
 are not provider bills. The Status page aggregates usage for the last 24 hours
 and displays the price source and observation date, and it can show any
 recorded UTC day from the durable daily rollup through the window selector.
-No published price means **Unknown**, never zero. Request metadata is
+A group's dollar figure is the **known subtotal**: requests without a
+published price are never priced and never poison the total, so the console
+states their coverage beside it — how many requests, and how many input and
+output tokens, are unpriced — instead of collapsing the whole group to
+Unknown. A group with no priced request at all shows **Unknown** (never
+zero) together with that coverage, and an unpriced provider such as
+`chatgpt_codex` is labelled as having no published actual/list price; the
+gateway never infers one from a matching model ID. Cached-token accounting
+that a response reports but does not quantify is called out explicitly
+rather than guessed. Request metadata is
 retained on the state volume for up to 30 days; it is not a billing system.
 
 The same state payload carries a **Fallback analytics** block: the fallback
@@ -427,7 +436,11 @@ zero, and a rate with no requests behind it is unknown rather than `0.0`.
 
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
-never as unlimited.
+never as unlimited. The **Usage and limits** card shows only enforceable
+spend caps observed from providers — with `limits: []` it says plainly that
+no cost limit is configured. Catalogue fields such as `monthly_limit_usd`
+are reference metadata, are never loaded as budget policy, and are labelled
+"reference only, not enforced" wherever they appear.
 
 See [the architecture map](docs/ARCHITECTURE.md),
 [development guide](docs/DEVELOPMENT.md), and

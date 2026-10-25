@@ -132,7 +132,7 @@
     var source = entry.limits_source || "unknown";
     return el("div", {}, [
       el("div", { text: text }),
-      el("div", { class: "small muted", text: "source: " + source })
+      el("div", { class: "small muted", text: "reference only, not enforced · source: " + source })
     ]);
   }
 
@@ -330,7 +330,7 @@
           el("td", { text: event.requested_alias }),
           el("td", { class: "small", text: event.serving_provider ? providerLabel(event.serving_provider) + " → " + event.serving_model : "—" }),
           el("td", { class: "small", text: event.error_class ? event.error_class : ("status " + (event.status || "")) + (event.fallback_used ? " (fallback)" : "") }),
-          el("td", { class: "small", text: event.cost && event.cost.amount_usd != null ? "$" + Number(event.cost.amount_usd).toFixed(6) + " · " + event.cost.source + " · " + event.cost.observed_at : "Unknown" }),
+          el("td", { class: "small", text: event.cost && event.cost.amount_usd != null ? "$" + Number(event.cost.amount_usd).toFixed(6) + " · " + event.cost.source + " · " + event.cost.observed_at : (event.cost && event.cost.reason === "missing_cached_tokens" ? "Unknown - cached-token count not reported" : (event.cost && event.cost.reason === "no_published_price" ? "Unknown - no published actual/list price" : "Unknown")) }),
           el("td", { class: "small muted", text: ledgerNote(event) })
         ]));
       });
@@ -392,7 +392,7 @@
             el("td", { text: row.input_tokens }), el("td", { text: row.output_tokens })
           ];
           if (dayKnown) cells.push(el("td", { text: row.fallbacks }));
-          cells.push(el("td", { text: row.amount_usd == null ? "Unknown" : "$" + Number(row.amount_usd).toFixed(6) }));
+          cells.push(costCell(row));
           cells.push(el("td", { class: "small", text: priceSourceCell(row) }));
           costBody.appendChild(el("tr", {}, cells));
         });
@@ -403,11 +403,17 @@
     frag.appendChild(el("section", {}, [costsCard]));
     frag.appendChild(el("section", {}, [renderFallbackCard(analytics)]));
 
-    var limitsCard = el("div", { class: "card" }, [el("h2", { text: "Usage and limits" })]);
+    var limitsCard = el("div", { class: "card" }, [
+      el("h2", { text: "Usage and limits" }),
+      el("p", {
+        class: "small muted",
+        text: "Enforceable spend caps observed from providers. Catalogue fields such as monthly_limit_usd are reference metadata, not configured budgets, and are never shown as limits here."
+      })
+    ]);
     if (!state.limits || !state.limits.length) {
       limitsCard.appendChild(el("p", {
         class: "small muted",
-        text: "Unknown. No limit snapshot has been observed yet. Nothing is inferred."
+        text: "No cost limit is configured: no enforceable provider spend cap has been observed. Nothing is inferred from catalogue metadata."
       }));
     } else {
       var limitTable = el("table", {}, [
@@ -478,11 +484,59 @@
   }
 
   function priceSourceCell(row) {
-    if (row.source) return row.source + " · " + (row.observed_at || "date unknown");
+    if (row.source) {
+      var note = "";
+      if (row.cost_reason === "missing_cached_tokens") {
+        note = " · cached-token count missing on some requests; those are excluded from the subtotal";
+      } else if (row.cost_reason === "missing_cached_price") {
+        note = " · cached reads unpriced; those requests excluded";
+      } else if (row.cost_reason === "no_published_price" && row.unknown_cost_requests) {
+        note = " · " + row.unknown_cost_requests + " request(s) have no published price and are excluded";
+      }
+      return row.source + " · " + (row.observed_at || "date unknown") + note;
+    }
     if (row.cost_reason === "missing_cached_price") {
       return "Price published, but not for cached reads - amount withheld";
     }
+    if (row.cost_reason === "missing_cached_tokens") {
+      return "Cached-token count not reported - amount withheld for those requests";
+    }
+    if (row.cost_reason === "no_published_price") {
+      return "No published actual/list price for this provider and model - never inferred";
+    }
     return "Unknown price source";
+  }
+
+  // A group keeps its known dollar subtotal even when some constituent
+  // requests have no price; the unknown coverage is stated next to it so a
+  // partial total can never read as a complete bill.
+  function costCell(row) {
+    var parts = [];
+    if (row.amount_usd == null) {
+      parts.push(el("div", { text: "Unknown" }));
+      if (row.unknown_cost_requests) {
+        parts.push(el("div", {
+          class: "small muted",
+          text: "0 of " + row.requests + " requests priced; " +
+            row.unknown_cost_requests + " unknown (" +
+            tokens(row.unknown_cost_input_tokens) + " in / " +
+            tokens(row.unknown_cost_output_tokens) + " out)"
+        }));
+      }
+    } else {
+      parts.push(el("div", { text: "$" + Number(row.amount_usd).toFixed(6) }));
+      if (row.cost_incomplete && row.unknown_cost_requests) {
+        parts.push(el("div", {
+          class: "small muted",
+          text: "known subtotal; " + row.unknown_cost_requests + " of " + row.requests +
+            " requests unpriced (" + tokens(row.unknown_cost_input_tokens) + " in / " +
+            tokens(row.unknown_cost_output_tokens) + " out tokens)"
+        }));
+      } else if (row.cost_incomplete) {
+        parts.push(el("div", { class: "small muted", text: "known subtotal; coverage incomplete" }));
+      }
+    }
+    return el("td", {}, parts);
   }
 
   // The rate with a proportional bar, styled inline so no new stylesheet

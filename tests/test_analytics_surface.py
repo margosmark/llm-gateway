@@ -251,6 +251,57 @@ class PricedUsageTests(unittest.TestCase):
                 self.assertIsNone(row["amount_usd"])
                 self.assertEqual(row["cost_reason"], "no_published_price")
 
+    def test_mixed_priced_and_unpriced_fallback_group_keeps_its_known_subtotal(self) -> None:
+        """A ChatGPT fallback inside an OpenCode group must not poison the total."""
+        rollup = fixture_rollup()
+        rollup["rows"].append({
+            "day": "2026-10-22", "alias": "coding", "provider": "chatgpt_codex",
+            "model": "gpt-6-luna", "requests": 2, "input_tokens": 500,
+            "output_tokens": 100, "cached_tokens": 0, "fallbacks": 0,
+            "fallback_reasons": {}, "errors": {}, "statuses": {"200": 2},
+        })
+        usage = build_analytics(rollup, days=7, today=TODAY, prices=PRICES)["usage"]["2026-10-22"]
+        coding = usage["alias"]["coding"]
+        # 3000 input + 300 output at 0.3 / 1.2 per million = 0.00126.
+        self.assertAlmostEqual(coding["amount_usd"], 0.00126)
+        self.assertEqual(coding["requests"], 5)
+        self.assertEqual(coding["known_cost_requests"], 3)
+        self.assertEqual(coding["unknown_cost_requests"], 2)
+        self.assertEqual(coding["unknown_cost_input_tokens"], 500)
+        self.assertEqual(coding["unknown_cost_output_tokens"], 100)
+        self.assertTrue(coding["cost_incomplete"])
+        self.assertEqual(coding["cost_reason"], "no_published_price")
+        self.assertEqual(coding["source"], "https://opencode.ai/docs/go/")
+        # The unpriced provider row stays fully unknown, labelled and unpriced.
+        codex = usage["provider"]["chatgpt_codex"]
+        self.assertIsNone(codex["amount_usd"])
+        self.assertEqual(codex["known_cost_requests"], 0)
+        self.assertEqual(codex["unknown_cost_requests"], 2)
+        self.assertEqual(codex["cost_reason"], "no_published_price")
+        # The priced model row is untouched by the fallback.
+        self.assertAlmostEqual(usage["model"]["mimo-v2.6-flash"]["amount_usd"], 0.00126)
+
+    def test_cached_token_incomplete_rows_stay_explicit_not_guessed(self) -> None:
+        from gateway.costs import aggregate_usage
+        events = [
+            {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "coding",
+             "serving_provider": "opencode_go", "serving_model": "mimo-v2.6-flash",
+             "token_counters": {"prompt_tokens": 3000, "completion_tokens": 300}},
+            {"timestamp": "2099-01-01T00:00:01Z", "requested_alias": "coding",
+             "serving_provider": "opencode_go", "serving_model": "mimo-v2.6-flash",
+             "token_counters": {"prompt_tokens": 1000, "completion_tokens": 100,
+                                "cached_tokens_reported": True}},
+        ]
+        row = aggregate_usage(events, window_hours=24, _prices=PRICES)["model"]["mimo-v2.6-flash"]
+        # 3000 input + 300 output at 0.3 / 1.2 per million = 0.00126.
+        self.assertAlmostEqual(row["amount_usd"], 0.00126)
+        self.assertEqual(row["unknown_cost_requests"], 1)
+        self.assertEqual(row["unknown_cost_input_tokens"], 1000)
+        self.assertEqual(row["unknown_cost_output_tokens"], 100)
+        self.assertEqual(row["cost_reason"], "missing_cached_tokens")
+        self.assertTrue(row["cost_incomplete"])
+        self.assertEqual(row["source"], "https://opencode.ai/docs/go/")
+
 
 class UnavailableRollupTests(unittest.TestCase):
     def test_a_disabled_rollup_is_reported_not_invented(self) -> None:
@@ -382,14 +433,23 @@ class StateEndpointAnalyticsTests(unittest.TestCase):
             if entry["status"] in {"gap", "outside_coverage", "unknown", "no_rows"}:
                 self.assertIsNone(entry["requests"], entry["day"])
 
-        # Cost invariant across every priced group: an amount exists exactly
-        # when no reason withheld it.
+        # Cost invariant across every group: the dollar figure is only
+        # absent when no request in the group had a published price, and the
+        # unknown coverage is always stated alongside a known subtotal.
         for day_usage in analytics_block["usage"].values():
             if day_usage is None:
                 continue
             for group in day_usage.values():
                 for row in group.values():
-                    self.assertEqual(row["amount_usd"] is None, row["cost_reason"] is not None, row)
+                    self.assertEqual(
+                        row["amount_usd"] is None, row["known_cost_requests"] == 0, row)
+                    self.assertEqual(
+                        row["unknown_cost_requests"] >= 0
+                        and row["unknown_cost_input_tokens"] >= 0
+                        and row["unknown_cost_output_tokens"] >= 0, True, row)
+                    if row["unknown_cost_requests"]:
+                        self.assertTrue(row["cost_incomplete"], row)
+                        self.assertIsNotNone(row["cost_reason"], row)
 
     def test_state_window_query_is_honoured_and_clamped(self) -> None:
         status, state, _ = self.harness.request("GET", "/owner/api/state?days=30")
