@@ -145,7 +145,13 @@ no request identifier, no prompt, no response, no cost estimate - is written
 The Status page reads that rollup. The usage table keeps the live 24-hour
 ring as its default window and adds a selector for every day in the
 requested window (`?days=N` on `/owner/api/state`, default 7, clamped to 30),
-including its fallbacks, cost estimate and price source. The **Fallback
+including its fallbacks, cost estimate and price source. Cost cells show the
+**known subtotal** for the group with the unknown coverage next to it
+(`known subtotal; N of M requests unpriced (x in / y out tokens)`); a group
+with no priced request renders **Unknown** with its coverage rather than a
+bare `Unknown`, an unpriced provider is labelled "no published actual/list
+price - never inferred", and a cached-token count the upstream reported but
+did not quantify is named instead of guessed. The **Fallback
 analytics** card reports the overall fallback rate, the reasons behind it,
 the per-alias, per-provider and per-model split, and the daily trend. A day
 with no recorded rows is drawn as a gap and a day before the first recorded

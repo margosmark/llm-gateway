@@ -48,7 +48,10 @@ def response_token_counters(body: bytes | None, dialect: str) -> dict[str, int] 
         cached = details.get("cached_tokens", details.get("cache_read"))
         if isinstance(cached, int) and cached >= 0:
             result["cached_read_tokens"] = cached
-    result = {key: value for key, value in result.items() if value >= 0}
+        else:
+            result["cached_tokens_reported"] = True
+    result = {key: value for key, value in result.items()
+              if key == "cached_tokens_reported" or isinstance(value, int) and value >= 0}
     return result or None
 
 
@@ -72,7 +75,11 @@ def stream_token_counters(frames: Iterable[bytes], dialect: str) -> dict[str, in
                     cached = details.get("cached_tokens", details.get("cache_read"))
                     if isinstance(cached, int) and cached >= 0:
                         total["cached_read_tokens"] = cached
-                total = {key: value for key, value in total.items() if value >= 0}
+                        total.pop("cached_tokens_reported", None)
+                    else:
+                        total["cached_tokens_reported"] = True
+                total = {key: value for key, value in total.items()
+                         if key == "cached_tokens_reported" or isinstance(value, int) and value >= 0}
     return total or None
 
 
@@ -94,6 +101,7 @@ COST_NO_PRICE = "no_published_price"
 COST_NO_USAGE = "no_usage_reported"
 COST_INVALID_USAGE = "invalid_usage"
 COST_MISSING_CACHED_PRICE = "missing_cached_price"
+COST_MISSING_CACHED_TOKENS = "missing_cached_tokens"
 
 
 def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | None = "opencode_go", *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -117,13 +125,22 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
         return {"amount_usd": None, "source": None, "observed_at": None, "reason": COST_NO_PRICE}
     source, observed_at = price["source"], price["observed_at"]
     if counters is None:
-        # Usage was never reported for this request - unknown, not zero.
-        return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_NO_USAGE}
+        # Usage was never reported. The published price is still known, and
+        # there is no evidence that any billable tokens were counted.
+        return {"amount_usd": 0.0, "source": source, "observed_at": observed_at, "reason": COST_NO_USAGE}
     input_tokens = counters.get("prompt_tokens", counters.get("input_tokens", 0))
     output_tokens = counters.get("completion_tokens", counters.get("output_tokens", 0))
-    cached = counters.get("cached_read_tokens", counters.get("cache_read_input_tokens", 0))
+    cached_key = "cached_read_tokens" if "cached_read_tokens" in counters else (
+        "cache_read_input_tokens" if "cache_read_input_tokens" in counters else None
+    )
+    cached = counters.get(cached_key, 0) if cached_key else 0
     if any(not isinstance(value, int) or value < 0 for value in (input_tokens, output_tokens, cached)):
         return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_INVALID_USAGE}
+    if counters.get("cached_tokens_reported") is True and cached_key is None:
+        # The response said cached tokens were involved but never said how
+        # many; pricing them as zero would fabricate a smaller bill.
+        return {"amount_usd": None, "source": source, "observed_at": observed_at,
+                "reason": COST_MISSING_CACHED_TOKENS}
     cached_rate = price.get("cached_read_per_m")
     if cached and not isinstance(cached_rate, (int, float)):
         # Never assume cached reads are free.
@@ -175,7 +192,7 @@ def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evi
             row["requests"] += 1
             row["input_tokens"] += counters.get("prompt_tokens", counters.get("input_tokens", 0))
             row["output_tokens"] += counters.get("completion_tokens", counters.get("output_tokens", 0))
-            _fold_cost(row, cost)
+            _fold_cost(row, cost, raw_counters if isinstance(raw_counters, dict) else None)
     for dimension in groups.values():
         for key in dimension:
             dimension[key] = _finish_group_row(dimension[key])
@@ -229,7 +246,9 @@ def aggregate_rollup_rows(rows: list[dict[str, Any]], *, _prices: dict[str, dict
             entry["output_tokens"] += tokens_out
             entry["cached_tokens"] += cached
             entry["fallbacks"] += fallbacks
-            _fold_cost(entry, cost)
+            requests_in_row = _counter(row.get("requests")) or 1
+            _fold_cost(entry, cost, {"input_tokens": tokens_in, "output_tokens": tokens_out},
+                       requests_in_row, amount_stands_for_count=False)
     for dimension in groups.values():
         for key in dimension:
             dimension[key] = _finish_group_row(dimension[key])
@@ -237,35 +256,67 @@ def aggregate_rollup_rows(rows: list[dict[str, Any]], *, _prices: dict[str, dict
 
 
 def _empty_group_row() -> dict[str, Any]:
-    return {"requests": 0, "input_tokens": 0, "output_tokens": 0, "amount_usd": 0.0,
-            "cost_reason": None, "source": None, "observed_at": None}
+    return {
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "amount_usd": None,
+        "known_amount_usd": 0.0,
+        "known_cost_requests": 0,
+        "unknown_cost_requests": 0,
+        "unknown_cost_input_tokens": 0,
+        "unknown_cost_output_tokens": 0,
+        "cost_incomplete": False,
+        "cost_reason": None,
+        "source": None,
+        "observed_at": None,
+    }
 
 
 def _counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _fold_cost(row: dict[str, Any], cost: dict[str, Any]) -> None:
-    """Fold one priced contribution in; a missing price dominates the group."""
+def _fold_cost(row: dict[str, Any], cost: dict[str, Any],
+               counters: dict[str, Any] | None, count: int = 1,
+               *, amount_stands_for_count: bool = True) -> None:
+    """Fold a contribution into known subtotal and explicit unknown coverage.
+
+    ``count`` scales the *request* counters: live events fold one at a time,
+    while a rollup row stands for every request in that group for the day.
+    ``amount_stands_for_count`` says whether ``cost['amount_usd']`` prices a
+    single request (live events: multiply it) or the whole row's tokens
+    (rollup rows: already the group total, so add it once).
+    """
     reason = cost.get("reason")
-    if reason == COST_NO_PRICE:
-        row["cost_reason"] = COST_NO_PRICE
-    elif reason == COST_MISSING_CACHED_PRICE and row["cost_reason"] is None:
-        row["cost_reason"] = COST_MISSING_CACHED_PRICE
-    elif cost.get("amount_usd") is not None and row["cost_reason"] is None:
-        row["amount_usd"] += cost["amount_usd"]
+    amount = cost.get("amount_usd")
+    if reason in (None, COST_NO_USAGE):
+        # A published price with no reported usage is a known $0.00, not an
+        # unknown: the request contributed no billable tokens to this window.
+        row["known_amount_usd"] += (amount or 0.0) * (count if amount_stands_for_count else 1)
+        row["known_cost_requests"] += count
+    else:
+        row["unknown_cost_requests"] += count
+        if reason == COST_NO_PRICE:
+            row["cost_reason"] = COST_NO_PRICE
+        elif row["cost_reason"] is None or row["cost_reason"] == COST_NO_USAGE:
+            row["cost_reason"] = reason
+        if counters is None:
+            row["unknown_cost_input_tokens"] += 0
+            row["unknown_cost_output_tokens"] += 0
+        else:
+            row["unknown_cost_input_tokens"] += _counter(counters.get("prompt_tokens", counters.get("input_tokens", 0)))
+            row["unknown_cost_output_tokens"] += _counter(counters.get("completion_tokens", counters.get("output_tokens", 0)))
+        row["cost_incomplete"] = True
+        row["cost_reason"] = row["cost_reason"] or reason
     if cost.get("source") is not None and row["source"] is None:
         row["source"] = cost["source"]
         row["observed_at"] = cost.get("observed_at")
 
 
 def _finish_group_row(row: dict[str, Any]) -> dict[str, Any]:
-    """Resolve the group's amount: a reason to withhold it wins over the sum."""
-    if row["cost_reason"] is not None:
-        row["amount_usd"] = None
-        if row["cost_reason"] == COST_NO_PRICE:
-            row["source"] = None
-            row["observed_at"] = None
+    """Expose only the subtotal backed by known prices, never imply completeness."""
+    row["amount_usd"] = row["known_amount_usd"] if row["known_cost_requests"] else None
     return row
 
 
