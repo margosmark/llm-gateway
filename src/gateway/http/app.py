@@ -60,6 +60,7 @@ from gateway.core.capabilities import (
 from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.fallback_reasons import fallback_reason_class
+from gateway.http import messages as messages_surface
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
@@ -371,6 +372,10 @@ class GatewayApp:
         r.add(["POST"], "/v1/systemone", self.handle_systemone)
         r.add(["POST"], "/v1/chat/completions", self.handle_chat_completions)
         r.add(["POST"], "/v1/responses", self.handle_responses)
+        # ANCHOR t_52fe959a "anthropic-messages-route": the Anthropic
+        # Messages surface, added after the OpenAI inference routes.
+        # Additive only - the routes above and below are not reordered.
+        r.add(["POST"], "/v1/messages", self.handle_messages)
 
         for prefix in self.mounts:
             r.add(["GET"], prefix + "/", self.handle_console)
@@ -655,6 +660,17 @@ class GatewayApp:
 
     def handle_responses(self, request: Request) -> Any:
         return self._handle_inference(request, DIALECT_OPENAI_RESPONSES)
+
+    def handle_messages(self, request: Request) -> Any:
+        """Serve the Anthropic Messages surface, ``POST /v1/messages``.
+
+        The Anthropic contract (parse and validate) is exclusive to
+        :mod:`gateway.http.messages`; the request then runs through the
+        same inference flow as the OpenAI surfaces with the Anthropic
+        Messages dialect as the caller's, so route selection and the
+        bridge render Anthropic-shaped buffered and streamed responses.
+        """
+        return messages_surface.handle_messages(self, request)
 
     def _session_hint(self, request: Request) -> str:
         """The client-supplied conversation name, if it sent one.
