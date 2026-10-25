@@ -19,10 +19,9 @@ from gateway.adapters.chatgpt_codex import (
     ChatGPTCodexAdapter,
 )
 from gateway.auth import ProfileAuth, access_mode_description, profile_allows
-from gateway.bridge.aggregate import aggregate_stream
-from gateway.bridge.buffered import chat_body_to_responses, responses_body_to_chat
+from gateway.bridge.anthropic import aggregate_stream_any, convert_buffered_bytes, convert_stream_bytes
 from gateway.bridge.model import ConversionError
-from gateway.bridge.streams import convert_stream, sse_done
+from gateway.bridge.streams import sse_done
 from gateway.backup import export_config, import_config, snapshot_interval_seconds
 from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
@@ -730,7 +729,7 @@ class GatewayApp:
                 # The upstream is streaming only. Consume it and present the
                 # result as the single object the client asked for.
                 body = json.dumps(
-                    aggregate_stream(list(routed.response.stream), upstream_dialect),
+                    aggregate_stream_any(list(routed.response.stream), upstream_dialect),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8")
@@ -755,7 +754,7 @@ class GatewayApp:
 
         def frames():
             observed: dict[str, int] = {}
-            converted = upstream_stream if upstream_dialect == dialect else convert_stream(
+            converted = upstream_stream if upstream_dialect == dialect else convert_stream_bytes(
                 upstream_stream, upstream_dialect, dialect, routed.request.model
             )
             for frame in converted:
@@ -1555,28 +1554,14 @@ class GatewayApp:
 
 
 def _convert_buffered(body: bytes, source: str, target: str) -> bytes:
-    """Convert a buffered response body between the two dialects.
+    """Convert a buffered response body between any two served dialects.
 
-    If the body cannot be converted it is returned unchanged rather than
-    mangled: a caller can then see the upstream's own object, which is
-    better than a silently wrong one.
+    The conversion itself lives in the bridge (:mod:`gateway.bridge.anthropic`,
+    which also covers the OpenAI-family pairs). If the body cannot be
+    converted it is returned unchanged rather than mangled: a caller can then
+    see the upstream's own object, which is better than a silently wrong one.
     """
-    try:
-        payload = json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return body
-    if not isinstance(payload, dict):
-        return body
-    try:
-        if source == DIALECT_OPENAI_RESPONSES and target == DIALECT_OPENAI_CHAT:
-            converted = responses_body_to_chat(payload)
-        elif source == DIALECT_OPENAI_CHAT and target == DIALECT_OPENAI_RESPONSES:
-            converted = chat_body_to_responses(payload)
-        else:
-            return body
-    except Exception:  # pragma: no cover - defensive
-        return body
-    return json.dumps(converted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return convert_buffered_bytes(body, source, target)
 
 
 def _extract_caller_phase(payload: dict[str, Any]) -> str | None:
