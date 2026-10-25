@@ -36,7 +36,7 @@ class DurableLedgerTests(unittest.TestCase):
                 ledger.record(RequestEvent(
                     f"req-{index}", "2099-01-01T00:00:00Z", "coding",
                     serving_provider="opencode_go", serving_model="claude-haiku-5-5",
-                    status=200, token_counters={"prompt_tokens": 100, "completion_tokens": 20},
+                    status=200, token_counters={"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0},
                 ))
             self.assertTrue(ledger.flush())
             self.assertEqual(ledger.totals()["requests"], 5)

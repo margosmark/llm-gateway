@@ -79,16 +79,18 @@ and `cost_reason`. One request without a published price (an unpriced
 provider such as `chatgpt_codex`) no longer nulls the whole group - its
 dollars are excluded from the subtotal and counted as unknown coverage,
 while a group with no priced request at all keeps `amount_usd: null` rather
-than a fabricated `$0.00`. Cached-token counts a response reports but does
-not quantify mark that request unknown (`missing_cached_tokens`) instead of
-being priced as zero; no ChatGPT price is ever inferred from a matching
-model ID. **Known limitation:** the live ring sees that flag per request,
-but the daily rollup row (`daily-rollup/v1`) aggregates only
-`cached_tokens`, so a rollup day currently prices such a request at a cached
-count of zero - a conservative overestimate the live ring refuses to make.
-The surface card has asked the rollup owner for a per-row
-`cached_tokens_unreported` counter; until it lands, day-level rows are
-priced on the aggregated counters alone. Because aggregation uses
+than a fabricated `$0.00`. Cached-token completeness holds at every layer:
+a request or rollup row whose cached counter the provider never reported is
+Unknown (`missing_cached_tokens`), never a cached count of zero, while an
+explicit reported zero stays a priced known zero; no ChatGPT price is ever
+inferred from a matching model ID. Because a rollup row holds sums, the
+completeness travels beside them: `cached_tokens_unreported` counts the
+ledger rows in that row that reported usage without a cached count, and
+`requests_without_usage` counts the rows that reported no usage at all
+(unreported usage is Unknown, never `$0.00`). The surface prices a row only
+where both counts are zero; otherwise the row's dollars are Unknown and the
+coverage counters say how much, so an absent cached counter can never become
+a reported zero on its way to the console. Because aggregation uses
 the bounded recent-event ring, a window that lost rows to eviction is
 flagged `coverage.incomplete` instead of being shown as a complete sum: the
 amount still prices exactly the tokens the window counts, on the same basis

@@ -17,7 +17,19 @@ class UsageCostTests(unittest.TestCase):
             DIALECT_OPENAI_CHAT,
         )
         self.assertEqual(counters, {"prompt_tokens": 1000, "completion_tokens": 250, "total_tokens": 1250})
-        cost = calculate_cost(counters, "claude-haiku-5-5")
+        # The response carried no cached accounting at all: absent is not a
+        # reported zero, so the amount is Unknown rather than a price computed
+        # as zero cached reads.
+        without_cached = calculate_cost(counters, "claude-haiku-5-5")
+        self.assertIsNone(without_cached["amount_usd"])
+        self.assertEqual(without_cached["reason"], "missing_cached_tokens")
+        # The same usage with an explicit cached count prices normally.
+        reported = response_token_counters(
+            b'{"usage":{"prompt_tokens":1000,"completion_tokens":250,"total_tokens":1250,'
+            b'"prompt_tokens_details":{"cached_tokens":0}}}',
+            DIALECT_OPENAI_CHAT,
+        )
+        cost = calculate_cost(reported, "claude-haiku-5-5")
         self.assertAlmostEqual(cost["amount_usd"], 0.000225)
         self.assertEqual(cost["source"], "https://opencode.ai/docs/go/")
         # The dated catalogue snapshot is refreshed, so the as-of date is read
@@ -32,14 +44,14 @@ class UsageCostTests(unittest.TestCase):
         self.assertEqual(stream_token_counters(responses, DIALECT_OPENAI_RESPONSES), expected)
 
     def test_unpriced_catalogue_model_is_unknown_not_zero(self):
-        cost = calculate_cost({"prompt_tokens": 10, "completion_tokens": 2}, "beam-free")
+        cost = calculate_cost({"prompt_tokens": 10, "completion_tokens": 2, "cached_read_tokens": 0}, "beam-free")
         self.assertIsNone(cost["amount_usd"])
         self.assertIsNone(cost["source"])
 
     def test_aggregates_are_metadata_only_by_alias_provider_model(self):
         events = [{
             "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "friendly", "serving_provider": "opencode_go",
-            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20},
+            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0},
         }]
         result = aggregate_usage(events, window_hours=24)
         self.assertEqual(set(result), {"window_hours", "coverage", "alias", "provider", "model"})
@@ -58,7 +70,7 @@ class UsageCostTests(unittest.TestCase):
         self.assertIsNone(cost["amount_usd"])
 
     def test_same_model_name_at_another_provider_is_not_assigned_opencode_price(self):
-        cost = calculate_cost({"prompt_tokens": 100, "completion_tokens": 20}, "claude-haiku-5-5", provider="chatgpt_codex")
+        cost = calculate_cost({"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0}, "claude-haiku-5-5", provider="chatgpt_codex")
         self.assertIsNone(cost["amount_usd"])
         self.assertIsNone(cost["source"])
 
@@ -66,7 +78,7 @@ class UsageCostTests(unittest.TestCase):
         from unittest.mock import patch
         events = [{
             "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "a", "serving_provider": "opencode_go",
-            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20},
+            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0},
         } for _ in range(10_000)]
         with patch("gateway.costs.published_prices", wraps=published_prices) as prices:
             result = aggregate_usage(events)
@@ -77,7 +89,7 @@ class UsageCostTests(unittest.TestCase):
     def test_evicted_events_mark_window_aggregate_incomplete(self):
         events = [{
             "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "a", "serving_provider": "opencode_go",
-            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20},
+            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0},
         } for _ in range(10_000)]
         result = aggregate_usage(events, window_hours=24, evicted_events=2_000)
         row = result["model"]["claude-haiku-5-5"]
@@ -97,23 +109,27 @@ class UsageCostTests(unittest.TestCase):
         # those must not blank out the whole group's price.
         events = [
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "a", "serving_provider": "opencode_go",
-             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20}},
+             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0}},
             {"timestamp": "2099-01-01T00:00:01Z", "requested_alias": "a", "serving_provider": "opencode_go",
              "serving_model": "claude-haiku-5-5", "token_counters": None, "status": 502},
         ]
         result = aggregate_usage(events, window_hours=24)
         row = result["model"]["claude-haiku-5-5"]
         self.assertEqual(row["requests"], 2)
+        # The priced request keeps its subtotal; the one that reported no
+        # usage is Unknown (never $0.00) and is visible as coverage.
         self.assertAlmostEqual(row["amount_usd"], 0.00002)
-        self.assertEqual(row["cost_reason"], None)
+        self.assertEqual(row["cost_reason"], "no_usage_reported")
+        self.assertTrue(row["cost_incomplete"])
+        self.assertEqual(row["unknown_cost_requests"], 1)
         self.assertEqual(result["coverage"]["requests_without_usage"], 1)
 
     def test_amount_is_null_exactly_when_no_published_price_exists(self):
         events = [
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "a", "serving_provider": "opencode_go",
-             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20}},
+             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0}},
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "b", "serving_provider": "opencode_go",
-             "serving_model": "beam-free", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20}},
+             "serving_model": "beam-free", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0}},
         ]
         result = aggregate_usage(events, window_hours=24)
         priced = result["model"]["claude-haiku-5-5"]
@@ -142,16 +158,16 @@ class UsageCostTests(unittest.TestCase):
     def test_unknown_price_dominates_aggregate_instead_of_underreporting(self):
         events = [{
             "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "p",
-            "serving_model": "beam-free", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1},
+            "serving_model": "beam-free", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1, "cached_read_tokens": 0},
         }]
         self.assertIsNone(aggregate_usage(events)["model"]["beam-free"]["amount_usd"])
 
     def test_mixed_priced_and_unpriced_fallback_group_keeps_known_subtotal(self):
         events = [
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "coding", "serving_provider": "opencode_go",
-             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250}},
+             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250, "cached_read_tokens": 0}},
             {"timestamp": "2099-01-01T00:00:01Z", "requested_alias": "coding", "serving_provider": "chatgpt_codex",
-             "serving_model": "gpt-6-luna", "token_counters": {"prompt_tokens": 500, "completion_tokens": 100},
+             "serving_model": "gpt-6-luna", "token_counters": {"prompt_tokens": 500, "completion_tokens": 100, "cached_read_tokens": 0},
              "fallback_used": True},
         ]
         result = aggregate_usage(events, window_hours=24)
@@ -168,7 +184,7 @@ class UsageCostTests(unittest.TestCase):
     def test_missing_cached_token_count_preserves_known_subtotal_and_marks_unknown(self):
         events = [
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "coding", "serving_provider": "opencode_go",
-             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250}},
+             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250, "cached_read_tokens": 0}},
             {"timestamp": "2099-01-01T00:00:01Z", "requested_alias": "coding", "serving_provider": "opencode_go",
              "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 500, "completion_tokens": 100,
              "cached_tokens_reported": True}},
@@ -186,7 +202,7 @@ class UsageCostTests(unittest.TestCase):
     def test_caller_provider_model_name_does_not_borrow_published_price(self):
         events = [{
             "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "coding", "serving_provider": "chatgpt_codex",
-            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250},
+            "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250, "cached_read_tokens": 0},
         }]
         row = aggregate_usage(events, window_hours=24)["model"]["claude-haiku-5-5"]
         self.assertIsNone(row["amount_usd"])
@@ -205,7 +221,7 @@ class UsageCostTests(unittest.TestCase):
     def test_unpriced_only_group_has_zero_known_subtotal_but_unknown_coverage(self):
         events = [{
             "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "p",
-            "serving_model": "beam-free", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1},
+            "serving_model": "beam-free", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1, "cached_read_tokens": 0},
         }]
         row = aggregate_usage(events, window_hours=24)["model"]["beam-free"]
         self.assertIsNone(row["amount_usd"])
@@ -214,16 +230,25 @@ class UsageCostTests(unittest.TestCase):
         self.assertIsNone(row["source"])
         self.assertEqual(row["cost_reason"], "no_published_price")
 
-    def test_no_usage_is_not_counted_as_unknown_cost_if_published_price_is_known(self):
+    def test_unreported_usage_is_unknown_never_zero_dollars(self):
+        # R26: no reported usage is Unknown, never $0.00. A silent zero in
+        # the cost column would be an invented figure, so the group carries
+        # no known subtotal at all here - only coverage that says why.
         events = [{
             "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "opencode_go",
             "serving_model": "claude-haiku-5-5", "token_counters": None,
         }]
         row = aggregate_usage(events, window_hours=24)["model"]["claude-haiku-5-5"]
-        self.assertEqual(row["amount_usd"], 0.0)
-        self.assertFalse(row["cost_incomplete"])
-        self.assertEqual(row["unknown_cost_requests"], 0)
-        self.assertEqual(row["cost_reason"], None)
+        self.assertIsNone(row["amount_usd"])
+        self.assertTrue(row["cost_incomplete"])
+        self.assertEqual(row["known_cost_requests"], 0)
+        self.assertEqual(row["unknown_cost_requests"], 1)
+        self.assertEqual(row["cost_reason"], "no_usage_reported")
+        # Per request: the price is known, the amount is not.
+        cost = calculate_cost(None, "claude-haiku-5-5")
+        self.assertIsNone(cost["amount_usd"])
+        self.assertEqual(cost["reason"], "no_usage_reported")
+        self.assertIsNotNone(cost["source"])
 
     def test_aggregate_unknown_cached_token_contribution_preserves_known_subtotal(self):
         from unittest.mock import patch
@@ -233,7 +258,7 @@ class UsageCostTests(unittest.TestCase):
         }}):
             events = [
                 {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "opencode_go",
-                 "serving_model": "model", "token_counters": {"prompt_tokens": 100, "completion_tokens": 10}},
+                 "serving_model": "model", "token_counters": {"prompt_tokens": 100, "completion_tokens": 10, "cached_read_tokens": 0}},
                 {"timestamp": "2099-01-01T00:00:01Z", "requested_alias": "alias", "serving_provider": "opencode_go",
                  "serving_model": "model", "token_counters": {"prompt_tokens": 50, "completion_tokens": 5,
                  "cached_tokens_reported": True}},
@@ -257,9 +282,9 @@ class UsageCostTests(unittest.TestCase):
         # presentation has enough metadata to keep them distinct.
         events = [
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "coding", "serving_provider": "opencode_go",
-             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250}},
+             "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250, "cached_read_tokens": 0}},
             {"timestamp": "2099-01-01T00:00:01Z", "requested_alias": "coding", "serving_provider": "chatgpt_codex",
-             "serving_model": "gpt-6-luna", "token_counters": {"prompt_tokens": 500, "completion_tokens": 100}},
+             "serving_model": "gpt-6-luna", "token_counters": {"prompt_tokens": 500, "completion_tokens": 100, "cached_read_tokens": 0}},
         ]
         alias = aggregate_usage(events, window_hours=24)["alias"]["coding"]
         self.assertEqual(alias["unknown_cost_requests"], 1)

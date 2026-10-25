@@ -423,9 +423,12 @@ output tokens, are unpriced — instead of collapsing the whole group to
 Unknown. A group with no priced request at all shows **Unknown** (never
 zero) together with that coverage, and an unpriced provider such as
 `chatgpt_codex` is labelled as having no published actual/list price; the
-gateway never infers one from a matching model ID. Cached-token accounting
-that a response reports but does not quantify is called out explicitly
-rather than guessed. Request metadata is
+gateway never infers one from a matching model ID. Cached-token completeness
+is enforced end to end: an absent cached counter is never read as a reported
+zero and never prices as one - it is shown as coverage unknown, beside the
+count of requests missing it - while an explicit reported zero prices
+normally. A request that reported no usage is **Unknown**, never `$0.00`.
+Request metadata is
 retained on the state volume for up to 30 days; it is not a billing system.
 
 The same state payload carries a **Fallback analytics** block: the fallback

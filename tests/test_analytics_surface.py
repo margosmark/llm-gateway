@@ -281,12 +281,56 @@ class PricedUsageTests(unittest.TestCase):
         # The priced model row is untouched by the fallback.
         self.assertAlmostEqual(usage["model"]["mimo-v2.6-flash"]["amount_usd"], 0.00126)
 
+    def test_rollup_row_without_cached_counts_is_coverage_unknown_not_zero(self) -> None:
+        """Rollup -> API: an absent cached counter never becomes $0.00.
+
+        ``cached_tokens_unreported`` is what the sidecar stores beside the
+        sum, because ``_token`` would otherwise fold an absent key into a
+        reported zero. With it set, the group's dollars are Unknown and the
+        coverage says how much; an explicit zero still prices.
+        """
+        from gateway.costs import aggregate_rollup_rows
+        row = {"day": "2026-10-24", "alias": "coding", "provider": "opencode_go",
+               "model": "mimo-v2.6-flash", "requests": 2, "input_tokens": 4000,
+               "output_tokens": 400, "cached_tokens": 0, "cached_tokens_unreported": 2,
+               "requests_without_usage": 0, "fallbacks": 0, "fallback_reasons": {},
+               "errors": {}, "statuses": {"200": 2}}
+        group = aggregate_rollup_rows([row], _prices=PRICES)["model"]["mimo-v2.6-flash"]
+        self.assertIsNone(group["amount_usd"])
+        self.assertEqual(group["known_cost_requests"], 0)
+        self.assertEqual(group["unknown_cost_requests"], 2)
+        self.assertEqual(group["unknown_cost_input_tokens"], 4000)
+        self.assertEqual(group["cost_reason"], "missing_cached_tokens")
+        self.assertEqual(group["cached_tokens_unreported"], 2)
+        self.assertTrue(group["cost_incomplete"])
+
+        priced = aggregate_rollup_rows([{**row, "cached_tokens_unreported": 0}],
+                                       _prices=PRICES)["model"]["mimo-v2.6-flash"]
+        self.assertIsNotNone(priced["amount_usd"])
+        self.assertEqual(priced["unknown_cost_requests"], 0)
+
+    def test_rollup_row_with_unreported_usage_prices_only_what_was_reported(self) -> None:
+        """Requests with no usage block are Unknown coverage, never $0.00."""
+        from gateway.costs import aggregate_rollup_rows
+        row = {"day": "2026-10-24", "alias": "coding", "provider": "opencode_go",
+               "model": "mimo-v2.6-flash", "requests": 3, "input_tokens": 3000,
+               "output_tokens": 300, "cached_tokens": 0, "cached_tokens_unreported": 0,
+               "requests_without_usage": 1, "fallbacks": 0, "fallback_reasons": {},
+               "errors": {"502": 1}, "statuses": {"200": 2, "502": 1}}
+        group = aggregate_rollup_rows([row], _prices=PRICES)["model"]["mimo-v2.6-flash"]
+        self.assertEqual(group["known_cost_requests"], 2)
+        self.assertEqual(group["unknown_cost_requests"], 1)
+        self.assertEqual(group["cost_reason"], "no_usage_reported")
+        self.assertTrue(group["cost_incomplete"])
+        # The subtotal covers the two requests that reported usage.
+        self.assertAlmostEqual(group["amount_usd"], group["known_amount_usd"])
+
     def test_cached_token_incomplete_rows_stay_explicit_not_guessed(self) -> None:
         from gateway.costs import aggregate_usage
         events = [
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "coding",
              "serving_provider": "opencode_go", "serving_model": "mimo-v2.6-flash",
-             "token_counters": {"prompt_tokens": 3000, "completion_tokens": 300}},
+             "token_counters": {"prompt_tokens": 3000, "completion_tokens": 300, "cached_read_tokens": 0}},
             {"timestamp": "2099-01-01T00:00:01Z", "requested_alias": "coding",
              "serving_provider": "opencode_go", "serving_model": "mimo-v2.6-flash",
              "token_counters": {"prompt_tokens": 1000, "completion_tokens": 100,

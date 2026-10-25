@@ -23,15 +23,9 @@ from gateway.observability import RequestEvent, RequestLedger, scan_for_secrets
 # per day x alias x provider x model, tokens summed, the 502 fallback broken
 # out by reason, and the amended request counted exactly once.
 EXPECTED_ROWS = (
-    '[{"alias":"coding","cached_tokens":4,"day":"2026-10-23","errors":{},'
-    '"fallback_reasons":{},"fallbacks":0,"input_tokens":100,"model":"m-one",'
-    '"output_tokens":20,"provider":"opencode_go","requests":1,"statuses":{"200":1}},'
-    '{"alias":"coding","cached_tokens":0,"day":"2026-10-23","errors":{"exhausted":1},'
-    '"fallback_reasons":{"primary_exhausted":1},"fallbacks":1,"input_tokens":0,'
-    '"model":"m-two","output_tokens":0,"provider":"p-two","requests":1,"statuses":{"502":1}},'
-    '{"alias":"flash","cached_tokens":0,"day":"2026-10-24","errors":{},'
-    '"fallback_reasons":{},"fallbacks":0,"input_tokens":50,"model":"m-one",'
-    '"output_tokens":10,"provider":"opencode_go","requests":1,"statuses":{"200":1}}]'
+    '[{"alias":"coding","cached_tokens":4,"cached_tokens_unreported":0,"day":"2026-10-23","errors":{},"fallback_reasons":{},"fallbacks":0,"input_tokens":100,"model":"m-one","output_tokens":20,"provider":"opencode_go","requests":1,"requests_without_usage":0,"statuses":{"200":1}},'
+    '{"alias":"coding","cached_tokens":0,"cached_tokens_unreported":0,"day":"2026-10-23","errors":{"exhausted":1},"fallback_reasons":{"primary_exhausted":1},"fallbacks":1,"input_tokens":0,"model":"m-two","output_tokens":0,"provider":"p-two","requests":1,"requests_without_usage":1,"statuses":{"502":1}},'
+    '{"alias":"flash","cached_tokens":0,"cached_tokens_unreported":1,"day":"2026-10-24","errors":{},"fallback_reasons":{},"fallbacks":0,"input_tokens":50,"model":"m-one","output_tokens":10,"provider":"opencode_go","requests":1,"requests_without_usage":0,"statuses":{"200":1}}]'
 )
 
 
@@ -123,14 +117,58 @@ class RollupAggregationTests(unittest.TestCase):
             self.assertEqual(daily[0], {
                 "day": "2026-10-23", "requests": 2, "input_tokens": 100,
                 "output_tokens": 20, "cached_tokens": 4, "fallbacks": 1,
+                "cached_tokens_unreported": 0, "requests_without_usage": 1,
                 "fallback_reasons": {"primary_exhausted": 1},
                 "errors": {"exhausted": 1}, "statuses": {"200": 1, "502": 1},
             })
             self.assertEqual(daily[1], {
                 "day": "2026-10-24", "requests": 1, "input_tokens": 50,
                 "output_tokens": 10, "cached_tokens": 0, "fallbacks": 0,
+                "cached_tokens_unreported": 1, "requests_without_usage": 0,
                 "fallback_reasons": {}, "errors": {}, "statuses": {"200": 1},
             })
+
+    def test_cached_completeness_is_recorded_per_row(self) -> None:
+        """One sibling reports cached reads, one reports none, one reports zero.
+
+        The row keeps the sum of what was reported and counts what was not, so
+        an absent cached counter can never be read back as a reported zero -
+        and an explicit zero stays a known zero rather than being marked
+        unknown.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            ledger = RequestLedger(capacity=10, persistence_path=path)
+            ledger.record(RequestEvent(
+                "req_cached", "2026-10-24T10:00:00Z", "coding",
+                serving_provider="opencode_go", serving_model="m-one", status=200,
+                token_counters={"prompt_tokens": 100, "completion_tokens": 10, "cached_read_tokens": 4},
+            ))
+            ledger.record(RequestEvent(
+                "req_silent", "2026-10-24T10:00:01Z", "coding",
+                serving_provider="opencode_go", serving_model="m-one", status=200,
+                token_counters={"prompt_tokens": 100, "completion_tokens": 10},
+            ))
+            ledger.record(RequestEvent(
+                "req_zero", "2026-10-24T10:00:02Z", "coding",
+                serving_provider="opencode_go", serving_model="m-one", status=200,
+                token_counters={"prompt_tokens": 100, "completion_tokens": 10, "cached_read_tokens": 0},
+            ))
+            self.assertTrue(ledger.flush())
+            payload = json.loads(rollup_path_for(path).read_text())
+            ledger.close()
+        rows = payload["rows"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["requests"], 3)
+        self.assertEqual(row["input_tokens"], 300)
+        self.assertEqual(row["cached_tokens"], 4)
+        # Only the silent sibling is unreported: the explicit zero counts as
+        # reported, and the reported four are not diluted or reinterpreted.
+        self.assertEqual(row["cached_tokens_unreported"], 1)
+        self.assertEqual(row["requests_without_usage"], 0)
+        daily = payload["daily"]
+        self.assertEqual(daily[0]["cached_tokens_unreported"], 1)
 
 
 class RollupBackfillTests(unittest.TestCase):
