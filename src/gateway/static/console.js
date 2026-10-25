@@ -18,6 +18,10 @@
   var tab = "status";
   var busy = false;
   var editingAlias = null;
+  // Which window the usage table shows: the live 24-hour ring, or one UTC
+  // day from the durable daily rollup. Kept across redraws so switching
+  // sections does not silently reset the owner's choice.
+  var usageDay = "live";
 
   // --- tiny helpers -----------------------------------------------------
 
@@ -336,32 +340,68 @@
     frag.appendChild(el("section", {}, [ledgerCard]));
 
     var costs = state.usage_costs || { window_hours: 24, alias: {}, provider: {}, model: {} };
-    var costsCard = el("div", { class: "card" }, [
-      el("h2", { text: "Local usage and estimated cost" }),
-      el("p", { class: "small muted", text: "Last " + costs.window_hours + " hours. Based on reported token counts and published prices only; estimates are not provider bills." }),
-      el("p", { class: "small muted", text: (costs.coverage && costs.coverage.incomplete ? "The bounded recent-event ring may omit older events from this window; affected cost estimates are Unknown." : "Aggregates cover the available recent-event ring for the last " + costs.window_hours + " hours.") + " " + (state.ledger_durability && state.ledger_durability.enabled ? "The metadata ledger is persisted asynchronously with bounded rotation and a 30-day retention window." : "Durable ledger storage is not enabled; the in-memory ring is lost when the gateway restarts.") + " This is not a billing system." })
-    ]);
-    [ ["Alias", costs.alias], ["Provider", costs.provider], ["Model", costs.model] ].forEach(function (group) {
-      var entries = Object.keys(group[1] || {}).sort();
-      if (!entries.length) return;
-      costsCard.appendChild(el("h3", { text: group[0] }));
-      var costTable = el("table", {}, [el("thead", {}, [el("tr", {}, [
-        el("th", { text: group[0] }), el("th", { text: "Requests" }), el("th", { text: "Input tokens" }),
-        el("th", { text: "Output tokens" }), el("th", { text: "Estimated USD" }), el("th", { text: "Price source / observed" })
-      ])])]);
-      var costBody = el("tbody");
-      entries.forEach(function (key) {
-        var row = group[1][key];
-        costBody.appendChild(el("tr", {}, [
-          el("td", { text: key }), el("td", { text: row.requests }), el("td", { text: row.input_tokens }),
-          el("td", { text: row.output_tokens }), el("td", { text: row.amount_usd == null ? "Unknown" : "$" + Number(row.amount_usd).toFixed(6) }),
-          el("td", { class: "small", text: row.source ? row.source + " · " + (row.observed_at || "date unknown") : "Unknown price source" })
-        ]));
+    var analytics = state.analytics || {
+      available: false, unavailable_reason: "state_has_no_analytics", series: [], usage: {}, gaps: [], fallback: {}
+    };
+    // A selected day only stays selected while the payload still carries it;
+    // a stale selection falls back to the live ring rather than silently
+    // showing nothing.
+    var daySelected = usageDay !== "live";
+    var dayKnown = daySelected && analytics.available &&
+      Object.prototype.hasOwnProperty.call(analytics.usage || {}, usageDay);
+    if (daySelected && !dayKnown) usageDay = "live";
+    var usageGroups = dayKnown
+      ? analytics.usage[usageDay]
+      : { alias: costs.alias, provider: costs.provider, model: costs.model };
+
+    var costsCard = el("div", { class: "card" }, [el("h2", { text: "Local usage and estimated cost" })]);
+    if (dayKnown) {
+      costsCard.appendChild(el("p", { class: "small muted", text: "UTC day " + usageDay + ", from the durable daily rollup (30-day retention, rebuilt from the request ledger on every start). Prices are applied at read time from the published catalogue; " + (analytics.coverage && analytics.coverage.incomplete ? "the rollup's coverage is incomplete, so this day may be partial." : "every retained row for the day is included.") + " Estimates are not provider bills." }));
+    } else {
+      costsCard.appendChild(el("p", { class: "small muted", text: "Last " + costs.window_hours + " hours. Based on reported token counts and published prices only; estimates are not provider bills." }));
+      costsCard.appendChild(el("p", { class: "small muted", text: (costs.coverage && costs.coverage.incomplete ? "The bounded recent-event ring may omit older events from this window; affected cost estimates are Unknown." : "Aggregates cover the available recent-event ring for the last " + costs.window_hours + " hours.") + " " + (state.ledger_durability && state.ledger_durability.enabled ? "The metadata ledger is persisted asynchronously with bounded rotation and a 30-day retention window." : "Durable ledger storage is not enabled; the in-memory ring is lost when the gateway restarts.") + " This is not a billing system." }));
+    }
+    if (analytics.available && (analytics.series || []).length) {
+      costsCard.appendChild(el("div", { class: "row" }, [
+        el("span", { class: "small muted", text: "Window" }),
+        usageDaySelector(costs, analytics, dayKnown)
+      ]));
+    }
+    if (dayKnown && !usageGroups) {
+      costsCard.appendChild(emptyState(
+        "No rows recorded for " + usageDay,
+        "The rollup has no rows for this day. That is a gap in the record, not zero usage."
+      ));
+    }
+    if (usageGroups) {
+      [ ["Alias", usageGroups.alias], ["Provider", usageGroups.provider], ["Model", usageGroups.model] ].forEach(function (group) {
+        var entries = Object.keys(group[1] || {}).sort();
+        if (!entries.length) return;
+        costsCard.appendChild(el("h3", { text: group[0] }));
+        var headerCells = [group[0], "Requests", "Input tokens", "Output tokens"];
+        if (dayKnown) headerCells.push("Fallbacks");
+        headerCells.push("Estimated USD", "Price source / observed");
+        var costTable = el("table", {}, [el("thead", {}, [el("tr", {}, headerCells.map(function (title) {
+          return el("th", { text: title });
+        }))])]);
+        var costBody = el("tbody");
+        entries.forEach(function (key) {
+          var row = group[1][key];
+          var cells = [
+            el("td", { text: key }), el("td", { text: row.requests }),
+            el("td", { text: row.input_tokens }), el("td", { text: row.output_tokens })
+          ];
+          if (dayKnown) cells.push(el("td", { text: row.fallbacks }));
+          cells.push(el("td", { text: row.amount_usd == null ? "Unknown" : "$" + Number(row.amount_usd).toFixed(6) }));
+          cells.push(el("td", { class: "small", text: priceSourceCell(row) }));
+          costBody.appendChild(el("tr", {}, cells));
+        });
+        costTable.appendChild(costBody);
+        costsCard.appendChild(costTable);
       });
-      costTable.appendChild(costBody);
-      costsCard.appendChild(costTable);
-    });
+    }
     frag.appendChild(el("section", {}, [costsCard]));
+    frag.appendChild(el("section", {}, [renderFallbackCard(analytics)]));
 
     var limitsCard = el("div", { class: "card" }, [el("h2", { text: "Usage and limits" })]);
     if (!state.limits || !state.limits.length) {
@@ -399,6 +439,198 @@
       el("div", { class: "small muted", text: label }),
       el("div", { style: "font-size:22px", text: String(value) })
     ]);
+  }
+
+  // --- fallback analytics ------------------------------------------------
+
+  // A recorded fallback reason is a sentence that changes by the second, so
+  // the API folds reasons onto a closed vocabulary; the console renders the
+  // human label for each key it is given.
+  var FALLBACK_REASON_LABELS = {
+    cooldown: "Local cooldown held the route",
+    route_ineligible: "Primary route not eligible",
+    upstream_failure: "Upstream failure trigger",
+    other: "Other reason",
+    unknown: "Unknown reason"
+  };
+
+  // What each day's record state means. A gap is never drawn as a zero.
+  var DAY_STATUS_TEXT = {
+    ok: "recorded",
+    open: "in progress",
+    no_rows: "no rows yet today",
+    gap: "no data — gap, not zero",
+    outside_coverage: "before recorded history",
+    unknown: "unavailable"
+  };
+
+  function fallbackReasonLabel(key) {
+    return FALLBACK_REASON_LABELS[key] || key;
+  }
+
+  function percentText(rate) {
+    if (rate === null || rate === undefined) return "Unknown";
+    return (Number(rate) * 100).toFixed(1) + "%";
+  }
+
+  function dayStatusText(status) {
+    return DAY_STATUS_TEXT[status] || String(status);
+  }
+
+  function priceSourceCell(row) {
+    if (row.source) return row.source + " · " + (row.observed_at || "date unknown");
+    if (row.cost_reason === "missing_cached_price") {
+      return "Price published, but not for cached reads - amount withheld";
+    }
+    return "Unknown price source";
+  }
+
+  // The rate with a proportional bar, styled inline so no new stylesheet
+  // rule is needed: currentColor adapts to the console's theme.
+  function rateCell(rate) {
+    if (rate === null || rate === undefined) return el("td", { class: "small muted", text: "Unknown" });
+    var percent = Number(rate) * 100;
+    var width = Math.max(1, Math.min(100, percent));
+    return el("td", {}, [
+      el("div", { text: percent.toFixed(1) + "%" }),
+      el("div", { style: "height:6px;width:" + width.toFixed(1) + "%;background:currentColor;opacity:.45" })
+    ]);
+  }
+
+  // The window selector on the usage table: the live ring plus every day the
+  // analytics payload carries, newest first.
+  function usageDaySelector(costs, analytics, dayKnown) {
+    var selector = el("select", {
+      id: "usage-day",
+      "aria-label": "Usage window",
+      onchange: function () { usageDay = selector.value; draw(); }
+    });
+    selector.appendChild(el("option", {
+      value: "live",
+      text: "Last " + costs.window_hours + " hours (live ring)",
+      selected: !dayKnown
+    }));
+    (analytics.series || []).slice().reverse().forEach(function (entry) {
+      var label = entry.day;
+      if (entry.status === "open") label += " (today, in progress)";
+      else if (entry.status === "gap") label += " — no data";
+      else if (entry.status === "outside_coverage") label += " — before recorded history";
+      else if (entry.status === "no_rows") label += " — no rows yet";
+      selector.appendChild(el("option", {
+        value: entry.day, text: label, selected: dayKnown && usageDay === entry.day
+      }));
+    });
+    selector.value = dayKnown ? usageDay : "live";
+    return selector;
+  }
+
+  // The fallback card: the overall rate, why fallbacks happened, where they
+  // happened, and how the rate moved day by day. Every number comes from the
+  // durable rollup the API reported; nothing here is recomputed or inferred.
+  function renderFallbackCard(analytics) {
+    var card = el("div", { class: "card" }, [
+      el("h2", { text: "Fallback analytics" }),
+      el("p", { class: "small muted", text: "Metadata only. Prompts, responses, tokens and secrets are never stored." })
+    ]);
+    if (!analytics.available) {
+      card.appendChild(el("p", {
+        class: "small muted",
+        text: analytics.unavailable_reason === "durable_rollup_disabled"
+          ? "Durable fallback analytics are unavailable: request-ledger persistence is off, so there is no daily rollup to read. The live totals above still count this process only."
+          : "Durable fallback analytics are unavailable: " + (analytics.unavailable_reason || "unknown reason") + ". Missing data is reported, never filled in."
+      }));
+      return card;
+    }
+    var range = analytics.window || {};
+    var coverage = analytics.coverage || {};
+    var fallback = analytics.fallback || {};
+    var overall = fallback.overall || { requests: 0, fallbacks: 0, fallback_rate: null, fallback_reasons: [] };
+    card.appendChild(el("p", {
+      class: "small muted",
+      text: "Window " + (range.from || "unknown") + " to " + (range.to || "unknown") +
+        " (" + (analytics.days || 0) + " days, capped at 30) from the durable rollup. " +
+        (coverage.incomplete ? "Coverage is incomplete: some ledger rows could not be represented." : "Every retained row in the window is represented.") +
+        ((analytics.gaps || []).length
+          ? " No recorded rows on " + analytics.gaps.join(", ") + " - shown as a gap, never as zero."
+          : "")
+    }));
+    card.appendChild(el("div", { class: "row" }, [
+      statBox("Requests", overall.requests || 0),
+      statBox("Fallbacks", overall.fallbacks || 0),
+      statBox("Fallback rate", percentText(overall.fallback_rate))
+    ]));
+
+    card.appendChild(el("h3", { text: "By reason" }));
+    var reasons = overall.fallback_reasons || [];
+    if (!reasons.length) {
+      card.appendChild(el("p", { class: "small muted", text: "No fallbacks were recorded in this window." }));
+    } else {
+      var reasonTable = el("table", {}, [el("thead", {}, [el("tr", {}, [
+        el("th", { text: "Reason" }), el("th", { text: "Fallbacks" }), el("th", { text: "Share of fallbacks" })
+      ])])]);
+      var reasonBody = el("tbody");
+      reasons.forEach(function (entry) {
+        reasonBody.appendChild(el("tr", {}, [
+          el("td", { text: fallbackReasonLabel(entry.reason) }),
+          el("td", { text: String(entry.count) }),
+          el("td", { text: entry.share == null ? "Unknown" : (Number(entry.share) * 100).toFixed(1) + "%" })
+        ]));
+      });
+      reasonTable.appendChild(reasonBody);
+      card.appendChild(reasonTable);
+    }
+
+    [["Alias", fallback.alias], ["Model", fallback.model], ["Provider", fallback.provider]].forEach(function (group) {
+      var entries = Object.keys(group[1] || {}).sort();
+      if (!entries.length) return;
+      card.appendChild(el("h3", { text: "By " + group[0].toLowerCase() }));
+      var table = el("table", {}, [el("thead", {}, [el("tr", {}, [
+        el("th", { text: group[0] }), el("th", { text: "Requests" }),
+        el("th", { text: "Fallbacks" }), el("th", { text: "Fallback rate" })
+      ])])]);
+      var body = el("tbody");
+      entries.forEach(function (key) {
+        var row = group[1][key];
+        body.appendChild(el("tr", {}, [
+          el("td", { text: key }),
+          el("td", { text: String(row.requests) }),
+          el("td", { text: String(row.fallbacks) }),
+          rateCell(row.fallback_rate)
+        ]));
+      });
+      table.appendChild(body);
+      card.appendChild(table);
+    });
+
+    card.appendChild(el("h3", { text: "Daily trend" }));
+    var series = analytics.series || [];
+    if (!series.length) {
+      card.appendChild(el("p", { class: "small muted", text: "No days to show." }));
+    } else {
+      var trend = el("table", {}, [el("thead", {}, [el("tr", {}, [
+        el("th", { text: "Day" }), el("th", { text: "Requests" }), el("th", { text: "Input tokens" }),
+        el("th", { text: "Output tokens" }), el("th", { text: "Fallbacks" }), el("th", { text: "Fallback rate" }),
+        el("th", { text: "Errors" }), el("th", { text: "Record" })
+      ])])]);
+      var trendBody = el("tbody");
+      series.forEach(function (entry) {
+        var known = entry.status === "ok" || entry.status === "open";
+        function blank() { return el("td", { class: "small muted", text: "—" }); }
+        trendBody.appendChild(el("tr", {}, [
+          el("td", { class: "small", text: entry.day }),
+          known ? el("td", { text: String(entry.requests) }) : blank(),
+          known ? el("td", { text: tokens(entry.input_tokens) }) : blank(),
+          known ? el("td", { text: tokens(entry.output_tokens) }) : blank(),
+          known ? el("td", { text: String(entry.fallbacks) }) : blank(),
+          known ? rateCell(entry.fallback_rate) : blank(),
+          known ? el("td", { text: String(entry.errors) }) : blank(),
+          el("td", { class: "small" + (known ? "" : " muted"), text: dayStatusText(entry.status) })
+        ]));
+      });
+      trend.appendChild(trendBody);
+      card.appendChild(trend);
+    }
+    return card;
   }
 
   // The note column names *why* a request was not served by its primary:
@@ -1347,9 +1579,26 @@
   }
 
   // The DOM helper is exported so its behaviour can be tested without a
-  // browser. In a browser the console boots normally.
+  // browser. In a browser the console boots normally. The status renderer is
+  // exported too, so a test can hand it a fixture state and assert what the
+  // owner would actually see.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { el: el, emptyState: emptyState };
+    module.exports = {
+      el: el,
+      emptyState: emptyState,
+      renderStatusForTest: function (view, day) {
+        var previous = state;
+        var previousDay = usageDay;
+        state = view;
+        if (day !== undefined) usageDay = day;
+        try {
+          return renderStatus();
+        } finally {
+          state = previous;
+          usageDay = previousDay;
+        }
+      }
+    };
     return;
   }
 

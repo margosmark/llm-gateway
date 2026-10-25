@@ -87,7 +87,23 @@ def price_for(model: str, *, _prices: dict[str, dict[str, Any]] | None = None) -
     return price
 
 
+#: Why a cost could not be computed. ``None`` means it was. The console shows
+#: these instead of a bare ``null``, so "no published price" is never confused
+#: with "the price exists but this request reported no usage".
+COST_NO_PRICE = "no_published_price"
+COST_NO_USAGE = "no_usage_reported"
+COST_INVALID_USAGE = "invalid_usage"
+COST_MISSING_CACHED_PRICE = "missing_cached_price"
+
+
 def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | None = "opencode_go", *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Estimate one request's cost from published prices, or say why it is unknown.
+
+    ``reason`` is ``None`` exactly when ``amount_usd`` is a number. A price
+    that exists but cannot be applied (usage was never reported, the counters
+    are unusable, or the catalogue prices input but not cached reads) still
+    reports the price's ``source``: the price is known, the amount is not.
+    """
     # The published snapshot currently prices OpenCode Go models only; do not
     # transfer a matching model ID's price to another provider.
     catalog = published_prices() if _prices is None else _prices
@@ -97,28 +113,43 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
             or not isinstance(price.get("source"), str)
             or not isinstance(price.get("observed_at"), str)):
         price = None
-    if price is None or counters is None:
-        return {"amount_usd": None, "source": price.get("source") if price else None,
-                "observed_at": price.get("observed_at") if price else None}
+    if price is None:
+        return {"amount_usd": None, "source": None, "observed_at": None, "reason": COST_NO_PRICE}
+    source, observed_at = price["source"], price["observed_at"]
+    if counters is None:
+        # Usage was never reported for this request - unknown, not zero.
+        return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_NO_USAGE}
     input_tokens = counters.get("prompt_tokens", counters.get("input_tokens", 0))
     output_tokens = counters.get("completion_tokens", counters.get("output_tokens", 0))
     cached = counters.get("cached_read_tokens", counters.get("cache_read_input_tokens", 0))
     if any(not isinstance(value, int) or value < 0 for value in (input_tokens, output_tokens, cached)):
-        return {"amount_usd": None, "source": price["source"], "observed_at": price["observed_at"]}
+        return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_INVALID_USAGE}
     cached_rate = price.get("cached_read_per_m")
     if cached and not isinstance(cached_rate, (int, float)):
-        return {"amount_usd": None, "source": price["source"], "observed_at": price["observed_at"]}
+        # Never assume cached reads are free.
+        return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_MISSING_CACHED_PRICE}
     billable_input = max(0, input_tokens - cached)
     amount = (billable_input * price["input_per_m"] + output_tokens * price["output_per_m"] +
               cached * (cached_rate if isinstance(cached_rate, (int, float)) else 0)) / 1_000_000
-    return {"amount_usd": amount, "source": price["source"], "observed_at": price["observed_at"]}
+    return {"amount_usd": amount, "source": source, "observed_at": observed_at, "reason": None}
 
 
 def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evicted_events: int = 0, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Aggregate usage from supplied events; report when the hot ring is incomplete."""
+    """Aggregate usage from supplied events; report when the hot ring is incomplete.
+
+    The amount is the cost of the tokens this window *counts*, at the
+    published price for the model - the same basis the token columns use. It
+    is ``null`` only when the price itself is missing from the catalogue (or
+    cannot be applied at all); a request that reported no usage contributes
+    no tokens and no cost, and the window-level ``requests_without_usage``
+    counter says how many there were. An evicted window stays incomplete in
+    ``coverage`` - exactly like the token columns, which are partial too -
+    rather than blanking a price that does exist.
+    """
     cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
     prices = published_prices() if _prices is None else _prices
     groups: dict[str, dict[str, Any]] = {key: {} for key in ("alias", "provider", "model")}
+    requests_without_usage = 0
     for event in events:
         try:
             timestamp = datetime.fromisoformat(str(event.get("timestamp", "")))
@@ -131,6 +162,8 @@ def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evi
         if not isinstance(model, str):
             continue
         counters = raw_counters if isinstance(raw_counters, dict) else {}
+        if not counters:
+            requests_without_usage += 1
         cost = calculate_cost(counters or None, model, event.get("serving_provider"), _prices=prices)
         dimensions = (("alias", event.get("requested_alias")),
                       ("provider", event.get("serving_provider")),
@@ -138,34 +171,102 @@ def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evi
         for dimension, key in dimensions:
             if not isinstance(key, str):
                 continue
-            row = groups[dimension].setdefault(key, {"requests": 0, "input_tokens": 0, "output_tokens": 0,
-                                                       "amount_usd": 0.0, "cost_unknown": False,
-                                                       "source": cost["source"], "observed_at": cost["observed_at"]})
+            row = groups[dimension].setdefault(key, _empty_group_row())
             row["requests"] += 1
             row["input_tokens"] += counters.get("prompt_tokens", counters.get("input_tokens", 0))
             row["output_tokens"] += counters.get("completion_tokens", counters.get("output_tokens", 0))
-            if cost["amount_usd"] is None:
-                row["cost_unknown"] = True
-            else:
-                row["amount_usd"] += cost["amount_usd"]
+            _fold_cost(row, cost)
     for dimension in groups.values():
-        for row in dimension.values():
-            if evicted_events > 0:
-                # The ring may have evicted in-window rows; do not present a
-                # partial sum as if it were a complete window cost.
-                row["cost_unknown"] = True
-            if row["cost_unknown"]:
-                row["amount_usd"] = None
-            del row["cost_unknown"]
+        for key in dimension:
+            dimension[key] = _finish_group_row(dimension[key])
     return {
         "window_hours": window_hours,
         "coverage": {
             "source": "bounded_recent_events",
             "events_considered": len(events),
+            "requests_without_usage": requests_without_usage,
             "incomplete": evicted_events > 0,
         },
         **groups,
     }
+
+
+def aggregate_rollup_rows(rows: list[dict[str, Any]], *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Per alias/provider/model totals for daily-rollup rows, priced at read time.
+
+    The rollup deliberately stores no cost - a published price can change - so
+    the estimate is recomputed here from the row's token counters with the
+    same rules :func:`aggregate_usage` applies to the live ring. Row counters
+    that are not non-negative integers are treated as missing rather than
+    summed, so a damaged sidecar cannot break the owner console.
+    """
+    prices = published_prices() if _prices is None else _prices
+    groups: dict[str, dict[str, Any]] = {key: {} for key in ("alias", "provider", "model")}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model, provider = row.get("model"), row.get("provider")
+        if not isinstance(model, str):
+            continue
+        tokens_in = _counter(row.get("input_tokens"))
+        tokens_out = _counter(row.get("output_tokens"))
+        cached = _counter(row.get("cached_tokens"))
+        fallbacks = _counter(row.get("fallbacks"))
+        cost = calculate_cost({"prompt_tokens": tokens_in, "completion_tokens": tokens_out,
+                               "cached_read_tokens": cached}, model, provider, _prices=prices)
+        dimensions = (("alias", row.get("alias")), ("provider", provider), ("model", model))
+        for dimension, key in dimensions:
+            if not isinstance(key, str):
+                continue
+            group = groups[dimension]
+            entry = group.get(key)
+            if entry is None:
+                entry = _empty_group_row()
+                entry.update({"cached_tokens": 0, "fallbacks": 0})
+                group[key] = entry
+            entry["requests"] += _counter(row.get("requests"))
+            entry["input_tokens"] += tokens_in
+            entry["output_tokens"] += tokens_out
+            entry["cached_tokens"] += cached
+            entry["fallbacks"] += fallbacks
+            _fold_cost(entry, cost)
+    for dimension in groups.values():
+        for key in dimension:
+            dimension[key] = _finish_group_row(dimension[key])
+    return groups
+
+
+def _empty_group_row() -> dict[str, Any]:
+    return {"requests": 0, "input_tokens": 0, "output_tokens": 0, "amount_usd": 0.0,
+            "cost_reason": None, "source": None, "observed_at": None}
+
+
+def _counter(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _fold_cost(row: dict[str, Any], cost: dict[str, Any]) -> None:
+    """Fold one priced contribution in; a missing price dominates the group."""
+    reason = cost.get("reason")
+    if reason == COST_NO_PRICE:
+        row["cost_reason"] = COST_NO_PRICE
+    elif reason == COST_MISSING_CACHED_PRICE and row["cost_reason"] is None:
+        row["cost_reason"] = COST_MISSING_CACHED_PRICE
+    elif cost.get("amount_usd") is not None and row["cost_reason"] is None:
+        row["amount_usd"] += cost["amount_usd"]
+    if cost.get("source") is not None and row["source"] is None:
+        row["source"] = cost["source"]
+        row["observed_at"] = cost.get("observed_at")
+
+
+def _finish_group_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the group's amount: a reason to withhold it wins over the sum."""
+    if row["cost_reason"] is not None:
+        row["amount_usd"] = None
+        if row["cost_reason"] == COST_NO_PRICE:
+            row["source"] = None
+            row["observed_at"] = None
+    return row
 
 
 def annotate_events(events: list[dict[str, Any]], *, _prices: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
