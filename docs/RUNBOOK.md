@@ -171,8 +171,11 @@ only: prompts, responses, tokens and secrets are never stored.
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Anthropic uses the
 native Messages API with a separately stored API key; its catalogue is loaded
-only when **Refresh model catalog** is selected. Credentials are stored
-separately and never returned by state or status APIs.
+only when **Refresh model catalog** is selected. Anthropic-dialect models are
+bridged to Chat Completions and Responses; Anthropic-compatible clients can use
+`POST /v1/messages` under the same Host/Origin and forwarded-header policy as
+the other API routes. Credentials are stored separately and never returned by
+state or status APIs.
 
 ---
 
@@ -326,7 +329,7 @@ without editing this file by hand.
 | The owner console will not load | The configured private address is not assigned to the host, or the listener is unavailable | Use the configured private address and port; IPv6 URLs need brackets, e.g. `http://[fd12::1]:8765/owner/`; login/bootstrap is not part of this product mode |
 | A provider shows *Failed* | The credential was rejected or the provider is unreachable | **Test connection** and read the message; the stored credential is never displayed |
 | A model shows an empty dialect | The provider serves it but does not document the endpoint | Enter it manually and set the dialect, or use an OpenAI-dialect model |
-| A route says the dialect cannot be translated | The model is served over Anthropic Messages or Google v1beta | The gateway refuses rather than guessing; publish an OpenAI-dialect route |
+| A route says the dialect cannot be translated | The model is served over Google v1beta or includes a control that cannot be represented | Anthropic Messages models are bridged to/from OpenAI dialects; unsupported controls are refused rather than guessed. Google v1beta remains unsupported |
 | Limits show *Unknown* | The provider publishes no machine-readable allowance for that plan | That is the truthful answer. Check the provider's own console |
 | A request failed with *no eligible route* | Every route was excluded | The error names each excluded route and why |
 | The published catalogue is empty | No alias is published yet | Publish one in Models & Routes |
