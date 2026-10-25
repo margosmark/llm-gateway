@@ -150,8 +150,10 @@ including its fallbacks, cost estimate and price source. Cost cells show the
 (`known subtotal; N of M requests unpriced (x in / y out tokens)`); a group
 with no priced request renders **Unknown** with its coverage rather than a
 bare `Unknown`, an unpriced provider is labelled "no published actual/list
-price - never inferred", and a cached-token count the upstream reported but
-did not quantify is named instead of guessed. The **Fallback
+price - never inferred", a cached count the upstream never reported is named
+instead of guessed (`cached count missing on N request(s)`, never read as a
+reported zero), and a request that reported no usage is Unknown, never
+`$0.00`. The **Fallback
 analytics** card reports the overall fallback rate, the reasons behind it,
 the per-alias, per-provider and per-model split, and the daily trend. A day
 with no recorded rows is drawn as a gap and a day before the first recorded

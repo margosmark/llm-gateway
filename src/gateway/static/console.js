@@ -512,6 +512,11 @@
   // partial total can never read as a complete bill.
   function costCell(row) {
     var parts = [];
+    // The rollup's completeness marker, carried through the API: how many
+    // requests in this group never reported a cached-read count.
+    var cachedNote = row.cached_tokens_unreported
+      ? " · cached count missing on " + row.cached_tokens_unreported + " request(s)"
+      : "";
     if (row.amount_usd == null) {
       parts.push(el("div", { text: "Unknown" }));
       if (row.unknown_cost_requests) {
@@ -520,7 +525,7 @@
           text: "0 of " + row.requests + " requests priced; " +
             row.unknown_cost_requests + " unknown (" +
             tokens(row.unknown_cost_input_tokens) + " in / " +
-            tokens(row.unknown_cost_output_tokens) + " out)"
+            tokens(row.unknown_cost_output_tokens) + " out)" + cachedNote
         }));
       }
     } else {
@@ -530,10 +535,10 @@
           class: "small muted",
           text: "known subtotal; " + row.unknown_cost_requests + " of " + row.requests +
             " requests unpriced (" + tokens(row.unknown_cost_input_tokens) + " in / " +
-            tokens(row.unknown_cost_output_tokens) + " out tokens)"
+            tokens(row.unknown_cost_output_tokens) + " out tokens)" + cachedNote
         }));
       } else if (row.cost_incomplete) {
-        parts.push(el("div", { class: "small muted", text: "known subtotal; coverage incomplete" }));
+        parts.push(el("div", { class: "small muted", text: "known subtotal; coverage incomplete" + cachedNote }));
       }
     }
     return el("td", {}, parts);
