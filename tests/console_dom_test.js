@@ -435,6 +435,114 @@ check("the analytics payload is metadata only", function () {
   assert(!renderedText.includes("messages"));
 });
 
+// --- the cross-provider fallback warning names the selected routes' retention
+
+const retentionSource = source.slice(
+  source.indexOf("var RETENTION_WORDS ="),
+  source.indexOf("function renderAliasEditor()")
+);
+const retention = new Function(
+  retentionSource +
+    "; return { RETENTION_WORDS: RETENTION_WORDS, modelRetentionClass: modelRetentionClass, retentionWarningText: retentionWarningText };"
+)();
+
+// The catalogue is the authority for the classes; the test asserts against
+// what it actually publishes rather than a copy of it.
+const catalog = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "..", "data", "go_catalog.json"), "utf8")
+);
+const ANTHROPIC_MODELS = [
+  "claude-haiku-5-5",
+  "minimax-m3",
+  "qwen3.7-plus",
+  "qwen3.8-flash",
+  "qwen3.8-max",
+];
+const catalogState = {
+  providers: [
+    {
+      provider_id: "opencode_go",
+      models: ANTHROPIC_MODELS.map((id) => ({
+        model_id: id,
+        retention_class: catalog.models[id].retention_class,
+      })),
+    },
+  ],
+};
+const route = (role, model) => ({
+  role: role,
+  provider: "opencode_go",
+  model: model,
+  provider_label: "OpenCode Go",
+});
+
+check("the warning names the retention class of each route actually selected", function () {
+  const text = retention.retentionWarningText(catalogState, [
+    route("primary", "claude-haiku-5-5"),
+    route("fallback 1", "qwen3.8-flash"),
+  ]);
+  assert(text.includes("primary claude-haiku-5-5 (OpenCode Go) = 30_days"));
+  assert(text.includes("fallback 1 qwen3.8-flash (OpenCode Go) = 0_days"));
+  assert(text.includes("These classes differ"));
+  assert(text.includes("30-day retention (abuse monitoring)"));
+  assert(text.includes("0-day retention"));
+  assert(text.includes("actually served"));
+});
+
+check("the differing classes are the ones the catalogue publishes", function () {
+  // claude-haiku-5-5 is 30 days; the other four Anthropic-dialect models
+  // are 0 days - the two classes must both be visible in the warning.
+  const classes = ANTHROPIC_MODELS.map((id) =>
+    retention.modelRetentionClass(catalogState, "opencode_go", id)
+  );
+  assert.deepStrictEqual(classes, [
+    catalog.models["claude-haiku-5-5"].retention_class,
+    catalog.models["minimax-m3"].retention_class,
+    catalog.models["qwen3.7-plus"].retention_class,
+    catalog.models["qwen3.8-flash"].retention_class,
+    catalog.models["qwen3.8-max"].retention_class,
+  ]);
+  assert.strictEqual(classes[0], "30_days");
+  assert.deepStrictEqual(classes.slice(1), ["0_days", "0_days", "0_days", "0_days"]);
+  const mixed = retention.retentionWarningText(catalogState, [
+    route("primary", "claude-haiku-5-5"),
+    route("fallback 1", "minimax-m3"),
+  ]);
+  assert(mixed.includes("These classes differ"));
+});
+
+check("two routes of the same class do not claim the regime changes", function () {
+  const text = retention.retentionWarningText(catalogState, [
+    route("primary", "qwen3.8-flash"),
+    route("fallback 1", "qwen3.8-max"),
+  ]);
+  assert(text.includes("primary qwen3.8-flash (OpenCode Go) = 0_days"));
+  assert(text.includes("fallback 1 qwen3.8-max (OpenCode Go) = 0_days"));
+  assert(!text.includes("These classes differ"));
+});
+
+check("an unconfigured model reads unknown, never a guess from the provider", function () {
+  assert.strictEqual(retention.modelRetentionClass(catalogState, "opencode_go", "no-such-model"), "unknown");
+  assert.strictEqual(retention.modelRetentionClass(catalogState, "no_such_provider", "qwen3.8-max"), "unknown");
+  const text = retention.retentionWarningText(catalogState, [
+    route("primary", "no-such-model"),
+    route("fallback 1", "qwen3.8-flash"),
+  ]);
+  assert(text.includes("primary no-such-model (OpenCode Go) = unknown"));
+  assert(text.includes("These classes differ"));
+});
+
+check("the fallback warning keeps its generic sentence and adds the classes", function () {
+  // The generic cross-provider sentence is untouched; the per-route line is
+  // appended under it and is recomputed from the editor's own selections.
+  assert(source.includes("It sends a prompt to a different provider, and therefore to a different data-retention regime."));
+  assert(source.includes('ANCHOR t_fd37033b "retention-class-warning"'));
+  assert(source.includes('retentionSpan.textContent = retentionWarningText(state, selectedRoutes());'));
+  assert(source.includes('card.addEventListener("change", renderRetentionWarning);'));
+  assert(source.includes("    renderRetentionWarning();"));
+  assert(source.includes('role: "primary"'));
+});
+
 if (failures.length) {
   console.error("\n" + failures.length + " check(s) failed");
   process.exit(1);
