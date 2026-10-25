@@ -1088,6 +1088,60 @@
     return frag;
   }
 
+  // --- cross-provider fallback: the retention class of the route selected --
+  // ANCHOR t_fd37033b "retention-class-warning"
+  //
+  // The alias editor's fallback warning used to say only that a fallback
+  // goes to "a different data-retention regime". Retention is a published
+  // per-model fact (`retention_class`, the same row the models table shows),
+  // so the warning can name the classes of the routes actually selected -
+  // primary first, then each fallback row. Two routes of one alias routinely
+  // disagree: `claude-haiku-5-5` is `30_days` while the other four
+  // Anthropic-dialect models are `0_days`, so which regime a prompt moves to
+  // depends on the route that serves it, not on "Anthropic" as a provider.
+  var RETENTION_WORDS = {
+    "30_days": "30-day retention (abuse monitoring)",
+    "0_days": "0-day retention",
+    "training_permitted": "prompts may be used for training",
+    "unknown": "retention unknown"
+  };
+
+  function modelRetentionClass(state, providerId, modelId) {
+    var providers = (state && state.providers) || [];
+    for (var i = 0; i < providers.length; i += 1) {
+      if (providers[i].provider_id !== providerId) continue;
+      var models = providers[i].models || [];
+      for (var j = 0; j < models.length; j += 1) {
+        if (models[j].model_id === modelId) return models[j].retention_class || "unknown";
+      }
+      // The provider is configured but does not list this model: unknown is
+      // the honest answer, never a guess from the provider name.
+      return "unknown";
+    }
+    return "unknown";
+  }
+
+  function retentionWarningText(state, routes) {
+    var seen = [];
+    var parts = (routes || []).map(function (route) {
+      var cls = modelRetentionClass(state, route.provider, route.model);
+      if (seen.indexOf(cls) === -1) seen.push(cls);
+      var name = route.model || "no model selected";
+      if (route.provider_label) name += " (" + route.provider_label + ")";
+      return route.role + " " + name + " = " + cls;
+    });
+    if (!parts.length) return "";
+    var text = "Retention of the routes selected here: " + parts.join("; ") + ".";
+    if (seen.length > 1) {
+      text += " These classes differ, so a fallback moves the prompt from " +
+        (RETENTION_WORDS[seen[0]] || seen[0]) + " to " +
+        (RETENTION_WORDS[seen[seen.length - 1]] || seen[seen.length - 1]) +
+        "; the class that applied is the one on the route that actually served " +
+        "the request, which the request ledger names per request.";
+    }
+    return text;
+  }
+
   function renderAliasEditor() {
     var card = el("div", { class: "card" }, [el("h2", { text: "Aliases and routes" })]);
     var editing = editingAlias && state.aliases.filter(function (alias) { return alias.name === editingAlias; })[0];
@@ -1264,6 +1318,37 @@
     card.appendChild(el("div", { class: "small muted" }, [
       el("span", { text: "Cross-provider fallback is disabled by default. It sends a prompt to a different provider, and therefore to a different data-retention regime." })
     ]));
+    // ANCHOR t_fd37033b "retention-class-warning": the same warning, made
+    // specific to the routes selected in this editor. Purely additive - the
+    // generic sentence above is left exactly as it was.
+    var retentionSpan = el("span", { text: "" });
+    function selectedRoutes() {
+      var routes = [{
+        role: "primary",
+        provider: primaryProvider.value,
+        model: primaryModel.value,
+        provider_label: providerLabel(primaryProvider.value)
+      }];
+      fallbacks.forEach(function (row, index) {
+        routes.push({
+          role: "fallback " + (index + 1),
+          provider: row.provider.value,
+          model: row.model.value,
+          provider_label: providerLabel(row.provider.value)
+        });
+      });
+      return routes;
+    }
+    function renderRetentionWarning() {
+      retentionSpan.textContent = retentionWarningText(state, selectedRoutes());
+    }
+    card.appendChild(el("div", { class: "small muted" }, [retentionSpan]));
+    // The events bubble from every select (and from a fallback row's
+    // Remove click, and from the Add fallback button) to the card, so the
+    // classes shown are the ones on screen when Save is pressed.
+    card.addEventListener("change", renderRetentionWarning);
+    card.addEventListener("click", renderRetentionWarning);
+    renderRetentionWarning();
     card.appendChild(fallbackList);
     card.appendChild(el("button", { type: "button", text: "Add fallback route", onclick: addFallbackRow }));
     card.appendChild(el("h3", { text: "When may a fallback run?" }));
