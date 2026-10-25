@@ -57,8 +57,6 @@ RETENTION_LABELS = {
     RETENTION_UNKNOWN: "retention unknown",
 }
 
-from gateway.thinking import CANONICAL_LEVELS
-
 # Reasoning efforts, per model. The vocabulary is not asserted here: it
 # lives in ``gateway.thinking`` with the provider documentation behind
 # each level, and a model publishes a subset of it - or publishes nothing
@@ -120,12 +118,17 @@ class Capability:
         return self.dialect in _CONVERTIBLE_FROM and target in _CONVERTIBLE_FROM[self.dialect]
 
 
-#: The bridge converts between the two OpenAI-family dialects. The Anthropic
-#: and Google dialects are served natively by their provider and are *not*
-#: converted - a request that would need such a conversion is refused.
+#: The bridge converts among the OpenAI-family dialects and the Anthropic
+#: Messages dialect. The Google dialect is served natively by its provider
+#: and is *not* converted - a request that would need such a conversion is
+#: refused. Anthropic conversion is implemented in
+#: :mod:`gateway.bridge.anthropic`; a route served over Anthropic Messages
+#: is therefore reachable from either OpenAI surface and from
+#: ``/v1/messages``.
 _CONVERTIBLE_FROM: dict[str, tuple[str, ...]] = {
-    DIALECT_OPENAI_CHAT: (DIALECT_OPENAI_RESPONSES,),
-    DIALECT_OPENAI_RESPONSES: (DIALECT_OPENAI_CHAT,),
+    DIALECT_OPENAI_CHAT: (DIALECT_OPENAI_RESPONSES, DIALECT_ANTHROPIC_MESSAGES),
+    DIALECT_OPENAI_RESPONSES: (DIALECT_OPENAI_CHAT, DIALECT_ANTHROPIC_MESSAGES),
+    DIALECT_ANTHROPIC_MESSAGES: (DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES),
 }
 
 

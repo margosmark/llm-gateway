@@ -31,7 +31,10 @@ from typing import Any, Iterator
 
 from gateway.adapters.base import Adapter, AdapterError, CLASS_MESSAGES, ProviderRequest, ProviderResponse
 from gateway.bridge.model import ConversionError
-from gateway.bridge.requests import convert_request, payload_has_image_input
+# The anthropic bridge is a superset dispatcher: it handles every Anthropic
+# pair and delegates the OpenAI-family pairs to gateway.bridge.requests, so
+# routing needs only this one seam regardless of the route's dialect.
+from gateway.bridge.anthropic import convert_request, payload_has_image_input
 from gateway.circuits import CircuitStore
 from gateway.config import (
     ERROR_AUTH,
