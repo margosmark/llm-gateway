@@ -1919,3 +1919,53 @@ was 1,312,028 bytes).
 (6,000 distinct reasons → key count within the vocabulary with every event
 counted once; sidecar < 64 KiB under the same flood) plus the untouched
 rollup, cached-completeness and R26 suites.
+
+### R49 — A critical alias's whole route chain could sit on one provider, so one cooldown emptied it and nothing reported the shape — **closed**
+
+**Severity: high (availability).** *(closed)*
+
+The 2026-10-23 fleet-wide stall: `coding` had exactly one fallback
+(`opencode_go/mimo-v2.6-flash`), and the primary's circuits had opened
+provider-wide (`chatgpt_codex/*`, held for hours — `exhausted` is a
+provider-scoped class by design, R41). When the same burst also rate-limited
+the one fallback, the alias's eligible set became empty and the gateway
+returned 503 `no eligible route` to 21 + 21 + 111 requests across workers
+simultaneously, every worker then burning its retry ladder before falling
+back client-side. Two routes would not have been enough either: a second
+route on the *same* provider shares the same provider-wide circuit, so the
+chain would still have emptied. Nothing in configuration validation
+reported that any enabled alias had placed every one of its routes on a
+single provider — the condition is servable and looks redundant, and was
+therefore invisible until an incident made it visible.
+
+**Fix.** Two parts, split by ownership.
+
+1. **Source:** `gateway.routes.single_provider_warning` — a loud,
+   non-fatal config-validation guard for an enabled alias with two or more
+   routes whose routes all name one provider. It is reported, never
+   refused (an owner with a single live provider has no legal
+   two-provider chain to choose, and refusing would leave their alias
+   unsaved): on the alias save and publish responses as `warning`, on every
+   owner-state read as `route_warning` beside the alias, and rendered as a
+   `notice warn` on the alias card, with an immediate toast at save and
+   publish time. The public `/v1` surfaces are unchanged — the warning
+   names providers, exactly like the rest of owner state.
+2. **Owner configuration** (approved route inventory, Mark, 2026-10-25):
+   each critical alias — `coding`, `flash`, `hermando`, `pm` — carries a
+   second fallback so its chain spans the two live chat providers, and
+   every second-fallback provider appears in that alias's
+   `fallback_confirmed_providers` (`hermando` gains `chatgpt_codex`).
+   The ceiling is stated, not oversold: such a chain survives **one**
+   provider failing, not both.
+
+**Regression evidence:** `tests/test_second_fallback.py` — circuits armed
+the way production arms them (route scope, and provider scope for the
+incident's `provider/*` shape) → a chat-completions request returns 200
+served by the second fallback with `fallback_used` and **both** skipped
+routes named and reasoned in the ledger, an image request included; a
+provider-wide cooldown on the fallback's own provider still returns 503
+(proving the guard's rationale rather than asserting it); and all four
+approved chains authorize their second-fallback provider.
+`tests/test_single_provider_warning.py` — a single-provider chain warns on
+save, publish and owner state, a two-provider chain is silent, and the
+public catalogue and models list never carry the warning.

@@ -1326,9 +1326,13 @@
                 enabled: editing ? editing.enabled : false,
                 phase_routing: phaseRouting
               }
-            })).then(function () {
+            })).then(function (result) {
               editingAlias = null;
               toast(editing ? "Alias updated." : "Alias saved.", "ok");
+              // Saving succeeded, but the gateway may have reported the
+              // single-provider warning on this very response. Show it
+              // immediately rather than waiting for the redraw.
+              if (result && result.warning) toast(result.warning, "bad");
               return refresh();
             }).catch(function () {});
           }
@@ -1365,6 +1369,13 @@
             " · triggers: " + (alias.fallback_triggers.join(", ") || "none") +
             " · cooldown: " + alias.cooldown_seconds + "s"
         }),
+        // A single-provider chain looks redundant and is not: circuits also
+        // open provider-wide, so one cooldown can empty this alias's eligible
+        // set. The gateway reports that condition on every owner-state read;
+        // show it loudly, next to the alias it applies to.
+        alias.route_warning
+          ? el("div", { class: "notice warn" }, [el("span", { text: alias.route_warning })])
+          : null,
         el("div", { class: "actions" }, [
           el("button", {
             type: "button", text: "Edit",
@@ -1376,7 +1387,10 @@
             disabled: !state.can_mutate,
             onclick: function () {
               run(api(BASE + "/api/alias", { method: "POST", body: { action: "publish", name: alias.name, enabled: !alias.enabled } }))
-                .then(function () { return refresh(); }).catch(function () {});
+                .then(function (result) {
+                  if (result && result.warning) toast(result.warning, "bad");
+                  return refresh();
+                }).catch(function () {});
             }
           }),
           el("button", {

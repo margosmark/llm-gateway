@@ -13,13 +13,16 @@ So a route is checked **before** the configuration is written:
 
 The check is deliberately strict. A route that cannot be served is refused
 at the point the owner creates it, not discovered later.
+
+Validation also reports one condition it deliberately does **not** refuse:
+see :func:`single_provider_warning`.
 """
 
 from __future__ import annotations
 
 from typing import Any, Iterable
 
-from gateway.config import ConfigStore, PhaseRouting, RouteRef
+from gateway.config import Alias, ConfigStore, PhaseRouting, RouteRef
 from gateway.identifiers import ValidationError, validate_model_id
 
 
@@ -110,6 +113,52 @@ def validate_alias_routes(
         resolved.append(ref)
 
     return primary_ref, resolved
+
+
+def single_provider_warning(alias: Alias | None) -> str | None:
+    """A loud, non-fatal warning for an alias a single cooldown can silence.
+
+    ``validate_alias_routes`` refuses a route that cannot be served. This is
+    the softer companion for a configuration that *is* servable but fragile:
+    an **enabled** alias of two or more routes whose routes all name the same
+    provider looks redundant and is not.
+
+    Circuits open at two scopes - per route, and provider-wide (``exhausted``
+    opens ``provider/*``, held for hours). So when every route sits on one
+    provider, one cooldown, outage or rate limit empties the alias's whole
+    eligible set at once and every caller receives 503 ``no eligible route``
+    simultaneously, retry ladder and all. A second route on the *same*
+    provider does not help; only a second provider does.
+
+    Returns the warning text, or ``None`` when the alias spans two or more
+    providers, is not enabled, or has fewer than two routes (an alias with a
+    single route is a known "no fallback configured" shape the console already
+    states in plain sight - this warning is about chains that add depth
+    without adding a provider).
+
+    This is deliberately **not** a refusal: an owner with only one live
+    provider has no legal two-provider chain to choose, and refusing their
+    configuration would leave the alias unsaved and unserved. The condition is
+    reported loudly instead - on the save and publish responses and on every
+    owner-state read - so it cannot be configured and then forgotten.
+    """
+    if alias is None or not alias.enabled:
+        return None
+    routes = alias.all_routes()
+    if len(routes) < 2:
+        return None
+    providers = {ref.provider for ref in routes}
+    if len(providers) > 1:
+        return None
+    provider = routes[0].provider
+    return (
+        f"every route of alias '{alias.name}' is served by the single provider "
+        f"'{provider}': one cooldown, rate limit or outage at that provider "
+        "empties this alias's eligible set, so every caller would receive "
+        "503 'no eligible route' at the same moment. Add a fallback route on "
+        "a second provider - another route on the same provider cannot help, "
+        "because circuits also open provider-wide."
+    )
 
 
 def validate_phase_routing(
