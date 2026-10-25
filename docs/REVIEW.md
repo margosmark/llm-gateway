@@ -1842,3 +1842,80 @@ over HTTP reporting the capable alias `true` and the unevidenced one
 `false`, a second boot changing nothing, and
 `candidates(..., needs_image_input=True)` keeping only image-capable
 routes).
+
+
+### R47 — The rollup's request index grew one entry per request for the whole 30-day retention — **closed**
+
+**Severity: medium (growth / availability).** *(closed)*
+
+Security gate `t_eb1846b6` (finding S-1) on the analytics candidate
+`bb5f066`: `RollupStore._index` mapped every `request_id` to its
+contribution so a later amendment could replace it instead of counting it
+twice, and the only pruning was by age — one entry per appended row, held
+for the full 30-day retention. Measured: 300k rows → **+187 MB RSS**
+(~0.6 KB/entry), so 30k requests/day ≈ 540 MB and 100k/day ≈ 1.8 GB on an
+appliance whose uptime is effectively unbounded. Every other ledger
+structure was already count-bounded (ring 10_000, writer queue 20_000,
+ledger file 5 MiB × 3); this was the only runtime structure that was not.
+
+**Fix.** The index is count-capped at `INDEX_MAX_ENTRIES = 50_000`
+(`src/gateway/ledger_persistence.py`), documented at the constant: large
+enough that a normal boot never evicts (the whole durable ledger, 15 MiB ≈
+40k rows, fits under it) and several times wider than the 10_000-record
+ledger ring that gates amendments — `RequestLedger.amend` only writes an
+amendment row while the event is still in the ring, so the product can
+never amend an entry the cap has already evicted. Eviction is
+oldest-first by *last touch* (an amendment re-inserts), and it evicts the
+**entry, never the counted request**: the contribution stays in its bucket,
+`coverage["requests"]` now sums the buckets, and the evicted id is
+remembered in a second bounded set of the same size so a late amendment is
+**dropped and reported** (`coverage["index_evicted"]`,
+`coverage["index_amendments_dropped"]`) instead of silently double-counted.
+The cap itself is stated in coverage (`index_entries` /`index_max_entries`),
+and `_prune_expired` now also ages out whole days, so count-evicted
+contributions cannot keep finished days alive forever.
+
+**Regression evidence:** `tests/test_rollup.py::RollupIndexBoundTests` —
+70k-row synthetic flood (index pinned at the cap, eviction counters exact,
+bucket totals lossless), a late amendment for an evicted id (dropped,
+reported, original values intact), and the cap-vs-ring invariant
+(`INDEX_MAX_ENTRIES ≥ 2 × DEFAULT_LEDGER_CAPACITY`).
+
+
+### R48 — The sidecar persisted raw per-request fallback reasons with no cardinality cap — **closed**
+
+**Severity: medium (growth / writer stall).** *(closed)*
+
+Security gate `t_eb1846b6` (finding S-2): `_tally` stored
+`fallback_reason` verbatim as a dict key. A recorded reason embeds a
+per-second cooldown counter, a climbing failure count and a
+provider-supplied `retry_after` (`MAX_BACKOFF_SECONDS = 86400`), so raw
+strings are effectively unique per request during cooldown-driven
+fallback. Measured: 6,000 fallback events → 6,000 keys → 2.5 MB sidecar
+(~415 B/key); one 86400 s episode ≈ 86k keys ≈ 11 MB in a single row. The
+source ledger is capped (5 MiB × 3) but the sidecar had no size guard, and
+`maybe_save` rewrites the whole file from the ledger writer thread every 50
+rows / 15 s — so a reason flood stalled appends, backed up the 20k write
+queue, and drove the documented "full write queue drops persistence update"
+path that loses authoritative ledger rows. `gateway.http.app` already
+folded reasons to a closed vocabulary *at read time*; storage did not, and
+the two rule sets could drift.
+
+**Fix.** `FALLBACK_REASON_RULES` and `fallback_reason_class` moved to a new
+shared module, `src/gateway/fallback_reasons.py`, imported by **both** the
+reader (`gateway.http.app`) and the store (`gateway.ledger_persistence`),
+which now folds the reason **at ingest** in `_row_delta` — one ordered rule
+set, one closed vocabulary (`cooldown` / `route_ineligible` /
+`upstream_failure` / `other` / `unknown`), idempotent so the reader-side
+fold is a no-op on rows the store produced. Counts are preserved exactly:
+folding changes which key a count lands under, never how many counts there
+are, and coverage/`incomplete` semantics are untouched. No separate byte
+cap was added: with the key set bounded by the vocabulary and the row set
+bounded by 30 days × configured dimensions, sidecar size is bounded by
+construction (measured: 6,000 distinct reasons → 1 key, 1,034-byte sidecar,
+was 1,312,028 bytes).
+
+**Regression evidence:** `tests/test_rollup.py::RollupReasonVocabularyTests`
+(6,000 distinct reasons → key count within the vocabulary with every event
+counted once; sidecar < 64 KiB under the same flood) plus the untouched
+rollup, cached-completeness and R26 suites.

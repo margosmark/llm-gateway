@@ -36,7 +36,7 @@ class DurableLedgerTests(unittest.TestCase):
                 ledger.record(RequestEvent(
                     f"req-{index}", "2099-01-01T00:00:00Z", "coding",
                     serving_provider="opencode_go", serving_model="claude-haiku-5-5",
-                    status=200, token_counters={"prompt_tokens": 100, "completion_tokens": 20},
+                    status=200, token_counters={"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0},
                 ))
             self.assertTrue(ledger.flush())
             self.assertEqual(ledger.totals()["requests"], 5)
@@ -45,9 +45,13 @@ class DurableLedgerTests(unittest.TestCase):
             restarted = RequestLedger(capacity=3, persistence_path=path)
             self.assertEqual(restarted.totals()["requests"], 5)
             costs = aggregate_usage(restarted.recent(limit=100), evicted_events=restarted.evicted)
+            # The ring holds 3 of the 5 rows, so the window is incomplete -
+            # that flag is what keeps the partial view honest. The published
+            # price still applies to the rows the window does count, exactly
+            # as it does to the token columns in the same payload.
             self.assertTrue(costs["coverage"]["incomplete"])
             self.assertTrue(costs["alias"])
-            self.assertTrue(all(row["amount_usd"] is None for group in (costs["alias"], costs["provider"], costs["model"]) for row in group.values()))
+            self.assertTrue(all(row["amount_usd"] is not None for group in (costs["alias"], costs["provider"], costs["model"]) for row in group.values()))
             restarted.close()
 
     def test_amendment_is_metadata_only_and_evicted_records_are_safe(self) -> None:

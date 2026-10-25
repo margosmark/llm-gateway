@@ -170,7 +170,15 @@ bounded rotation and a 30-day retention window when durable ledger storage is
 enabled; otherwise only the bounded in-memory ring is available and is lost
 when the gateway restarts. The Status view reports the current durability
 mode and marks aggregates Unknown when evictions may omit in-window events.
-This is not a billing system.
+The same append path maintains `request-ledger-rollup.json`, a derived daily
+rollup (one row per day, alias, provider and model, with tokens, fallbacks by
+the closed reason vocabulary — `cooldown`, `route_ineligible`,
+`upstream_failure`, `other`, `unknown`, folded when the row is written so a
+per-second cooldown sentence never becomes a bucket — errors by class and
+statuses) that is rebuilt from the ledger on every start, so daily history
+survives restarts and ring eviction; its `coverage` block says what it
+covers instead of reporting a gap as zero, including the 50,000-entry request
+index cap and anything that cap evicted. This is not a billing system.
 
 ```text
 Alias: coding
@@ -413,13 +421,36 @@ which alias was asked for, which provider and model actually served it, how
 long it took and how it ended — never what it said. Token counters come from
 reported provider usage; local cost estimates use published prices only and
 are not provider bills. The Status page aggregates usage for the last 24 hours
-and displays the price source and observation date. No published price means
-**Unknown**, never zero. Request metadata is retained on the state volume for
-up to 30 days; it is not a billing system.
+and displays the price source and observation date, and it can show any
+recorded UTC day from the durable daily rollup through the window selector.
+A group's dollar figure is the **known subtotal**: requests without a
+published price are never priced and never poison the total, so the console
+states their coverage beside it — how many requests, and how many input and
+output tokens, are unpriced — instead of collapsing the whole group to
+Unknown. A group with no priced request at all shows **Unknown** (never
+zero) together with that coverage, and an unpriced provider such as
+`chatgpt_codex` is labelled as having no published actual/list price; the
+gateway never infers one from a matching model ID. Cached-token completeness
+is enforced end to end: an absent cached counter is never read as a reported
+zero and never prices as one - it is shown as coverage unknown, beside the
+count of requests missing it - while an explicit reported zero prices
+normally. A request that reported no usage is **Unknown**, never `$0.00`.
+Request metadata is
+retained on the state volume for up to 30 days; it is not a billing system.
+
+The same state payload carries a **Fallback analytics** block: the fallback
+rate overall and per alias, provider and model, the reasons behind it, and a
+daily series of requests, tokens, fallbacks and errors. Days are reported
+with their own status, so a day with no recorded rows is a gap rather than
+zero, and a rate with no requests behind it is unknown rather than `0.0`.
 
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
-never as unlimited.
+never as unlimited. The **Usage and limits** card shows only enforceable
+spend caps observed from providers — with `limits: []` it says plainly that
+no cost limit is configured. Catalogue fields such as `monthly_limit_usd`
+are reference metadata, are never loaded as budget policy, and are labelled
+"reference only, not enforced" wherever they appear.
 
 See [the architecture map](docs/ARCHITECTURE.md),
 [development guide](docs/DEVELOPMENT.md), and
