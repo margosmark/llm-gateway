@@ -243,7 +243,19 @@ class ImageCapableAdapter:
 
 
 def _alias_with_routes(primary: RouteRef, fallbacks: list[RouteRef], name: str = "coding") -> Alias:
-    return Alias(name=name, enabled=True, primary=primary, fallbacks=fallbacks)
+    # The fallback must be reachable after a capability skip, so the alias
+    # carries the owner's authorization, the confirmed fallback provider
+    # and the trigger that names exactly that skip. Refusing it without
+    # these is pinned in ``tests/test_skipped_primary.py``.
+    return Alias(
+        name=name,
+        enabled=True,
+        primary=primary,
+        fallbacks=fallbacks,
+        fallback_triggers=["route_ineligible"],
+        fallback_authorized=bool(fallbacks),
+        fallback_confirmed_providers=sorted({ref.provider for ref in fallbacks}),
+    )
 
 
 def _image_payload(model: str = "coding") -> dict:

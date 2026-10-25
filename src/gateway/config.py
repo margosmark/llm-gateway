@@ -40,16 +40,34 @@ ACCESS_LAN_NOAUTH = "lan_noauth"
 ACCESS_AUTHENTICATED = "authenticated"
 ACCESS_MODES = (ACCESS_LAN_NOAUTH, ACCESS_AUTHENTICATED)
 
-# Fallback triggers. The owner selects these explicitly per alias.
+# Fallback triggers. The owner selects these explicitly per alias. Every
+# path that hands a request to a route other than the primary consults
+# them: an upstream failure contributes its recorded failure trigger, and
+# a *skipped* primary contributes the trigger named for its skip - a
+# cooldown carries the failure class that opened it (or
+# ``explicit_cooldown`` for an operator-placed circuit), a capability or
+# configuration skip carries ``route_ineligible``, and a route held by
+# another request's live recovery probe carries ``probe_contention``.
 TRIGGER_EXHAUSTED = "exhausted"
 TRIGGER_RATE_LIMITED = "rate_limited"
 TRIGGER_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
 TRIGGER_EXPLICIT_COOLDOWN = "explicit_cooldown"
+#: The primary was skipped for a capability or configuration reason
+#: (disabled, unknown, does not serve this request's shape), and the
+#: next route is about to serve instead.
+TRIGGER_ROUTE_INELIGIBLE = "route_ineligible"
+#: The primary is held by another request's live half-open recovery
+#: probe, and the next route is about to serve instead. It is an
+#: automatic event, so it is deliberately *not* folded into
+#: ``explicit_cooldown``, which means the operator placed the hold.
+TRIGGER_PROBE_CONTENTION = "probe_contention"
 FALLBACK_TRIGGERS = (
     TRIGGER_EXHAUSTED,
     TRIGGER_RATE_LIMITED,
     TRIGGER_UPSTREAM_UNAVAILABLE,
     TRIGGER_EXPLICIT_COOLDOWN,
+    TRIGGER_ROUTE_INELIGIBLE,
+    TRIGGER_PROBE_CONTENTION,
 )
 
 # Phases a request can be classified into. A caller or the gateway's own
@@ -412,6 +430,14 @@ class Alias:
     enabled: bool = False
     primary: RouteRef | None = None
     fallbacks: list[RouteRef] = field(default_factory=list)
+    #: The fallback triggers the owner has enabled for this alias. Every
+    #: cross-provider switch needs one: the recorded failure trigger when
+    #: a tried provider failed, or the trigger that names a *skip* -
+    #: ``explicit_cooldown`` for an operator-placed cooldown, the
+    #: failure's own trigger for an automatic cooldown,
+    #: ``route_ineligible`` for a capability or configuration skip, and
+    #: ``probe_contention`` for a route held by another request's live
+    #: recovery probe.
     fallback_triggers: list[str] = field(default_factory=list)
     fallback_authorized: bool = False
     #: Providers the owner has explicitly confirmed may receive requests

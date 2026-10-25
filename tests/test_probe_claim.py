@@ -139,7 +139,19 @@ def _harness(
             enabled=True,
             primary=RouteRef(FAKE_PROVIDER, "gpt-6-luna"),
             fallbacks=[RouteRef(FALLBACK_PROVIDER, FALLBACK_MODEL)],
-            fallback_triggers=["exhausted", "rate_limited", "upstream_unavailable"],
+            # These fixtures exercise probe/claim behaviour, not the
+            # authorization gate (that lives in test_skipped_primary), so
+            # the alias opts into every skip a probe test can produce:
+            # probe_contention for a held recovery probe (its own class,
+            # owner decision 2026-10-25) and route_ineligible for a
+            # capability skip.
+            fallback_triggers=[
+                "exhausted",
+                "rate_limited",
+                "upstream_unavailable",
+                "probe_contention",
+                "route_ineligible",
+            ],
             fallback_authorized=True,
             fallback_confirmed_providers=[FALLBACK_PROVIDER],
         )
