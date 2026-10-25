@@ -104,6 +104,7 @@ from gateway.bridge.requests import (
     to_responses,
 )
 from gateway.bridge.requests import (
+    _validated_image_url,
     payload_has_image_input as openai_payload_has_image_input,
 )
 from gateway.bridge.streams import (
@@ -160,36 +161,64 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _anthropic_image_url(block: dict[str, Any]) -> str:
+    """The image URL an Anthropic ``image``/``input_image`` block carries.
+
+    Every value runs through
+    :func:`gateway.bridge.requests._validated_image_url` - the same
+    wave-1.6r control the Chat Completions and Responses parsers run:
+    absolute HTTP(S) only, no embedded userinfo, no control characters,
+    and ``data:`` URLs restricted to PNG/JPEG/GIF/WebP base64 within the
+    4 MiB decoded / 6 MiB encoded caps. A block whose image cannot be
+    read raises :class:`~gateway.bridge.model.ConversionError` (a 4xx
+    with zero adapter calls) instead of being forwarded unvalidated or
+    dropped; the gateway never dereferences the URL itself, so refusing
+    it adds no fetch and no SSRF path.
+    """
+    if "source" in block:
+        source = block["source"]
+        if isinstance(source, str):
+            return _validated_image_url(source)
+        if isinstance(source, dict) and source.get("type") == "url":
+            return _validated_image_url(source.get("url"))
+        if isinstance(source, dict) and source.get("type") == "base64":
+            media = source.get("media_type")
+            data = source.get("data")
+            if not isinstance(media, str) or not media or not isinstance(data, str) or not data:
+                raise ConversionError(
+                    "an image block with a base64 source needs a media_type and a data string",
+                    capability="image_input",
+                )
+            return _validated_image_url(f"data:{media};base64,{data}")
+        raise ConversionError(
+            "an image block must carry a source of type 'url' or 'base64'",
+            capability="image_input",
+        )
+    image = block.get("image_url")
+    url = image if isinstance(image, str) else (image.get("url") if isinstance(image, dict) else None)
+    return _validated_image_url(url)
+
+
 def _anthropic_block_to_part(block: Any) -> ContentPart | None:
     """One Anthropic content block becomes a normalised content part.
 
     Images are preserved as a URL: a ``base64`` source becomes a ``data:``
     URI and a ``url`` source keeps its URL, so the image survives into the
-    OpenAI ``image_url`` shape and back again.
+    OpenAI ``image_url`` shape and back again. Both spellings the surface
+    accepts (``source`` and ``input_image``) are validated through
+    :func:`_anthropic_image_url` first, so an image the parser cannot read
+    is refused here rather than forwarded or - the failure this replaced -
+    silently returned as ``None`` and skipped by the caller.
     """
     if not isinstance(block, dict):
         return None
     kind = block.get("type")
     if kind == "text":
         return ContentPart(kind=TEXT, text=str(block.get("text") or ""))
-    if kind == "image":
-        source = block.get("source")
-        if isinstance(source, dict):
-            if source.get("type") == "base64":
-                media = source.get("media_type") or "image/png"
-                data = source.get("data") or ""
-                return ContentPart(kind=IMAGE, image_url=f"data:{media};base64,{data}")
-            if source.get("type") == "url":
-                return ContentPart(kind=IMAGE, image_url=str(source.get("url") or ""))
-        if isinstance(source, str):
-            return ContentPart(kind=IMAGE, image_url=source)
-        return None
+    if kind in ("image", "input_image"):
+        return ContentPart(kind=IMAGE, image_url=_anthropic_image_url(block))
     if kind in ("input_text", "output_text"):
         return ContentPart(kind=TEXT, text=str(block.get("text") or ""))
-    if kind == "input_image":
-        image = block.get("image_url")
-        url = image if isinstance(image, str) else (image or {}).get("url") if isinstance(image, dict) else None
-        return ContentPart(kind=IMAGE, image_url=url)
     return None
 
 
@@ -207,16 +236,33 @@ def _anthropic_content_to_parts(content: Any) -> list[ContentPart]:
 
 
 def _anthropic_tool_result_text(content: Any) -> str:
+    """The text a ``tool_result`` carries, or a refusal.
+
+    An Anthropic tool result may also carry image blocks (vision tool
+    output), while an OpenAI-family function output is a **string**. A
+    non-text block therefore cannot be expressed on a converted route and
+    is refused with an actionable message instead of being skipped by a
+    text-only reader - which is what happened before, silently, on every
+    path. On an Anthropic-dialect route this function never runs: the
+    block is passed through whole, so the native path still serves it.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
         return content
     chunks: list[str] = []
     for block in _as_list(content):
-        if isinstance(block, dict) and isinstance(block.get("text"), str):
-            chunks.append(block["text"])
-        elif isinstance(block, str):
+        if isinstance(block, str):
             chunks.append(block)
+        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+            chunks.append(block["text"])
+        else:
+            raise ConversionError(
+                "a tool_result can only carry text to an OpenAI-family route; an image "
+                "or other non-text tool result cannot be expressed as a function output, "
+                "so it is refused rather than dropped",
+                capability="tool_result",
+            )
     return "".join(chunks)
 
 
@@ -297,6 +343,13 @@ def from_anthropic_messages(payload: dict[str, Any]) -> NormalisedRequest:
             kind = block.get("type")
             if kind == "tool_use":
                 arguments = block.get("input")
+                if "input" in block and not isinstance(arguments, dict):
+                    raise ConversionError(
+                        "tool_use.input must be a JSON object; a non-object input cannot be "
+                        "carried into a tool call, so it is refused rather than replaced "
+                        "with an empty object",
+                        capability="tool_use",
+                    )
                 items.append(
                     InputItem(
                         kind=ITEM_FUNCTION_CALL,
@@ -533,18 +586,44 @@ def convert_request(payload: dict[str, Any], source: str, target: str) -> dict[s
     return openai_convert_request(payload, source, target)
 
 
+def _anthropic_content_carries_image(content: Any) -> bool:
+    """Whether an Anthropic content value carries an image.
+
+    Detection runs the **same parser conversion runs**, so routing and
+    rendering can never disagree about which fields represent an image:
+    both spellings the surface accepts (``image`` and ``input_image``)
+    count, and so does an image inside a ``tool_result`` - the model is
+    asked to look at that one too. An image the parser cannot read is
+    refused here, with a :class:`~gateway.bridge.model.ConversionError`
+    before a route is chosen, instead of being dropped later on a route
+    that could have served it.
+    """
+    if content is None or isinstance(content, str):
+        return False
+    found = False
+    for block in _as_list(content):
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind in ("image", "input_image") or "image_url" in block:
+            _anthropic_block_to_part(block)
+            found = True
+        elif kind == "tool_result":
+            # Evaluated first, so a malformed image inside a tool result is
+            # still refused even when an earlier block already counted.
+            found = _anthropic_content_carries_image(block.get("content")) or found
+    return found
+
+
 def payload_has_image_input(payload: dict[str, Any], source_dialect: str) -> bool:
     """Whether a request carries an image, across every source dialect."""
     if source_dialect == DIALECT_ANTHROPIC_MESSAGES:
+        found = False
         for message in _as_list(payload.get("messages")):
             if not isinstance(message, dict):
                 continue
-            content = message.get("content")
-            if isinstance(content, list) and any(
-                isinstance(block, dict) and block.get("type") == "image" for block in content
-            ):
-                return True
-        return False
+            found = _anthropic_content_carries_image(message.get("content")) or found
+        return found
     return openai_payload_has_image_input(payload, source_dialect)
 
 

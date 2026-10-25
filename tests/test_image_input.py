@@ -32,6 +32,12 @@ from pathlib import Path
 from gateway.adapters.base import ProviderRequest, ProviderResponse, TestResult
 from gateway.adapters.chatgpt_codex import ChatGPTCodexAdapter
 from gateway.adapters.opencode_go import OpenCodeGoAdapter
+from gateway.bridge.anthropic import (
+    convert_request as anthropic_convert_request,
+)
+from gateway.bridge.anthropic import (
+    payload_has_image_input as anthropic_payload_has_image_input,
+)
 from gateway.bridge.model import ConversionError
 from gateway.bridge.requests import convert_request, from_responses, payload_has_image_input
 from gateway.cli import build_application
@@ -46,6 +52,7 @@ from gateway.config import (
     RouteRef,
 )
 from gateway.core.capabilities import (
+    DIALECT_ANTHROPIC_MESSAGES,
     DIALECT_OPENAI_CHAT,
     DIALECT_OPENAI_RESPONSES,
     ImageEvidence,
@@ -55,6 +62,8 @@ from gateway.core.capabilities import (
 from gateway.core.routing import Router
 from gateway.http.core import Server
 from tests.test_end_to_end import FAKE_PROVIDER, GatewayHarness, free_port
+from tests.test_messages_handler import FakeChatAdapter
+from tests.test_anthropic_surface import FakeAnthropicAdapter
 
 _DATA = Path(__file__).resolve().parent.parent / "data" / "go_catalog.json"
 _MINIMAX_SOURCE = "https://platform.minimax.io/docs/api-reference/text-openai-api"
@@ -214,6 +223,205 @@ class ImageDetectionTests(unittest.TestCase):
         # rather than silently dropping it from the conversation.
         with self.assertRaises(ConversionError):
             from_responses(payload)
+
+
+class AnthropicDialectImageTests(unittest.TestCase):
+    """``/v1/messages`` obeys the same image rules as the OpenAI surfaces.
+
+    Regression for the T5 security findings (F1/F2): the Anthropic branch of
+    ``payload_has_image_input`` used to look only at ``type == "image"``, so
+    the ``input_image`` spelling the surface also accepts evaded the
+    capability gate entirely, and the Anthropic content-block parser never
+    ran the wave-1.6r image-URL validation that the Chat and Responses
+    parsers run - ``file://``, ``ftp://`` and a bogus base64 MIME went out
+    on the wire behind a 200 while the same values were refused 422 on
+    ``/v1/chat/completions``.
+    """
+
+    ALIAS = "anthropic-image"
+    MODEL = "claude-haiku-5-5"
+
+    #: Both spellings the surface accepts (``messages.py``
+    #: CARRYABLE_BLOCK_TYPES); ``tool_result`` is covered separately below.
+    IMAGE_BLOCKS = {
+        "image": {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+        "input_image": {"type": "input_image", "image_url": "https://x/y.png"},
+    }
+
+    #: The same image nested inside a tool result - detection must see it,
+    #: and no path may serve it with the attachment dropped.
+    TOOL_RESULT_BLOCK = {"type": "tool_result", "tool_use_id": "t1", "content": [
+        {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+        {"type": "text", "text": "caption"}]}
+
+    UNREADABLE = {
+        "file scheme": {"type": "image", "source": {
+            "type": "url", "url": "file:///etc/passwd"}},
+        "ftp via input_image": {"type": "input_image",
+                                "image_url": "ftp://internal/secret.png"},
+        "bogus base64 mime": {"type": "image", "source": {
+            "type": "base64", "media_type": "text/html", "data": "not-valid-base64!!!"}},
+        "unknown source": {"type": "image", "source": {"type": "unknown_format"}},
+        "no source": {"type": "image"},
+        "null image_url": {"type": "input_image", "image_url": None},
+    }
+
+    def _harness(self, *, images: bool) -> tuple[GatewayHarness, FakeChatAdapter]:
+        adapter = FakeChatAdapter(provider_id=FAKE_PROVIDER, dialect=DIALECT_OPENAI_CHAT)
+        harness = GatewayHarness(adapter)
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            config.providers[FAKE_PROVIDER] = ProviderState(
+                provider_id=FAKE_PROVIDER, kind=FAKE_PROVIDER, state="connected",
+                models={self.MODEL: ModelEntry(
+                    model_id=self.MODEL, enabled=True, dialect=DIALECT_OPENAI_CHAT,
+                    source="discovered", supports_image_input=images)},
+            )
+            config.aliases[self.ALIAS] = Alias(
+                name=self.ALIAS, enabled=True, primary=RouteRef(FAKE_PROVIDER, self.MODEL))
+        return harness, adapter
+
+    @staticmethod
+    def _body(block: dict) -> dict:
+        return {"model": AnthropicDialectImageTests.ALIAS, "max_tokens": 32,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "look"}, block]}]}
+
+    def test_detection_sees_both_spellings_and_an_image_inside_a_tool_result(self) -> None:
+        for label, block in self.IMAGE_BLOCKS.items():
+            with self.subTest(block=label):
+                payload = {"messages": [{"role": "user", "content": [block]}]}
+                self.assertTrue(
+                    anthropic_payload_has_image_input(payload, DIALECT_ANTHROPIC_MESSAGES))
+        self.assertTrue(anthropic_payload_has_image_input(
+            {"messages": [{"role": "user", "content": [self.TOOL_RESULT_BLOCK]}]},
+            DIALECT_ANTHROPIC_MESSAGES))
+        self.assertFalse(anthropic_payload_has_image_input(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            DIALECT_ANTHROPIC_MESSAGES))
+        self.assertFalse(anthropic_payload_has_image_input(
+            {"messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "done"}]}]},
+            DIALECT_ANTHROPIC_MESSAGES))
+
+    def test_detection_refuses_an_image_it_cannot_read(self) -> None:
+        """The refusal happens in detection, so no route is even chosen."""
+        for label, block in self.UNREADABLE.items():
+            with self.subTest(case=label):
+                payload = {"messages": [{"role": "user", "content": [block]}]}
+                with self.assertRaises(ConversionError) as ctx:
+                    anthropic_payload_has_image_input(payload, DIALECT_ANTHROPIC_MESSAGES)
+                self.assertEqual(ctx.exception.capability, "image_input")
+
+    def test_both_spellings_fail_closed_on_a_text_only_alias(self) -> None:
+        for label, block in self.IMAGE_BLOCKS.items():
+            with self.subTest(block=label):
+                harness, adapter = self._harness(images=False)
+                status, body, _ = harness.request(
+                    "POST", "/v1/messages", body=self._body(block))
+                self.assertEqual(status, 503, body)
+                self.assertEqual(body["error"]["capability"], "image_input")
+                self.assertEqual(adapter.calls, [])
+
+    def test_both_spellings_reach_an_image_capable_route(self) -> None:
+        """Gating must not cost a capable route its images (F2's other half)."""
+        for label, block in self.IMAGE_BLOCKS.items():
+            with self.subTest(block=label):
+                harness, adapter = self._harness(images=True)
+                status, body, _ = harness.request(
+                    "POST", "/v1/messages", body=self._body(block))
+                self.assertEqual(status, 200, body)
+                self.assertEqual(len(adapter.calls), 1)
+                self.assertIn("y.png", json.dumps(adapter.calls[0].payload))
+
+    def test_an_image_inside_a_tool_result_is_never_served_without_it(self) -> None:
+        """F3/F2 on the nested spelling: every path is honest about the image.
+
+        * a text-only alias fails closed (the nested image *is* an image
+          request, so detection must recurse);
+        * a capable route whose dialect is converted cannot express an image
+          as function output - refused, with the refusal in ``attempts``;
+        * a capable native Anthropic route speaks the dialect, so the whole
+          ``tool_result`` goes over the wire, image included.
+        """
+        harness, adapter = self._harness(images=False)
+        status, body, _ = harness.request(
+            "POST", "/v1/messages", body=self._body(self.TOOL_RESULT_BLOCK))
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"]["capability"], "image_input")
+        self.assertEqual(adapter.calls, [])
+
+        harness, adapter = self._harness(images=True)
+        status, body, _ = harness.request(
+            "POST", "/v1/messages", body=self._body(self.TOOL_RESULT_BLOCK))
+        self.assertNotEqual(status, 200, body)
+        self.assertEqual(adapter.calls, [])
+        attempts = body["error"]["detail"].get("attempts", [])
+        self.assertEqual([entry["outcome"] for entry in attempts],
+                         ["conversion_refused"])
+        ledger = harness.router._ledger.recent()[0]
+        self.assertEqual(ledger["attempts"][0]["outcome"], "conversion_refused")
+
+        native = FakeAnthropicAdapter(provider_id=FAKE_PROVIDER)
+        native_harness = GatewayHarness(native)
+        self.addCleanup(native_harness.close)
+        with native_harness.config.mutate() as config:
+            config.providers[FAKE_PROVIDER] = ProviderState(
+                provider_id=FAKE_PROVIDER, kind=FAKE_PROVIDER, state="connected",
+                models={self.MODEL: ModelEntry(
+                    model_id=self.MODEL, enabled=True,
+                    dialect=DIALECT_ANTHROPIC_MESSAGES, source="discovered",
+                    supports_image_input=True)},
+            )
+            config.aliases[self.ALIAS] = Alias(
+                name=self.ALIAS, enabled=True, primary=RouteRef(FAKE_PROVIDER, self.MODEL))
+        status, body, _ = native_harness.request(
+            "POST", "/v1/messages", body=self._body(self.TOOL_RESULT_BLOCK))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(native.calls), 1)
+        sent = json.dumps(native.calls[0].payload)
+        self.assertIn("y.png", sent)
+        self.assertIn("caption", sent)
+
+    def test_an_unreadable_image_is_refused_before_any_provider_call(self) -> None:
+        """F1: the wave-1.6r control refuses here exactly as on Chat."""
+        for label, block in self.UNREADABLE.items():
+            with self.subTest(case=label):
+                harness, adapter = self._harness(images=True)
+                status, body, _ = harness.request(
+                    "POST", "/v1/messages", body=self._body(block))
+                self.assertEqual(status, 422, body)
+                self.assertEqual(body["error"]["type"], "conversion_refused")
+                self.assertEqual(body["error"]["capability"], "image_input")
+                self.assertEqual(adapter.calls, [])
+                self.assertNotIn("file://", json.dumps(body))
+                self.assertNotIn("ftp://", json.dumps(body))
+
+    def test_the_control_surface_still_refuses_the_same_url(self) -> None:
+        """The OpenAI surface's 422 for ``file:///...`` must not move."""
+        harness, adapter = self._harness(images=True)
+        status, body, _ = harness.request("POST", "/v1/chat/completions", body={
+            "model": self.ALIAS, "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": "file:///etc/passwd"}},
+            ]}]})
+        self.assertEqual(status, 422, body)
+        self.assertEqual(body["error"]["capability"], "image_input")
+        self.assertEqual(adapter.calls, [])
+
+    def test_detection_agrees_with_conversion_for_the_anthropic_dialect(self) -> None:
+        """Routing and rendering cannot disagree about what counts as an image."""
+        for label, block in self.IMAGE_BLOCKS.items():
+            with self.subTest(block=label):
+                payload = {"messages": [{"role": "user", "content": [block]}]}
+                self.assertTrue(
+                    anthropic_payload_has_image_input(payload, DIALECT_ANTHROPIC_MESSAGES))
+                converted = anthropic_convert_request(
+                    {"model": self.MODEL, "max_tokens": 8, **payload},
+                    DIALECT_ANTHROPIC_MESSAGES, DIALECT_OPENAI_CHAT)
+                serialised = json.dumps(converted)
+                self.assertIn("y.png", serialised,
+                              f"{label}: the image vanished in conversion")
 
 
 class ImageCapableAdapter:

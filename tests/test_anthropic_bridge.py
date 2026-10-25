@@ -236,6 +236,149 @@ class RequestRefusalTests(unittest.TestCase):
         self.assertEqual(ctx.exception.capability, "reasoning_summary")
 
 
+class ImageAndToolBlockRefusalTests(unittest.TestCase):
+    """F1/F2/F3 at the bridge level: no image is read or lost by accident.
+
+    ``payload_has_image_input`` (routing) and ``convert_request`` (rendering)
+    must agree on what counts as an image, every image URL must pass the
+    wave-1.6r validation before it reaches a content part, and a block the
+    bridge cannot render must raise instead of disappearing.
+    """
+
+    MODEL = {"model": "claude-haiku-5-5", "max_tokens": 8}
+
+    def _request(self, *blocks: dict, dialect: str = DIALECT_OPENAI_CHAT):
+        return convert_request(
+            {**self.MODEL, "messages": [{"role": "user", "content": list(blocks)}]},
+            DIALECT_ANTHROPIC_MESSAGES, dialect)
+
+    @staticmethod
+    def _payload(*blocks: dict) -> dict:
+        return {"messages": [{"role": "user", "content": list(blocks)}]}
+
+    def test_both_image_spellings_are_detected(self) -> None:
+        image = {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}
+        input_image = {"type": "input_image", "image_url": "https://x/y.png"}
+        nested = {"type": "tool_result", "tool_use_id": "t1", "content": [image]}
+        self.assertTrue(payload_has_image_input(self._payload(image),
+                                                DIALECT_ANTHROPIC_MESSAGES))
+        self.assertTrue(payload_has_image_input(self._payload(input_image),
+                                                DIALECT_ANTHROPIC_MESSAGES))
+        self.assertTrue(payload_has_image_input(self._payload(nested),
+                                                DIALECT_ANTHROPIC_MESSAGES))
+        self.assertFalse(payload_has_image_input(
+            self._payload({"type": "text", "text": "hi"}),
+            DIALECT_ANTHROPIC_MESSAGES))
+
+    def test_detection_and_conversion_never_disagree(self) -> None:
+        """Whatever detection calls an image, conversion must render."""
+        cases = [
+            ({"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+             "y.png"),
+            ({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                          "data": "aGVsbG8="}},
+             "aGVsbG8="),
+            ({"type": "input_image", "image_url": "https://x/y.png"}, "y.png"),
+        ]
+        for block, needle in cases:
+            with self.subTest(block=block["type"]):
+                self.assertTrue(payload_has_image_input(self._payload(block),
+                                                        DIALECT_ANTHROPIC_MESSAGES))
+                rendered = json.dumps(self._request(block))
+                self.assertIn(needle, rendered)
+
+    def test_an_image_url_the_control_rejects_is_refused_by_the_anthropic_parser(self) -> None:
+        for label, source in {
+            "file scheme": {"type": "url", "url": "file:///etc/passwd"},
+            "ftp scheme": {"type": "url", "url": "ftp://internal/x.png"},
+            "credentialed": {"type": "url", "url": "https://u:p@internal/x.png"},
+            "control chars": {"type": "url", "url": "https://x/y.png\nX: 1"},
+            "unknown format": {"type": "unknown_format"},
+            "missing": None,
+        }.items():
+            with self.subTest(case=label):
+                with self.assertRaises(ConversionError) as ctx:
+                    self._request({"type": "image", "source": source})
+                self.assertEqual(ctx.exception.capability, "image_input")
+
+    def test_an_input_image_url_is_validated_too(self) -> None:
+        with self.assertRaises(ConversionError) as ctx:
+            self._request({"type": "input_image", "image_url": "ftp://x/y.png"})
+        self.assertEqual(ctx.exception.capability, "image_input")
+        with self.assertRaises(ConversionError) as ctx:
+            self._request({"type": "input_image", "image_url": None})
+        self.assertEqual(ctx.exception.capability, "image_input")
+
+    def test_a_bogus_base64_media_type_is_refused(self) -> None:
+        with self.assertRaises(ConversionError) as ctx:
+            self._request({"type": "image", "source": {
+                "type": "base64", "media_type": "text/html",
+                "data": "not-valid-base64!!!"}})
+        self.assertEqual(ctx.exception.capability, "image_input")
+
+    def test_detection_refuses_what_conversion_would_refuse(self) -> None:
+        """Routing must fail closed *before* a route is chosen (F2/F3)."""
+        for block in (
+            {"type": "image", "source": {"type": "url", "url": "file:///etc/passwd"}},
+            {"type": "input_image", "image_url": "ftp://x/y.png"},
+            {"type": "image", "source": {"type": "unknown_format"}},
+            {"type": "input_image", "image_url": None},
+        ):
+            with self.subTest(block=block["type"]):
+                with self.assertRaises(ConversionError) as ctx:
+                    payload_has_image_input(self._payload(block),
+                                            DIALECT_ANTHROPIC_MESSAGES)
+                self.assertEqual(ctx.exception.capability, "image_input")
+
+    def test_a_tool_result_cannot_carry_an_image_as_function_output(self) -> None:
+        """The OpenAI function-output string cannot hold an image: refuse.
+
+        Nothing may be dropped, so the choice is between converting the
+        image (impossible in this dialect) and refusing with an actionable
+        message - never serving 200 with the attachment gone.
+        """
+        with self.assertRaises(ConversionError) as ctx:
+            self._request({"type": "tool_result", "tool_use_id": "t1", "content": [
+                {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+                {"type": "text", "text": "caption"},
+            ]})
+        self.assertEqual(ctx.exception.capability, "tool_result")
+
+    def test_a_text_only_tool_result_still_converts(self) -> None:
+        request = self._request(
+            {"type": "tool_result", "tool_use_id": "t1", "content": "done"})
+        rendered = json.dumps(request)
+        self.assertIn("done", rendered)
+
+    def test_a_non_object_tool_use_input_is_refused_not_replaced(self) -> None:
+        for bad in ("not-an-object", ["a"], 7, None):
+            with self.subTest(input=bad):
+                with self.assertRaises(ConversionError) as ctx:
+                    self._request({"type": "tool_use", "id": "t1", "name": "search",
+                                   "input": bad})
+                self.assertEqual(ctx.exception.capability, "tool_use")
+
+    def test_an_object_tool_use_input_is_still_serialised(self) -> None:
+        request = self._request({"type": "tool_use", "id": "t1", "name": "search",
+                                 "input": {"q": "x"}})
+        arguments = json.loads(
+            request["messages"][0]["tool_calls"][0]["function"]["arguments"])
+        self.assertEqual(arguments, {"q": "x"})
+
+    def test_a_native_anthropic_target_keeps_the_tool_result_whole(self) -> None:
+        """No re-encoding: the dialect that can express it is handed it as-is."""
+        block = {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}]}
+        request = self._request(block, dialect=DIALECT_ANTHROPIC_MESSAGES)
+        rendered = json.dumps(request)
+        self.assertIn("y.png", rendered)
+
+    def test_input_image_also_converts_on_the_responses_target(self) -> None:
+        request = self._request({"type": "input_image", "image_url": "https://x/y.png"},
+                                dialect=DIALECT_OPENAI_RESPONSES)
+        self.assertIn("y.png", json.dumps(request))
+
+
 class BufferedResponseTests(unittest.TestCase):
     def _anthropic_body(self):
         return {

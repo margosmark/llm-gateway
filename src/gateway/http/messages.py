@@ -87,6 +87,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
 #: converter, and be discarded there - a silent drop. Refusing it by
 #: name, before any provider is called, keeps the bridge contract's
 #: first rule ("nothing is silently dropped") true at the surface too.
+#:
+#: The *insides* of a carryable block are also checked here wherever the
+#: bridge cannot recover: a ``tool_use.input`` that is not an object is
+#: refused by name (the bridge would otherwise have to replace it with
+#: ``{}``, losing the caller's arguments). The image checks are the
+#: bridge's own - the same wave-1.6r validation the OpenAI surfaces run -
+#: and fire from capability detection before a route is chosen, so an
+#: image block whose source or URL cannot be read is refused there with a
+#: 422 ``conversion_refused`` rather than forwarded or dropped.
 CARRYABLE_BLOCK_TYPES = frozenset(
     {
         "text",
@@ -152,6 +161,15 @@ def _validate_messages(payload: dict[str, Any]) -> None:
                 _refuse(
                     f"content block type '{kind}' is not carried by this gateway; "
                     f"supported types: {', '.join(sorted(CARRYABLE_BLOCK_TYPES))}"
+                )
+            if kind == "tool_use" and "input" in block and not isinstance(
+                block["input"], dict
+            ):
+                # The bridge would otherwise have to substitute "{}" and the
+                # caller's arguments would disappear from the upstream call.
+                _refuse(
+                    f"messages[{index}].content[{block_index}].input must be an "
+                    "object; a tool_use block carries its arguments as a JSON object"
                 )
 
 

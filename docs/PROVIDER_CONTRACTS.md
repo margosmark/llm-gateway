@@ -48,14 +48,24 @@ The rule now is:
 | wire dialect, streaming, function tools, built-in tools, image input, previous-response continuation | **Hard.** The route is excluded with a capability-specific reason. Dropping tools, images, or continuation would change the request contract. |
 | `reasoning_effort` | **A preference.** The route stays eligible, the effort is dropped *for that route*, and the substitution is recorded. Never silent. |
 
-Image input is detected in both Chat Completions (`image_url`) and Responses
-(`input_image`) request content. Image URLs are validated without fetching
+Image input is detected in Chat Completions (`image_url`), Responses
+(`input_image`) and Anthropic Messages - the last in two spellings: an
+`image` block with a `source`, an `input_image` block, and an image nested
+inside a `tool_result`. Capability detection and conversion run the same
+block parser, so routing can never call something an image that rendering
+then drops, or rendering can never invent an image routing excluded.
+Image URLs are validated without fetching
 anything: only absolute HTTP(S) URLs without embedded userinfo, or base64 data
 URLs for PNG/JPEG/GIF/WebP, are accepted. Data URLs are limited to 4 MiB of
 decoded image bytes (and a 6 MiB encoded URL ceiling). The gateway never
 dereferences image URLs, so URL validation does not create a gateway-side
 fetch or SSRF path. Unsupported/malformed content parts fail with a safe 4xx
-instead of being silently discarded or downgraded to text. A Responses
+instead of being silently discarded or downgraded to text - on the Anthropic
+surface that covers an image whose `source` cannot be read, a
+`tool_use.input` that is not an object, and an image inside a `tool_result`
+on a dialect whose function output is a single string (refused with the
+refusal recorded, or passed through whole by a native Anthropic route).
+A Responses
 `input` array carries *items* (messages, function calls, their outputs) -
 never content parts at the top level - so a root-level `input_image`-like
 item is malformed for every route and is refused with a 4xx before route

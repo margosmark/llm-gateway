@@ -205,6 +205,58 @@ class MessagesContractTests(unittest.TestCase):
         adapter: FakeAnthropicAdapter = self.harness.adapter  # type: ignore[assignment]
         self.assertEqual(adapter.calls, [])
 
+    def test_a_tool_use_block_needs_an_object_input(self) -> None:
+        """The block *type* being carryable is not enough - its insides are.
+
+        Regression for the T5 silent-drop finding: a non-object ``input``
+        used to be replaced by ``{}`` inside the bridge and forwarded as
+        ``"arguments":"{}"``, so the caller's data vanished without a record.
+        """
+        for bad in ("not-an-object", ["a"], 7, None):
+            with self.subTest(input=bad):
+                self._refused(
+                    {
+                        **VALID,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_use",
+                                        "id": "t1",
+                                        "name": "search",
+                                        "input": bad,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "input",
+                )
+
+    def test_a_tool_use_block_with_an_object_input_still_serves(self) -> None:
+        status, payload, _ = self._post(
+            {
+                **VALID,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "t1",
+                                "name": "search",
+                                "input": {"q": "x"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(status, 200, payload)
+        adapter: FakeAnthropicAdapter = self.harness.adapter  # type: ignore[assignment]
+        self.assertEqual(len(adapter.calls), 1)
+
     def test_mistyped_request_options_are_refused_not_silently_dropped(self) -> None:
         cases = {
             "temperature": "hot",
