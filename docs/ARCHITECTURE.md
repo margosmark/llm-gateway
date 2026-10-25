@@ -57,8 +57,18 @@ for disk I/O.
 
 The same append path maintains `request-ledger-rollup.json`, a derived daily
 rollup sidecar: one row per UTC day x alias x provider x model with requests,
-input, output and cached tokens, fallbacks broken out by `fallback_reason`,
-errors by `error_class` and a status breakdown, alongside a per-day trend.
+input, output and cached tokens, fallbacks broken out by the closed
+fallback-reason vocabulary (folded **at ingest** from `gateway.fallback_reasons`,
+the same rules the owner analytics reader applies, so a per-second cooldown
+sentence never becomes a sidecar key), errors by `error_class` and a status
+breakdown, alongside a per-day trend. The store's in-memory request index is
+count-capped at 50,000 entries - the only runtime structure that was not
+already bounded - and both the cap and what it evicted are reported in
+`coverage` (`index_entries` / `index_max_entries` / `index_evicted` /
+`index_amendments_dropped`), so totals never depend on unbounded growth and a
+late amendment for an evicted request is reported as dropped rather than
+counted twice.
+
 The sidecar is rebuilt from the ledger on every start, so aggregated history
 survives both a restart and ring eviction, and
 `python3 -m gateway.ledger_persistence` regenerates it from the ledger on

@@ -60,6 +60,7 @@ from gateway.core.capabilities import (
 )
 from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
+from gateway.fallback_reasons import fallback_reason_class
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
 from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
@@ -91,35 +92,16 @@ ANALYTICS_MAX_DAYS = 30
 #: A recorded fallback reason is a full sentence that changes by the second
 #: ("... the provider chatgpt_codex is in a local cooldown for 771s (...)"),
 #: so counting raw strings would open a new bucket for every request. The
-#: rules below are ordered, first match wins, and the vocabulary is closed:
-#: anything unmatched is reported as ``other``, never dropped and never
-#: guessed at. The console shows the label; the API reports the key.
-FALLBACK_REASON_RULES: tuple[tuple[str, str], ...] = (
-    ("cooldown", "in a local cooldown"),
-    ("route_ineligible", "not eligible"),
-    ("route_ineligible", "does not support"),
-    ("route_ineligible", "is not enabled"),
-    ("route_ineligible", "is not configured"),
-    ("route_ineligible", "is not known"),
-    ("route_ineligible", "no adapter is registered"),
-    ("route_ineligible", "no model at this provider"),
-    ("route_ineligible", "not documented"),
-    ("upstream_failure", "trigger is enabled"),
-    ("upstream_failure", "safe fallback policy"),
-)
-
-
-def fallback_reason_class(reason: Any) -> str:
-    """Map a recorded fallback reason onto the closed label vocabulary."""
-    if not isinstance(reason, str) or not reason.strip():
-        return "unknown"
-    if reason.strip().lower() == "unknown":
-        return "unknown"
-    text = reason.lower()
-    for label, marker in FALLBACK_REASON_RULES:
-        if marker in text:
-            return label
-    return "other"
+#: rules live in :mod:`gateway.fallback_reasons`, shared with the rollup
+#: store that folds reasons *at ingest* - one module, one ordered rule set,
+#: one closed vocabulary (``cooldown`` / ``route_ineligible`` /
+#: ``upstream_failure`` / ``other`` / ``unknown``), so the reader and the
+#: store cannot drift: the rules are ordered, first match wins, and anything
+#: unmatched is reported as ``other``, never dropped and never guessed at.
+#: The console shows the label; the API reports the key. The reader-side
+#: :func:`fallback_reason_class` call below is the belt to that braces: it
+#: re-classifies whatever an older sidecar or a hand-written payload
+#: carries, and it is idempotent on labels the store already folded.
 
 
 def analytics_days(request: Request) -> tuple[int, int | None]:
