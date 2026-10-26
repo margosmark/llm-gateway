@@ -512,6 +512,25 @@ class ImageCapabilityGateTests(unittest.TestCase):
         self.assertEqual(len(native.calls), 1)
         self.assertIn("bottom", json.dumps(native.calls[0].payload))
 
+    def test_extreme_json_nesting_is_refused_before_decode_on_both_surfaces(self) -> None:
+        """The request parser rejects deep JSON before CPython recurses."""
+        adapter, harness = self._alias(image_capable=True)
+        for depth in (5000, 10000):
+            body = (
+                '{"model":"sec-alias","max_tokens":32,"messages":[{"role":"user",'
+                '"content":[' + '{"type":"tool_result","tool_use_id":"t1","content":[' * depth
+                + '{"type":"text","text":"bottom"}' + ']}' * depth
+                + ']}]}'
+            )
+            for path in ("/v1/messages", "/v1/chat/completions"):
+                with self.subTest(depth=depth, path=path):
+                    status, payload, _ = harness.request("POST", path, body=body)
+                    self.assertEqual(status, 400, payload)
+                    self.assertEqual(payload["error"]["type"], "malformed_request")
+                    self.assertEqual(adapter.calls, [])
+        # Surface-level malformed JSON refusals are still recorded by the
+        # established request logger; no router/provider ledger entry is made.
+
 
 class SilentDropTests(unittest.TestCase):
     """Blocks the surface accepts must not vanish inside the bridge."""
