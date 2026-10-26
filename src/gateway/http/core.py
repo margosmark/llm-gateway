@@ -32,7 +32,34 @@ MAX_BODY_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_WORKERS = 32
 DEFAULT_RATE_LIMIT_REQUESTS = 120
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
-"""Request bodies above this size are refused with 413."""
+# CPython's JSON decoder is recursive. Reject pathological nesting before it
+# enters the decoder (and before any application surface can route the body).
+MAX_JSON_NESTING = 3000
+"""Maximum JSON container nesting accepted by the request parser."""
+
+
+def _check_json_nesting(text: str) -> None:
+    """Bound structural JSON nesting without interpreting brackets in strings."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                raise ValueError("JSON nesting exceeds the maximum allowed depth")
+        elif char in "]}":
+            depth = max(0, depth - 1)
 
 
 class Headers:
@@ -113,7 +140,9 @@ class Request:
         if not self.body:
             return None
         try:
-            return json.loads(self.body.decode("utf-8"))
+            text = self.body.decode("utf-8")
+            _check_json_nesting(text)
+            return json.loads(text)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("request body is not valid JSON") from exc
 
