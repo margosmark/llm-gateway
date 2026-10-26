@@ -48,7 +48,9 @@ from gateway.config import (
     RouteRef,
     TRIGGER_EXHAUSTED,
     TRIGGER_EXPLICIT_COOLDOWN,
+    TRIGGER_PROBE_CONTENTION,
     TRIGGER_RATE_LIMITED,
+    TRIGGER_ROUTE_INELIGIBLE,
     TRIGGER_UPSTREAM_UNAVAILABLE,
 )
 from gateway.core.capabilities import (
@@ -424,18 +426,13 @@ class Router:
         next_candidate: Candidate,
         side_effects_possible: bool,
     ) -> tuple[bool, str]:
-        """Decide whether the next candidate may be tried.
+        """Decide whether the next candidate may be tried after a failure.
 
         Returns ``(allowed, reason)``. The reason explains a refusal.
         """
-        if side_effects_possible:
-            return False, "the request carried tools, so a provider switch could repeat a side effect"
-        if not alias.fallback_authorized:
-            return False, "cross-provider fallback is not authorised for this alias"
-        if next_candidate.route.provider not in alias.fallback_confirmed_providers:
-            return False, (
-                f"fallback to provider '{next_candidate.route.provider}' has not been confirmed by the owner"
-            )
+        allowed, reason = self._switch_preflight(alias, next_candidate, side_effects_possible)
+        if not allowed:
+            return allowed, reason
 
         trigger = TRIGGER_FOR_ERROR.get(failed_class)
         if trigger is None:
@@ -446,10 +443,121 @@ class Router:
                     )
                 return True, f"the owner defined a safe fallback policy for '{failed_class}' failures"
             return False, f"'{failed_class}' failures never trigger a fallback"
+        return self._trigger_permitted(alias, trigger)
 
+    def _skip_fallback_permitted(
+        self,
+        alias: Alias,
+        trigger: str,
+        next_candidate: Candidate,
+        side_effects_possible: bool,
+    ) -> tuple[bool, str]:
+        """Decide whether the next candidate may serve a **skipped** route.
+
+        A primary that was never invoked - in cooldown, disabled, a
+        capability mismatch, or held by another request's live recovery
+        probe - hands the request to a later, cross-provider route exactly
+        like a failed attempt does, so it passes exactly the same gate:
+        the four owner controls of :meth:`_switch_preflight` plus an
+        enabled trigger. The skip contributes its own trigger instead of
+        an error class. Returns ``(allowed, reason)``.
+        """
+        allowed, reason = self._switch_preflight(alias, next_candidate, side_effects_possible)
+        if not allowed:
+            return allowed, reason
+        return self._trigger_permitted(alias, trigger)
+
+    @staticmethod
+    def _switch_preflight(
+        alias: Alias,
+        next_candidate: Candidate,
+        side_effects_possible: bool,
+    ) -> tuple[bool, str]:
+        """The owner controls every switch shares, checked in fixed order."""
+        if side_effects_possible:
+            return False, "the request carried tools, so a provider switch could repeat a side effect"
+        if not alias.fallback_authorized:
+            return False, "cross-provider fallback is not authorised for this alias"
+        if next_candidate.route.provider not in alias.fallback_confirmed_providers:
+            return False, (
+                f"fallback to provider '{next_candidate.route.provider}' has not been confirmed by the owner"
+            )
+        return True, ""
+
+    @staticmethod
+    def _trigger_permitted(alias: Alias, trigger: str) -> tuple[bool, str]:
         if trigger not in alias.fallback_triggers:
             return False, f"the '{trigger}' trigger is not enabled for this alias"
         return True, f"the '{trigger}' trigger is enabled for this alias"
+
+    # --- skip attribution ------------------------------------------------
+
+    def _skip_trigger(self, candidate: Candidate, *, vanished: str) -> str:
+        """The fallback trigger a *skipped* primary candidate satisfies.
+
+        A candidate excluded by enumeration is first checked for *why*:
+        only a circuit hold can carry an origin, so a capability or
+        configuration skip maps to ``route_ineligible`` and never
+        consults the circuit store. For a circuit hold the store
+        classifies itself: an open window carries the failure class it
+        was opened by, so an **automatic** cooldown keeps its own
+        recorded trigger (the trigger the owner already enabled is the
+        one that opened the window, so those keep working unchanged); a
+        window placed by the **operator** carries no class and maps to
+        ``explicit_cooldown``; a live recovery probe maps to
+        ``probe_contention`` - an automatic event with its own class,
+        never folded into the operator's.
+
+        ``vanished`` is returned when the hold ended between the moment
+        the route was skipped and this decision.
+        """
+        if not candidate.circuit_blocked:
+            return TRIGGER_ROUTE_INELIGIBLE
+        return self._hold_trigger(candidate.route, vanished=vanished)
+
+    def _claim_skip_trigger(self, route: RouteRef) -> str:
+        """The trigger for a route whose invocation-boundary claim was refused.
+
+        The candidate passed enumeration, so the hold appeared moments
+        ago: a reopened window classifies itself through the store, and
+        an origin that is already gone can only have been the live probe
+        this request lost the race to - a candidate cannot be skipped
+        here for any capability reason.
+        """
+        return self._hold_trigger(route, vanished=TRIGGER_PROBE_CONTENTION)
+
+    def _hold_trigger(self, route: RouteRef, *, vanished: str) -> str:
+        origin = self._circuits.skip_origin(route.provider, route.model)
+        if origin is None:
+            return vanished
+        if origin == "probe":
+            return TRIGGER_PROBE_CONTENTION
+        trigger = TRIGGER_FOR_ERROR.get(origin.partition(":")[2])
+        if trigger is not None:
+            return trigger
+        return TRIGGER_EXPLICIT_COOLDOWN
+
+    def _fallback_refusal(
+        self, alias_name: str, reason: str, routes: list[tuple[str, str]]
+    ) -> RoutingError:
+        """The refusal for a switch the owner's policy declined.
+
+        Same shape as the pre-loop ``no eligible route`` refusal: a 503
+        with a bounded ``Retry-After`` when a circuit is part of the
+        story. A skip refusal is a public response, and the capability
+        refusal above proves public responses name no upstream
+        identifiers - so the one reason that would name the unconfirmed
+        fallback provider is reported without it, while every other
+        reason carries the exact gate that declined.
+        """
+        if "has not been confirmed" in reason:
+            reason = "the fallback provider has not been confirmed by the owner"
+        return RoutingError(
+            f"no eligible route for alias '{alias_name}' (fallback not used: {reason})",
+            code="fallback_not_permitted",
+            status=503,
+            retry_after_seconds=self._circuits.retry_after_for(routes),
+        )
 
     # --- phase routing ---------------------------------------------------
 
@@ -686,14 +794,16 @@ class Router:
                         "reason": candidate.excluded_reason,
                     }
                 )
+        started = time.monotonic()
         if (
             eligible
             and eligible[0].route != (alias.primary or eligible[0].route)
             and eligible[0].route != phase_selected_route
         ):
-            # The primary was skipped, so a later route served the request.
-            # A route chosen by the owner's phase policy is not a fallback:
-            # it is the primary for that phase, so it is not reported as one.
+            # The primary was skipped, so a later route is about to serve
+            # the request. A route chosen by the owner's phase policy is
+            # not a fallback: it is the primary for that phase, so it is
+            # not reported as one and needs no fallback authorization.
             skipped_primary = next(
                 (entry for entry in attribution.skipped if alias.primary is not None
                  and entry["provider"] == alias.primary.provider
@@ -705,10 +815,52 @@ class Router:
                 if skipped_primary
                 else "the primary route was not eligible"
             )
+            # The switch itself is a cross-provider fallback and passes
+            # the same owner gate as a failed attempt: authorization,
+            # confirmation of the next provider, and an enabled trigger -
+            # the trigger that names *this* skip. A declined switch
+            # refuses the request instead of serving it elsewhere.
+            if alias.primary is not None:
+                primary_candidate = next(
+                    (c for c in candidates if c.route == alias.primary), None
+                )
+                trigger = TRIGGER_ROUTE_INELIGIBLE
+                if primary_candidate is not None:
+                    trigger = self._skip_trigger(
+                        primary_candidate, vanished=TRIGGER_EXPLICIT_COOLDOWN
+                    )
+                allowed, permission_reason = self._skip_fallback_permitted(
+                    alias, trigger, eligible[0], needs_tools
+                )
+                if not allowed:
+                    refusal = self._fallback_refusal(
+                        alias_name,
+                        permission_reason,
+                        [(c.route.provider, c.route.model) for c in candidates],
+                    )
+                    # The owner's gate stopped this request, and a
+                    # stopped request is an outcome the ledger owns: it
+                    # records that nobody served it, without claiming a
+                    # fallback for a switch that never happened.
+                    self._record(
+                        request_id=request_id,
+                        alias_name=alias_name,
+                        payload=payload,
+                        attribution=attribution,
+                        status=refusal.status,
+                        error_class=ERROR_POLICY,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        stream=stream,
+                        profile_id=profile_id,
+                    )
+                    raise refusal
             attribution.fallback_used = True
             attribution.fallback_reason = reason
         last_error: AdapterError | None = None
-        started = time.monotonic()
+        #: Set when the owner's policy refused the switch away from a
+        #: skipped primary mid-loop; the tail records the empty result
+        #: and then raises it.
+        skip_refusal: RoutingError | None = None
         # The upstream conversation identifier is derived here, so that every
         # path that reaches a provider has one - the API surface, the
         # console's alias test, and any future caller. OpenCode Go refuses a
@@ -838,8 +990,25 @@ class Router:
                     and alias.primary is not None
                     and candidate.route == alias.primary
                 ):
-                    # The primary could not be probed, so a later route is
-                    # about to serve the request. The record says why.
+                    # The primary could not be claimed, so a later route
+                    # is about to serve the request. The record says
+                    # why - and the switch passes the same owner gate as
+                    # every other fallback: authorization, confirmation
+                    # of the next provider, and an enabled trigger (the
+                    # one that names this skip, classified above). A
+                    # declined switch stops the loop instead of serving
+                    # the request on the unauthorised route.
+                    trigger = self._claim_skip_trigger(candidate.route)
+                    allowed, permission_reason = self._skip_fallback_permitted(
+                        alias, trigger, eligible[index + 1], needs_tools
+                    )
+                    if not allowed:
+                        skip_refusal = self._fallback_refusal(
+                            alias_name,
+                            permission_reason,
+                            [(c.route.provider, c.route.model) for c in eligible],
+                        )
+                        break
                     attribution.fallback_used = True
                     attribution.fallback_reason = (
                         f"the primary route was skipped: {circuit_reason}"
@@ -930,6 +1099,8 @@ class Router:
             stream=stream,
             profile_id=profile_id,
         )
+        if skip_refusal is not None:
+            raise skip_refusal
         if last_error is None:
             raise RoutingError(
                 f"no eligible route for alias '{alias_name}'",

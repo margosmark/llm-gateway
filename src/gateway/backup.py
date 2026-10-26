@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from gateway.config import Alias, GatewayConfig, Profile, ProviderState
+from gateway.config import FALLBACK_TRIGGERS, Alias, GatewayConfig, Profile, ProviderState
 from gateway.identifiers import ValidationError, validate_alias_name, validate_model_id, validate_profile_id
 from gateway.routes import validate_alias_routes
 
@@ -123,7 +123,7 @@ def import_config(payload: Any, current: GatewayConfig, registry: Any) -> Gatewa
                 raise ValidationError(f"{field} must be a list", field)
         if any(not isinstance(item, str) for field in ("fallback_triggers", "fallback_confirmed_providers", "fallback_error_classes") for item in value.get(field, [])):
             raise ValidationError("fallback settings must contain strings", "fallbacks")
-        if any(item not in ("exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown") for item in value.get("fallback_triggers", [])):
+        if any(item not in FALLBACK_TRIGGERS for item in value.get("fallback_triggers", [])):
             raise ValidationError("invalid fallback trigger", "fallback_triggers")
         if any(item not in ("auth", "policy", "malformed") for item in value.get("fallback_error_classes", [])):
             raise ValidationError("invalid fallback error class", "fallback_error_classes")

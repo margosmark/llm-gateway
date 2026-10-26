@@ -222,7 +222,10 @@ The gateway **never** switches provider:
 * after a request with tools or other side effects may have executed;
 * after ambiguous delivery;
 * for an authentication, authorisation, policy or malformed-request failure,
-  unless you have explicitly defined a safe policy for that class.
+  unless you have explicitly defined a safe policy for that class;
+* without **Authorize fallback**, a confirmed next provider, and an enabled
+  trigger — a *skipped* primary (cooldown, capability, or a route held by a
+  live recovery probe) is gated exactly like a failed one.
 
 When no eligible route remains, the gateway fails closed and names the
 routes it excluded and why. It never silently serves a different model.

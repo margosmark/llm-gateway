@@ -333,6 +333,34 @@ class CircuitStore:
                 return None
             return min(cap, max(1, math.ceil(min(expiries) - now)))
 
+    def skip_origin(self, provider: str, model: str) -> str | None:
+        """Why this route is held right now: ``"cooldown:<class>"``,
+        ``"probe"``, or ``None`` when nothing holds it.
+
+        The attribution companion to :meth:`preview`, for a router that
+        must decide *which* fallback trigger a skipped route satisfies:
+        an open window carries the failure class it was opened by (an
+        operator-placed circuit carries an empty one), while a live
+        recovery probe is an automatic event of its own. The lookup
+        mirrors ``_check``'s - provider-wide entry first, then the
+        route's own, window before probe - and, like ``preview``, it
+        mutates nothing except pruning and probe expiry.
+        """
+        with self._lock:
+            now = self._now()
+            self._prune(now)
+            for entry in (
+                self._entries.get(self._provider_key(provider)),
+                self._entries.get(self._route_key(provider, model)),
+            ):
+                if entry is None or not entry.armed:
+                    continue
+                if now < entry.until:
+                    return f"cooldown:{entry.error_class}"
+                if self._probe_is_live(entry, now):
+                    return "probe"
+            return None
+
     def details(self) -> dict[str, dict[str, Any]]:
         """Every circuit, with its reason and its state."""
         with self._lock:
