@@ -328,6 +328,22 @@ request failures also fail closed unless the owner explicitly configures a
 safe policy for that failure class. A plain HTTP 429 is rate limiting, not a
 confirmed allowance exhaustion.
 
+A trigger names *why* the owner permits a switch. The enabled vocabulary is
+`exhausted`, `rate_limited`, `upstream_unavailable`, `explicit_cooldown`,
+`route_ineligible` and `probe_contention`. The gate covers a **skipped**
+primary as well as a failed one: when the primary is excluded while routes
+are enumerated, or its invocation-boundary claim is refused, the switch to
+a later cross-provider route still needs the authorization, the confirmation
+of the next provider, and an enabled trigger. The skip itself contributes
+the trigger - a capability or configuration exclusion is `route_ineligible`;
+an automatic cooldown keeps the failure trigger that opened it; an
+operator-placed cooldown is `explicit_cooldown`; a route held by a live
+half-open recovery probe is `probe_contention`, its own class so a manual
+cooldown can never be reported as an automatic one. When the gate declines,
+the request is refused with `fallback not used: <reason>` and the ledger
+records it as served by nobody, without claiming a fallback. A phase-selected
+route is the primary for its phase, never a fallback, and needs none of this.
+
 The router only decides a fallback before it returns an upstream response. It
 does not retry a stream after the caller has begun receiving bytes.
 

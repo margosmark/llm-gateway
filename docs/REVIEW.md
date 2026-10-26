@@ -1919,3 +1919,48 @@ was 1,312,028 bytes).
 (6,000 distinct reasons → key count within the vocabulary with every event
 counted once; sidecar < 64 KiB under the same flood) plus the untouched
 rollup, cached-completeness and R26 suites.
+
+### R49 — Skip paths served a cross-provider fallback without the owner's authorization — **closed**
+
+**Severity: medium (policy / data-flow control bypass).** *(closed)*
+
+Security gate `t_01f5ce65` (finding S1): `_fallback_permitted` — the only
+place `fallback_authorized`, `fallback_confirmed_providers` and
+`fallback_triggers` were enforced — ran only on the AdapterError path. Two
+other paths set `fallback_used = True` and served a later, cross-provider
+route without consulting it: a primary excluded during enumeration
+(cooldown, capability, configuration) and the invocation-boundary claim
+refusal. With the default alias settings (fallbacks named, authorization
+off, no provider confirmed) every request during a primary cooldown was
+served by an unconfirmed provider, contradicting `config.py`'s own
+contract and this document's fallback policy. Reproduced byte-identically
+on base `main` `a2d1286d` (probe p6: 3/7 on both trees), i.e. pre-existing
+— not a wave-1.6r regression.
+
+**Fix (owner decision, 2026-10-25).** Every cross-provider switch away
+from a skipped primary passes the same gate as a failed attempt —
+authorization, confirmation of the next provider, and an enabled trigger —
+on both skip paths, and the skip itself contributes the trigger:
+`route_ineligible` (new) for capability/configuration exclusions,
+`explicit_cooldown` for operator-placed cooldowns, the cooldown's own
+recorded failure trigger for automatic ones (so existing owner
+configurations keep working), and `probe_contention` (new) for a route
+held by a live half-open recovery probe. The vocabulary is persisted
+(`FALLBACK_TRIGGERS`, backup validation), exposed through the owner API
+and console (both render from `state.fallback_triggers`), and documented
+in ARCHITECTURE and the RUNBOOK troubleshooting table. A declined switch
+is refused with the existing `fallback not used: <reason>` wording and
+recorded in the ledger as served by nobody — status 503, `error_class`
+`policy`, skips intact, `fallback_used=false` — without invoking either
+route. A phase-selected route remains the primary for its phase and is
+not gated.
+
+**Regression evidence:** security probe `p6_authorization.py` 7/7 on this
+tree (3/7 on both base and candidate before the fix);
+`tests/test_skipped_primary.py::SkipPathAuthorizationTests` pins each gate
+dimension refused and served on both skip paths, automatic-cooldown
+trigger inheritance, a cooldown opened by a trigger this alias disabled,
+the claim-branch gate (via a store rigged so only the invocation-boundary
+claim refuses, the one interleaving no test can reach otherwise), the
+recorded refusal outcome, and the owner API/save round-trip for the new
+triggers; full suite green (682 tests, 3 skipped).
