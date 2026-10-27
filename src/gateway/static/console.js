@@ -172,7 +172,7 @@
   // --- shell ------------------------------------------------------------
 
   var TABS = [
-    { id: "status", label: "Status" },
+    { id: "status", label: "Operate now" },
     { id: "providers", label: "Providers" },
     { id: "models", label: "Models & Routes" },
     { id: "profiles", label: "Profiles" },
@@ -234,9 +234,21 @@
 
   function renderStatus() {
     var frag = document.createDocumentFragment();
+    var aliases = Array.isArray(state.aliases) ? state.aliases.filter(function (alias) { return alias.enabled; }) : [];
+    var health = el("section", { class: "routing-health", "aria-labelledby": "routing-health-title" }, [
+      el("div", { class: "card" }, [
+        el("h2", { id: "routing-health-title", text: "Operate now · Routing health" }),
+        el("p", { class: "small muted", text: aliases.length ? "Read-only view of published aliases and their configured fallback policy." : "No published aliases yet. Configure and publish an alias to see routing health." }),
+        routingHealthSummary(aliases)
+      ])
+    ]);
+    frag.appendChild(health);
+    var details = el("details", { class: "status-details", open: !state.initialized }, [
+      el("summary", { text: "More status details · setup, providers, history and cost" })
+    ]);
 
     if (!state.initialized) {
-      frag.appendChild(el("section", {}, [
+      details.appendChild(el("section", {}, [
         el("div", { class: "card" }, [
           el("h2", { text: "Set up your gateway" }),
           el("p", {
@@ -247,13 +259,13 @@
         ])
       ]));
     } else {
-      frag.appendChild(el("section", {}, [
+      details.appendChild(el("section", {}, [
         el("div", { class: "card" }, [el("h2", { text: "Gateway status" }), renderChecklist()])
       ]));
     }
 
     var release = state.release || {};
-    frag.appendChild(el("section", {}, [
+    details.appendChild(el("section", {}, [
       el("div", { class: "card" }, [
         el("h2", { text: "Release identity" }),
         el("dl", { class: "kv" }, [
@@ -266,7 +278,7 @@
       ])
     ]));
 
-    frag.appendChild(el("section", {}, [
+    details.appendChild(el("section", {}, [
       el("div", { class: "card" }, [
         el("h2", { text: "Access mode" }),
         el("p", { class: "small", text: state.access_mode_description || "" }),
@@ -302,7 +314,7 @@
         })
       ]));
     });
-    frag.appendChild(el("section", {}, [providers]));
+    details.appendChild(el("section", {}, [providers]));
 
     var totals = state.totals || {};
     var ledger = state.ledger || [];
@@ -340,7 +352,7 @@
       table.appendChild(tbody);
       ledgerCard.appendChild(table);
     }
-    frag.appendChild(el("section", {}, [ledgerCard]));
+    details.appendChild(el("section", {}, [ledgerCard]));
 
     var costs = state.usage_costs || { window_hours: 24, alias: {}, provider: {}, model: {} };
     var analytics = state.analytics || {
@@ -403,8 +415,8 @@
         costsCard.appendChild(costTable);
       });
     }
-    frag.appendChild(el("section", {}, [costsCard]));
-    frag.appendChild(el("section", {}, [renderFallbackCard(analytics)]));
+    details.appendChild(el("section", {}, [costsCard]));
+    details.appendChild(el("section", {}, [renderFallbackCard(analytics)]));
 
     var limitsCard = el("div", { class: "card" }, [
       el("h2", { text: "Usage and limits" }),
@@ -438,9 +450,87 @@
       limitTable.appendChild(limitBody);
       limitsCard.appendChild(limitTable);
     }
-    frag.appendChild(el("section", {}, [limitsCard]));
+    details.appendChild(el("section", {}, [limitsCard]));
 
+    frag.appendChild(details);
     return frag;
+  }
+
+  var REQUIRED_TRIGGER_LABELS = {
+    exhausted: "Exhausted",
+    rate_limited: "Rate limited",
+    upstream_unavailable: "Upstream unavailable",
+    explicit_cooldown: "Explicit cooldown",
+    route_ineligible: "Route ineligible",
+    probe_contention: "Probe contention"
+  };
+
+  function routeHealthState(alias, providers, cooldowns, required) {
+    if (!alias || !alias.primary || !Array.isArray(alias.fallbacks) || !Array.isArray(alias.fallback_triggers)) return "Unknown";
+    if (alias.fallbacks.length === 0 || alias.fallback_authorized !== true) return "Policy gap";
+    var disabled = required.filter(function (trigger) { return alias.fallback_triggers.indexOf(trigger) === -1; });
+    if (disabled.length) return "Policy gap";
+    var routes = [alias.primary].concat(alias.fallbacks);
+    var providerStates = routes.map(function (route) { return providers[route.provider]; });
+    if (providerStates.some(function (provider) { return !provider || !provider.state || provider.state === "configured_untested"; })) return "Unknown";
+    var unavailable = providerStates.some(function (provider) {
+      return provider.state === "failed" || provider.state === "not_configured";
+    });
+    var cooling = Object.keys(cooldowns).some(function (key) {
+      var entry = cooldowns[key] || {};
+      if (entry.armed === false || entry.remaining_seconds <= 0 && entry.state !== "half_open") return false;
+      return routes.some(function (route) {
+        return route.provider === entry.provider && (entry.scope === "provider" || route.model === entry.model);
+      });
+    });
+    if (cooling) return "Cooldown";
+    if (unavailable) return "Degraded";
+    var unconfirmed = alias.fallbacks.some(function (route) {
+      return (alias.fallback_confirmed_providers || []).indexOf(route.provider) === -1;
+    });
+    if (unconfirmed) return "Policy gap";
+    return "Healthy";
+  }
+
+  function routingHealthSummary(aliases) {
+    var providers = {};
+    (state.providers || []).forEach(function (provider) { providers[provider.provider_id] = provider; });
+    var required = Array.isArray(state.fallback_triggers) ? state.fallback_triggers : [];
+    var cooldowns = state.cooldown_details || {};
+    var cards = aliases.map(function (alias) {
+      var fallbackRoutes = Array.isArray(alias.fallbacks) ? alias.fallbacks : [];
+      var stateText = routeHealthState(alias, providers, cooldowns, required);
+      var triggerList = el("ul", { class: "trigger-list", "aria-label": "Fallback trigger status" });
+      Object.keys(REQUIRED_TRIGGER_LABELS).forEach(function (key) {
+        var enabled = required.indexOf(key) !== -1 && (alias.fallback_triggers || []).indexOf(key) !== -1;
+        triggerList.appendChild(el("li", { text: REQUIRED_TRIGGER_LABELS[key] + ": " + (enabled ? "enabled" : "disabled") }));
+      });
+      var routeText = function (route) { return route ? providerLabel(route.provider) + " / " + route.model : "None configured"; };
+      var active = Object.keys(cooldowns).filter(function (key) {
+        var entry = cooldowns[key] || {};
+        if (entry.armed === false || (entry.remaining_seconds <= 0 && entry.state !== "half_open")) return false;
+        return [alias.primary].concat(fallbackRoutes).some(function (route) {
+          return route && route.provider === entry.provider && (entry.scope === "provider" || route.model === entry.model);
+        });
+      }).map(function (key) { return cooldowns[key]; });
+      var cooldownText = active.length ? active.map(function (entry) {
+        return entry.provider + "/" + (entry.model || "all models") + " · " + entry.state + " · " + entry.remaining_seconds + "s remaining";
+      }).join("; ") : "No active cooldown on this alias’s routes.";
+      var confirmed = (alias.fallback_confirmed_providers || []).filter(function (provider) { return fallbackRoutes.some(function (route) { return route.provider === provider; }); });
+      return el("article", { class: "route-health-card", "aria-label": alias.name + " routing health" }, [
+        el("h3", { text: alias.name + " · " + stateText }),
+        el("dl", { class: "health-routes" }, [
+          el("dt", { text: "Primary" }), el("dd", { text: routeText(alias.primary) }),
+          el("dt", { text: "Fallback 1" }), el("dd", { text: routeText(fallbackRoutes[0]) }),
+          el("dt", { text: "Fallback 2" }), el("dd", { text: routeText(fallbackRoutes[1]) })
+        ]),
+        el("p", { class: "small", text: "Fallback authorization: " + (alias.fallback_authorized === true ? "enabled" : "disabled") + " · Confirmed providers: " + (confirmed.length ? confirmed.map(providerLabel).join(", ") : "none") }),
+        triggerList,
+        el("p", { class: "small", text: "Applicable cooldown: " + cooldownText })
+      ]);
+    });
+    if (!aliases.length) return emptyState("No published aliases", "No published aliases yet. Configure and publish an alias to see routing health.");
+    return el("div", { class: "routing-health-list" }, cards);
   }
 
   function statBox(label, value) {

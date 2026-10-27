@@ -323,6 +323,52 @@ function fixtureState() {
 const rendered = helpers.renderStatusForTest(fixtureState());
 const renderedText = collectText(rendered).join("\n");
 
+check("Operate now renders exactly one read-only health card per published alias before collapsed details", function () {
+  const state = fixtureState();
+  state.aliases = [
+    { name: "coding", enabled: true, primary: { provider: "p", model: "main" }, fallbacks: [{ provider: "q", model: "backup" }], fallback_triggers: ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"], fallback_authorized: true, fallback_confirmed_providers: ["q"] },
+    { name: "hidden", enabled: false, primary: { provider: "p", model: "private" }, fallbacks: [], fallback_triggers: [], fallback_authorized: false, fallback_confirmed_providers: [] }
+  ];
+  state.fallback_triggers = ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"];
+  state.providers = [{ provider_id: "p", state: "connected" }, { provider_id: "q", state: "connected" }];
+  const root = helpers.renderStatusForTest(state);
+  const cards = findAll(root, function (node) { return node.tag === "article" && node.className === "route-health-card"; });
+  assert.strictEqual(cards.length, 1, "only published alias cards should render");
+  const text = collectText(root).join("\n");
+  assert(text.indexOf("Operate now · Routing health") < text.indexOf("More status details"));
+  assert(text.includes("Primary"));
+  assert(text.includes("Fallback 1"));
+  assert(text.includes("Fallback 2"));
+  assert(text.includes("Exhausted: enabled"));
+  assert(text.includes("Probe contention: enabled"));
+  assert(text.includes("Healthy"));
+  assert.strictEqual(findAll(root, function (node) { return node.tag === "details"; }).length, 1);
+});
+
+check("a policy gap is explicit and an orphan cooldown cannot affect an alias", function () {
+  const state = fixtureState();
+  state.aliases = [{ name: "coding", enabled: true, primary: { provider: "p", model: "main" }, fallbacks: [{ provider: "q", model: "backup" }], fallback_triggers: ["exhausted"], fallback_authorized: true, fallback_confirmed_providers: ["q"] }];
+  state.fallback_triggers = ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"];
+  state.providers = [{ provider_id: "p", state: "connected" }, { provider_id: "q", state: "connected" }];
+  state.cooldown_details = { "other/model": { provider: "other", model: "model", scope: "route", state: "open", armed: true, remaining_seconds: 30 } };
+  const text = collectText(helpers.renderStatusForTest(state)).join("\n");
+  assert(text.includes("coding · Policy gap"));
+  assert(text.includes("Rate limited: disabled"));
+  assert(text.includes("No active cooldown on this alias’s routes."));
+  assert(!text.includes("other/model"));
+});
+
+check("an applicable exact-route cooldown appears only for a configured route", function () {
+  const state = fixtureState();
+  state.aliases = [{ name: "coding", enabled: true, primary: { provider: "p", model: "main" }, fallbacks: [{ provider: "q", model: "backup" }], fallback_triggers: ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"], fallback_authorized: true, fallback_confirmed_providers: ["q"] }];
+  state.fallback_triggers = ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"];
+  state.providers = [{ provider_id: "p", state: "connected" }, { provider_id: "q", state: "connected" }];
+  state.cooldown_details = { "q/backup": { provider: "q", model: "backup", scope: "route", state: "open", armed: true, remaining_seconds: 77 } };
+  const text = collectText(helpers.renderStatusForTest(state)).join("\n");
+  assert(text.includes("coding · Cooldown"));
+  assert(text.includes("q/backup · open · 77s remaining"));
+});
+
 check("the fallback analytics card renders the rate and the standing metadata line", function () {
   assert(renderedText.includes("Fallback analytics"));
   assert(renderedText.includes("Metadata only. Prompts, responses, tokens and secrets are never stored."));
