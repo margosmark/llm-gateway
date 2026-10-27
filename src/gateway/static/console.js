@@ -203,7 +203,7 @@
     app.appendChild(header);
     app.appendChild(el("aside", { class: "card", role: "note", text: "Trusted LAN admin mode — any device that can reach this address can configure and use this gateway." }));
     (state && state.fallback_policy_warnings || []).forEach(function (warning) {
-      app.appendChild(el("aside", { class: "card warn", role: "alert", text: "Fallback policy gap: " + warning }));
+      app.appendChild(el("aside", { class: "card warn", role: "alert", text: "Policy gap: " + warning }));
     });
 
     var main = el("main", { id: "main" });
