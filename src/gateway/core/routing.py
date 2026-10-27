@@ -456,11 +456,14 @@ class Router:
 
         A primary that was never invoked - in cooldown, disabled, a
         capability mismatch, or held by another request's live recovery
-        probe - hands the request to a later, cross-provider route exactly
-        like a failed attempt does, so it passes exactly the same gate:
-        the four owner controls of :meth:`_switch_preflight` plus an
+        probe - hands the request to a later, cross-provider route, so it
+        passes the owner controls of :meth:`_switch_preflight` plus an
         enabled trigger. The skip contributes its own trigger instead of
-        an error class. Returns ``(allowed, reason)``.
+        an error class. ``side_effects_possible`` must reflect what an
+        upstream actually received: both callers compute it as the request
+        carrying tools **and** an attempt being recorded, because a route
+        skipped before invocation cannot have executed anything (R50).
+        Returns ``(allowed, reason)``.
         """
         allowed, reason = self._switch_preflight(alias, next_candidate, side_effects_possible)
         if not allowed:
@@ -829,8 +832,16 @@ class Router:
                     trigger = self._skip_trigger(
                         primary_candidate, vanished=TRIGGER_EXPLICIT_COOLDOWN
                     )
+                # Side effects are only possible when an upstream actually
+                # received this request. A primary skipped here was never
+                # invoked - no attempt is recorded - so a tool-bearing
+                # request may still take this switch. The owner controls
+                # and the skip's trigger above are unchanged (R50).
                 allowed, permission_reason = self._skip_fallback_permitted(
-                    alias, trigger, eligible[0], needs_tools
+                    alias,
+                    trigger,
+                    eligible[0],
+                    needs_tools and bool(attribution.attempts),
                 )
                 if not allowed:
                     refusal = self._fallback_refusal(
@@ -999,8 +1010,14 @@ class Router:
                     # declined switch stops the loop instead of serving
                     # the request on the unauthorised route.
                     trigger = self._claim_skip_trigger(candidate.route)
+                    # The claim refused before invocation, so unless an
+                    # earlier candidate was already invoked this request
+                    # never reached a provider (R50).
                     allowed, permission_reason = self._skip_fallback_permitted(
-                        alias, trigger, eligible[index + 1], needs_tools
+                        alias,
+                        trigger,
+                        eligible[index + 1],
+                        needs_tools and bool(attribution.attempts),
                     )
                     if not allowed:
                         skip_refusal = self._fallback_refusal(
