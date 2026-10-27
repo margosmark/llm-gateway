@@ -152,18 +152,22 @@ class SkipPathAuthorizationTests(unittest.TestCase):
                 fallback_triggers=triggers,
             )
 
-    def _send(self, *, image: bool = False):
+    def _send(self, *, image: bool = False, tools: bool = False):
         content: Any = "hi"
         if image:
             content = [
                 {"type": "text", "text": "x"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
             ]
-        return self.harness.request(
-            "POST",
-            "/v1/chat/completions",
-            body={"model": "coding", "messages": [{"role": "user", "content": content}]},
-        )
+        body: dict[str, Any] = {
+            "model": "coding",
+            "messages": [{"role": "user", "content": content}],
+        }
+        if tools:
+            body["tools"] = [
+                {"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}
+            ]
+        return self.harness.request("POST", "/v1/chat/completions", body=body)
 
     def _fallback_adapter(self) -> FakeAdapter:
         adapter = self.harness.registry.get("opencode_go")
@@ -386,6 +390,48 @@ class SkipPathAuthorizationTests(unittest.TestCase):
         self.assertTrue(event["fallback_used"])
         self.assertIn("primary route was skipped", event["fallback_reason"])
         self.assertIn("recovery probe", event["fallback_reason"])
+
+    # --- tool-bearing requests and a never-invoked primary (R50) ------------
+
+    def test_tools_do_not_block_a_switch_away_from_a_never_invoked_primary(self) -> None:
+        # The fail-closed tools control exists so a switch never repeats a
+        # request an upstream may have executed. A skipped primary was
+        # never invoked - no attempt is recorded - so the owner's own
+        # authorization, confirmation and trigger decide, and a
+        # tool-bearing agent request takes the configured fallback.
+        self._set_alias(
+            authorized=True, confirmed=["opencode_go"], triggers=["explicit_cooldown"]
+        )
+        self.harness.router.circuits.set(FAKE_PROVIDER, 300)
+        status, payload, _ = self._send(tools=True)
+        self.assertEqual(status, 200, payload)
+        event = self._latest_event()
+        self.assertTrue(event["fallback_used"])
+        self.assertEqual(event["serving_provider"], "opencode_go")
+        self.assertIn("primary route was skipped", event["fallback_reason"])
+        # The primary was never invoked: nothing could have executed.
+        self.assertEqual(self.harness.adapter.calls, [])
+
+    def test_tools_do_not_block_a_claim_refused_switch(self) -> None:
+        self._set_alias(
+            authorized=True, confirmed=["opencode_go"], triggers=["probe_contention"]
+        )
+        self._refuse_primary_claims()
+        status, payload, _ = self._send(tools=True)
+        self.assertEqual(status, 200, payload)
+        event = self._latest_event()
+        self.assertTrue(event["fallback_used"])
+        self.assertEqual(event["serving_provider"], "opencode_go")
+        self.assertEqual(self.harness.adapter.calls, [])
+
+    def test_tools_still_refuse_when_the_owner_gate_declines(self) -> None:
+        self._set_alias(authorized=False, confirmed=[], triggers=[])
+        self.harness.router.circuits.set(FAKE_PROVIDER, 300)
+        status, payload, _ = self._send(tools=True)
+        self._assert_refused(status, payload, contains="not authorised")
+        event = self._latest_event()
+        self.assertEqual(event["status"], 503)
+        self.assertFalse(event["fallback_used"])
 
     # --- the vocabulary reaches the owner surface --------------------------
 
