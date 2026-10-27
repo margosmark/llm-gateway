@@ -197,3 +197,26 @@ dl.kv dd { margin: 0; word-break: break-all; }
   dl.kv dt { margin-top: 8px; }
   .table-wrap { max-width: 100%; overflow-x: auto; }
 }
+
+
+/* Routing health is the primary, read-only status surface. */
+.routing-health-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 12px; }
+.route-health-card { min-width: 0; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+.route-health-card h3 { margin-top: 0; }
+.health-routes { display: grid; grid-template-columns: minmax(84px, 110px) minmax(0, 1fr); gap: 6px 10px; }
+.health-routes dt { color: var(--muted); }
+.health-routes dd { margin: 0; overflow-wrap: anywhere; }
+.trigger-list { display: flex; flex-wrap: wrap; gap: 6px 16px; list-style: none; margin: 10px 0; padding: 0; }
+.trigger-list li { border: 1px solid var(--line); border-radius: 4px; padding: 3px 7px; }
+.status-details > summary { cursor: pointer; font-weight: 600; padding: 12px 0; }
+.status-details > summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 640px) {
+  main { min-width: 0; }
+  .routing-health-list { grid-template-columns: minmax(0, 1fr); }
+  .health-routes { grid-template-columns: minmax(72px, 88px) minmax(0, 1fr); }
+  .trigger-list { gap: 6px; }
+  .trigger-list li { font-size: 13px; }
+  header.top { position: static; padding: 12px 14px; }
+  nav.tabs { max-width: 100%; }
+  table { display: block; max-width: 100%; overflow-x: auto; }
+}
