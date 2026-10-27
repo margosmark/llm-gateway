@@ -341,7 +341,12 @@ operator-placed cooldown is `explicit_cooldown`; a route held by a live
 half-open recovery probe is `probe_contention`, its own class so a manual
 cooldown can never be reported as an automatic one. When the gate declines,
 the request is refused with `fallback not used: <reason>` and the ledger
-records it as served by nobody, without claiming a fallback. A phase-selected
+records it as served by nobody, without claiming a fallback. The same bounded
+refusal reason is retained in `fallback_reason` even when `fallback_used` is
+false, so an owner can diagnose a policy refusal from the durable ledger.
+Owner state warns loudly when an authorized cross-provider fallback omits any
+trigger, and when a newly added trigger is enabled by no alias; the console
+renders these warnings as alerts. A phase-selected
 route is the primary for its phase, never a fallback, and needs none of this.
 
 The router only decides a fallback before it returns an upstream response. It

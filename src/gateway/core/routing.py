@@ -450,19 +450,27 @@ class Router:
         alias: Alias,
         trigger: str,
         next_candidate: Candidate,
-        side_effects_possible: bool,
     ) -> tuple[bool, str]:
         """Decide whether the next candidate may serve a **skipped** route.
 
         A primary that was never invoked - in cooldown, disabled, a
         capability mismatch, or held by another request's live recovery
-        probe - hands the request to a later, cross-provider route exactly
-        like a failed attempt does, so it passes exactly the same gate:
-        the four owner controls of :meth:`_switch_preflight` plus an
-        enabled trigger. The skip contributes its own trigger instead of
-        an error class. Returns ``(allowed, reason)``.
+        probe - hands the request to a later, cross-provider route, and
+        that switch passes the owner controls of
+        :meth:`_owner_switch_controls` plus an enabled trigger. The skip
+        contributes its own trigger instead of an error class.
+
+        The side-effects gate of :meth:`_switch_preflight` is
+        deliberately **not** applied here. That gate exists so a provider
+        that may already have executed a tool is never retried on another
+        route; every skip path runs before this request has reached any
+        provider, so no tool can have run and no side effect can repeat.
+        Applying it here refused every tool-bearing request for as long as
+        the primary sat in a cooldown, even with the fallback fully
+        authorised and its trigger enabled (R50). Returns
+        ``(allowed, reason)``.
         """
-        allowed, reason = self._switch_preflight(alias, next_candidate, side_effects_possible)
+        allowed, reason = self._owner_switch_controls(alias, next_candidate)
         if not allowed:
             return allowed, reason
         return self._trigger_permitted(alias, trigger)
@@ -473,9 +481,25 @@ class Router:
         next_candidate: Candidate,
         side_effects_possible: bool,
     ) -> tuple[bool, str]:
-        """The owner controls every switch shares, checked in fixed order."""
+        """The gate for a switch away from a route this request **tried**.
+
+        A failed attempt may have executed a tool, so a tool-bearing
+        request is never retried elsewhere; only then do the owner's
+        controls apply.
+        """
         if side_effects_possible:
             return False, "the request carried tools, so a provider switch could repeat a side effect"
+        return Router._owner_switch_controls(alias, next_candidate)
+
+    @staticmethod
+    def _owner_switch_controls(alias: Alias, next_candidate: Candidate) -> tuple[bool, str]:
+        """The owner controls every cross-provider switch shares, in fixed order.
+
+        Authorization and confirmation of the next provider. The
+        side-effects check lives on :meth:`_switch_preflight` for
+        attempted routes only, and the trigger check is separate on both
+        paths - a skipped route contributes its own trigger.
+        """
         if not alias.fallback_authorized:
             return False, "cross-provider fallback is not authorised for this alias"
         if next_candidate.route.provider not in alias.fallback_confirmed_providers:
@@ -830,9 +854,10 @@ class Router:
                         primary_candidate, vanished=TRIGGER_EXPLICIT_COOLDOWN
                     )
                 allowed, permission_reason = self._skip_fallback_permitted(
-                    alias, trigger, eligible[0], needs_tools
+                    alias, trigger, eligible[0]
                 )
                 if not allowed:
+                    attribution.fallback_reason = f"fallback refused: {permission_reason}"
                     refusal = self._fallback_refusal(
                         alias_name,
                         permission_reason,
@@ -1000,9 +1025,10 @@ class Router:
                     # the request on the unauthorised route.
                     trigger = self._claim_skip_trigger(candidate.route)
                     allowed, permission_reason = self._skip_fallback_permitted(
-                        alias, trigger, eligible[index + 1], needs_tools
+                        alias, trigger, eligible[index + 1]
                     )
                     if not allowed:
+                        attribution.fallback_reason = f"fallback refused: {permission_reason}"
                         skip_refusal = self._fallback_refusal(
                             alias_name,
                             permission_reason,
@@ -1094,7 +1120,11 @@ class Router:
             payload=payload,
             attribution=attribution,
             status=502 if last_error is not None else 503,
-            error_class=last_error.error_class if last_error is not None else "unknown",
+            error_class=(
+                last_error.error_class
+                if last_error is not None
+                else (ERROR_POLICY if skip_refusal is not None else "unknown")
+            ),
             latency_ms=int((time.monotonic() - started) * 1000),
             stream=stream,
             profile_id=profile_id,
