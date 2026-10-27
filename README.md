@@ -219,13 +219,16 @@ provider's cooldowns on demand.
 The gateway **never** switches provider:
 
 * after streamed output has started;
-* after a request with tools or other side effects may have executed;
+* after a request with tools or other side effects may have executed — a
+  *failed* attempt may have run it; a *skipped* primary never reached a
+  provider, so nothing could have executed and that switch is decided by
+  the gate below instead;
 * after ambiguous delivery;
 * for an authentication, authorisation, policy or malformed-request failure,
   unless you have explicitly defined a safe policy for that class;
 * without **Authorize fallback**, a confirmed next provider, and an enabled
   trigger — a *skipped* primary (cooldown, capability, or a route held by a
-  live recovery probe) is gated exactly like a failed one.
+  live recovery probe) passes that same gate before serving elsewhere.
 
 When no eligible route remains, the gateway fails closed and names the
 routes it excluded and why. It never silently serves a different model.
