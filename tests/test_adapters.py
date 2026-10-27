@@ -57,15 +57,18 @@ class SnapshotTests(unittest.TestCase):
     def test_the_snapshot_covers_every_live_id(self) -> None:
         snapshot = json.loads(_default_snapshot_path().read_text(encoding="utf-8"))
         models = snapshot["models"]
-        self.assertEqual(len(models), 37)
-        self.assertEqual(snapshot["model_count"], 37)
-        # The eight ids the provider serves but does not document.
+        # 38 live ids (observed 2026-10-25) plus two rows the provider has
+        # stopped serving, which stay in the catalogue as deprecated.
+        self.assertEqual(len(models), 40)
+        self.assertEqual(snapshot["model_count"], 40)
+        # The nine ids the provider serves but does not document.
         unknown = sorted(k for k, v in models.items() if not v["dialect"])
         self.assertEqual(
             unknown,
             [
                 "glm-5.1",
                 "grok-4.6",
+                "iceman-contributor-free",
                 "kimi-k2.6",
                 "minimax-m2.5",
                 "minimax-m2.7",
@@ -96,7 +99,12 @@ class SnapshotTests(unittest.TestCase):
         minimax = models["minimax-m3.1-flash"]
         self.assertEqual(minimax["context_window"], 1_000_000)
         self.assertEqual(minimax["reasoning_efforts"], ["low", "medium", "high", "xhigh", "max"])
-        self.assertEqual(minimax["context_source"], "https://platform.minimax.io/docs/guides/text-generation")
+        # MiniMax publishes no maximum output, so the 512,000-token one is
+        # transcribed from the OpenCode data page, which is what
+        # ``context_source`` therefore names for this row.
+        self.assertEqual(minimax["max_output_tokens"], 512_000)
+        self.assertEqual(minimax["context_source"],
+                         "https://opencode.ai/data/minimax/minimax-m3-1-flash")
 
     def test_the_snapshot_marks_the_free_models(self) -> None:
         snapshot = json.loads(_default_snapshot_path().read_text(encoding="utf-8"))

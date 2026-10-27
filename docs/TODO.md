@@ -188,8 +188,9 @@ Both silent drops break the bridge's own stated contract
 dialect cannot express the request, the request is refused."). They are
 filed as **R25** and **R26** in [`REVIEW.md`](REVIEW.md).
 
-The published data is thin and must stay honest: only **2 of 37** catalogue
-models publish reasoning levels (`gpt-5.6-luna`, `gpt-6-luna`), and the
+The published data is thin and must stay honest: only **3 of 40** catalogue
+models publish reasoning levels (`gpt-5.6-luna`, `gpt-6-luna`,
+`minimax-m3.1-flash`), and the
 gateway's own vocabulary (`core/capabilities.py:51`) contains `minimal` and
 `ultra`, which **no** catalogue model publishes.
 
@@ -223,14 +224,14 @@ R25/R26 are closed with regression evidence.
 
 ### T5 — The Anthropic Messages dialect, and a `/v1/messages` surface — `todo`
 
-**Why.** Five of the 37 catalogued models are served over Anthropic
+**Why.** Five of the 40 catalogued models are served over Anthropic
 Messages and are **permanently refused** by the router
 (`core/routing.py:301-306`): `claude-haiku-5-5`, `minimax-m3`,
 `qwen3.7-plus`, `qwen3.8-flash`, `qwen3.8-max`. The gateway exposes only
 `/v1/models`, `/v1/chat/completions` and `/v1/responses`
 (`http/app.py:120-122`), so there is no Anthropic-shaped surface either.
 
-That is a quarter of the published catalogue — including the most
+That is about an eighth of the live catalogue (5 of 38) — including the most
 recognisable model in it — sitting permanently outside the product.
 
 **Scope.** Two separable pieces; do the first before the second.
@@ -247,15 +248,23 @@ route that is actually selected.
 
 ### T6 — The Google v1beta dialect — `blocked`
 
-**Why.** One catalogued model, `gemini-4-argon-contributor`, is served over
-Google v1beta and is refused today. It is the only model in the catalogue
-whose retention class is **`training_permitted`**.
+**Why.** Two catalogued models are served over Google v1beta and are
+refused today: `gemini-4-argon` (live, transcribed 2026-10-25) and
+`gemini-4-argon-contributor` (no longer served; its row is deprecated).
+Three rows carry the retention class **`training_permitted`** —
+`gemini-4-argon-contributor` and the two `muse-spark-*-contributor` models —
+and the contributor row is the refused one with the weakest privacy
+posture.
 
 **Decision (owner, 2026-10-23): declined.** `gemini-4-argon-contributor`
 stays refused. One model does not justify a third conversion path, and it
 is the only `training_permitted` model — the weakest privacy posture in
 the catalogue. Do not implement a passthrough unless the owner reverses
 this decision explicitly; no worker may self-promote it back to todo.
+*(Count note added 2026-10-25: the 2026-10-25 transcription puts three
+rows in `training_permitted` — this one and both `muse-spark-*-contributor`
+models — and adds a second Google row, `gemini-4-argon`. The decision
+stands as written; the "only" above is the count as observed on 2026-10-23.)*
 
 ### T16 — A manual model entry must merge, not replace — `done`
 
