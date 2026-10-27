@@ -911,6 +911,35 @@ class GatewayApp:
                 }
             )
 
+        # Fail visibly when fallback policy contains silent coverage gaps.
+        # A confirmed cross-provider route can be reached after any of these
+        # triggers; if omitted, the router correctly refuses the switch, but
+        # the owner needs to know the missing checkbox before callers see 503s.
+        trigger_coverage_warnings: list[str] = []
+        globally_enabled = {
+            trigger for alias in config.aliases.values() for trigger in alias.fallback_triggers
+        }
+        for trigger in FALLBACK_TRIGGERS:
+            if trigger not in globally_enabled:
+                trigger_coverage_warnings.append(
+                    f"No alias enables the '{trigger}' fallback trigger; routes held by this condition will be refused."
+                )
+        for alias in config.aliases.values():
+            if not alias.fallbacks:
+                continue
+            cross_provider = any(
+                route.provider != alias.primary.provider
+                for route in alias.fallbacks
+                if alias.primary is not None
+            )
+            if not cross_provider or not alias.fallback_authorized:
+                continue
+            for trigger in FALLBACK_TRIGGERS:
+                if trigger not in alias.fallback_triggers:
+                    trigger_coverage_warnings.append(
+                        f"Alias '{alias.name}' confirms a cross-provider fallback but does not enable '{trigger}'; that skip/failure will be refused."
+                    )
+
         price_snapshot = published_prices()
         recent_ledger = self.ledger.recent(limit=25) if self.ledger else []
         usage_ledger = self.ledger.recent(limit=10_000) if self.ledger else []
@@ -956,6 +985,7 @@ class GatewayApp:
                 "release": self._release_identity() if self._release_identity else {},
                 "base_url": self.base_url,
                 "fallback_triggers": list(FALLBACK_TRIGGERS),
+                "fallback_policy_warnings": trigger_coverage_warnings,
                 "device_code": {
                     "prerequisite": PREREQUISITE,
                     "anti_phishing": ANTI_PHISHING,

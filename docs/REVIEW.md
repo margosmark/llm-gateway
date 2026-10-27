@@ -1963,42 +1963,28 @@ trigger inheritance, a cooldown opened by a trigger this alias disabled,
 the claim-branch gate (via a store rigged so only the invocation-boundary
 claim refuses, the one interleaving no test can reach otherwise), the
 recorded refusal outcome, and the owner API/save round-trip for the new
-triggers; full suite green (682 tests, 3 skipped).
+triggers; the reconciled merge-tree suite ran 709 tests, 3 skipped.
 
+### R50 — Tool-bearing requests were refused on skipped, never-invoked primaries — **closed**
 
-### R50 — The skip gate's tools control refused every tool-bearing client during a primary cooldown — **closed**
+**Severity: P1 (availability / policy misapplication).** The skip path reused the side-effect guard intended for attempted routes. While `chatgpt_codex` was held in an exhausted-cooldown loop, a live A/B probe on alias `pm` showed tool-bearing requests refused with 503 `fallback_not_permitted` while a plain request fell back to healthy `opencode_go`; ledger rows had `attempts: []`. The operator counted 635 policy 503 rows with empty attempts plus 62 `502 exhausted` rows (697 recorded failures, not distinct user intents). An independent retained-ledger probe saw 97 policy rows, all with empty attempts. The owner later established that missing trigger coverage contributed to the incident and restored intended alias configuration; there is no production evidence that the historical 635 requests carried tools, so those rows are not attributed to the code defect documented here. A separate in-process reproduction confirmed the additional defect: with authorization, provider confirmation, and the automatic cooldown trigger enabled, tools-only traffic was refused while identical no-tools traffic fell back.
 
-**Severity: medium (availability / policy misapplication).** *(closed)*
+**Fix.** Skip decisions use `_owner_switch_controls` (authorization and provider confirmation) plus the applicable skip trigger, without the attempted-route side-effects gate. That gate remains on `_switch_preflight` for attempted routes: it refuses when the request carries tools and an attempt was recorded (`needs_tools and bool(attribution.attempts)`), since an upstream may already have executed a tool. Skip call sites remain three-argument; no primary attempt or call occurs on the cooldown/claim-refusal path. Refused skip decisions persist the bounded reason in `fallback_reason` and keep `fallback_used=false`. Owner-console trigger-coverage warnings and the README/architecture/runbook distinctions are retained.
 
-Production evidence 2026-10-27: while `chatgpt_codex` was held in its
-exhausted-cooldown loop, every tool-bearing request — all Hermes agent
-sessions and kanban workers — was refused with 503 `fallback_not_permitted`
-("the request carried tools, so a provider switch could repeat a side
-effect") while a plain request in the same window fell back to the healthy
-`opencode_go` fallback (live A/B on alias `pm`: with tools 503 / without
-tools 200; ledger rows carried `attempts: []`). The owner had authorized
-the switch, confirmed `opencode_go`, and enabled every trigger the skip
-could contribute, yet `_switch_preflight`'s side-effect control —
-evaluated against `needs_tools` alone — declined all of it. That control
-exists so a switch never repeats a request an upstream may have executed;
-a **skipped** primary was never invoked (no attempt is recorded on the
-enumeration path by construction, and none at the claim-refusal branch),
-so the hazard cannot exist there. Fail-closed posture was preserved for
-real attempts while the configured resilience became a hard outage for
-agent clients.
+**Regression evidence.** `tests/test_skipped_primary.py::SkipPathAuthorizationTests` covers tool-bearing fallback after cooldown, enumeration and claim-refusal paths, refusal when authorization or the skip trigger is missing, zero primary attempts/calls, and refusal-reason persistence. `tests/test_end_to_end.py::test_tools_never_trigger_a_fallback` and attempted-route tests retain the cross-provider side-effect refusal. Full suite: 709 tests, 3 skipped.
 
-**Fix (owner decision, 2026-10-27).** Both skip call sites now compute
-`side_effects_possible` as *the request carries tools **and** an attempt is
-recorded* (`needs_tools and bool(attribution.attempts)`). Authorization,
-confirmation of the next provider, the skip's trigger, and the refusal
-wording are untouched; the AdapterError path is untouched — a failed
-attempt with tools still never falls back
-(`tests/test_end_to_end.py::test_tools_never_trigger_a_fallback`).
-ARCHITECTURE's blanket "Tool-bearing requests never fall back", the
-README's switch list, and the RUNBOOK troubleshooting row now state the
-failed-vs-skipped split.
+### R51 — New skip trigger vocabulary was unenabled in production aliases — **closed by owner configuration**
 
-**Regression evidence:** `tests/test_skipped_primary.py::SkipPathAuthorizationTests`
-— tools switch away from a never-invoked primary on both skip paths
-(enumeration cooldown and the rigged claim refusal) with nothing invoked,
-tools still refused when the owner gate declines; full suite green.
+PM's source-of-truth state probe found `route_ineligible` and `probe_contention` enabled on zero aliases, and one alias also lacked `explicit_cooldown` despite the Oct 25 owner ruling. These were configuration gaps, not justification to revert R49: the gate closes the R49 security bypass and is correct when the owner policy covers the selected skip trigger. PM applied the approved six-trigger list to all four aliases via the owner API and verified persistence and behavioral probes. The new config coverage warnings prevent a future vocabulary addition from silently creating a fleet-wide refusal condition. Historical 635 policy refusals are evidence for a production window as counted by PM; 97 were independently counted from the retained raw ledger at this worker's probe, and all those rows had empty attempts — no provider calls. Hundreds of successful fallback serves existed in the retained window; exact user-visible loss is the recorded 635 refusals plus 62 exhausted 502s (697 failed requests total), with no deduplication of retries/user intent implied.
+
+### R52 — Skip-policy refusal reason absent from durable ledger — **closed**
+
+A refused owner gate had a useful HTTP message but `fallback_reason=null` in the request row, so the durable ledger could not distinguish authorization, confirmation, trigger, or side-effect refusal without inspecting transient access logs. Store the same bounded refusal wording in `fallback_reason` on policy 503s; keep `fallback_used=false`. This is metadata only and contains neither request content nor secrets.
+
+### R53 — Owner-state phase routes did not round-trip through alias save — **closed**
+
+`GET /owner/api/state` encodes each phase route as `{phase, route:{provider,model}, effort}`, while `validate_phase_routing` originally consumed only the flat `{provider,model,effort}` shape used by saves. Accept both representations. The regression test GETs current state, resubmits its phase policy with an alias save, and verifies it persists.
+
+### R54 — LAN owner mutation authentication relies on reachability and Origin — **owner decision required**
+
+The owner API is intentionally exposed to trusted-LAN devices and validates the browser Origin, but it has no independent owner token. During the incident the owner confirmed Mark intentionally made the config changes. Whether to add token-based mutation authorization is a separate product/security-boundary decision; this task does not modify that contract.
