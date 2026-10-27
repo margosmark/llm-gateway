@@ -312,8 +312,10 @@ backstop for a process that exits without it.
 * **Anthropic** uses the native Messages dialect and a provider-scoped API-key credential file. Model capabilities and limits are not inferred; catalogue refresh and connection tests are explicit actions.
 * **OpenCode Go** discovers model IDs from its explicit catalogue endpoint.
   The checked-in `data/go_catalog.json` supplies the dated, published mapping
-  from model ID to wire dialect. An undocumented dialect is refused rather
-  than guessed.
+  from model ID to wire dialect, context and output windows, token prices,
+  monthly allowance and image verdict — each row naming the page it was
+  transcribed from and the date it was read. An undocumented dialect is
+  refused rather than guessed.
 
 Adding a provider requires an adapter, model-capability handling, safe error
 classification, registry registration, UI/state treatment, tests, and an
