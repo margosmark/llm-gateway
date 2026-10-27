@@ -31,7 +31,9 @@ class UsageCostTests(unittest.TestCase):
         )
         cost = calculate_cost(reported, "claude-haiku-5-5")
         self.assertAlmostEqual(cost["amount_usd"], 0.000225)
-        self.assertEqual(cost["source"], "https://opencode.ai/docs/go/")
+        # Prices are transcribed from the model's own data page, so the
+        # estimate names that page and the date it was read.
+        self.assertEqual(cost["source"], "https://opencode.ai/data/anthropic/claude-haiku-5-5")
         # The dated catalogue snapshot is refreshed, so the as-of date is read
         # from it rather than pinned to one snapshot's date.
         self.assertEqual(cost["observed_at"], published_prices()["claude-haiku-5-5"]["observed_at"])
@@ -43,8 +45,11 @@ class UsageCostTests(unittest.TestCase):
         self.assertEqual(stream_token_counters(chat, DIALECT_OPENAI_CHAT), expected)
         self.assertEqual(stream_token_counters(responses, DIALECT_OPENAI_RESPONSES), expected)
 
-    def test_unpriced_catalogue_model_is_unknown_not_zero(self):
-        cost = calculate_cost({"prompt_tokens": 10, "completion_tokens": 2, "cached_read_tokens": 0}, "beam-free")
+    def test_unpriced_catalogue_model_is_unknown_not_zero(self) -> None:
+        # ``omen-alpha``'s data page carries no payload at all, so it stays
+        # unpriced. ``beam-free`` used to be the example here; the 2026-10-25
+        # transcription gave it a list price, which is a price, not a bill.
+        cost = calculate_cost({"prompt_tokens": 10, "completion_tokens": 2}, "omen-alpha")
         self.assertIsNone(cost["amount_usd"])
         self.assertIsNone(cost["source"])
 
@@ -100,7 +105,7 @@ class UsageCostTests(unittest.TestCase):
         # for the rows the ring no longer holds.
         self.assertAlmostEqual(row["amount_usd"], 0.2)
         self.assertEqual(row["cost_reason"], None)
-        self.assertEqual(row["source"], "https://opencode.ai/docs/go/")
+        self.assertEqual(row["source"], "https://opencode.ai/data/anthropic/claude-haiku-5-5")
         self.assertTrue(result["coverage"]["incomplete"])
         self.assertEqual(result["coverage"]["source"], "bounded_recent_events")
 
@@ -125,15 +130,17 @@ class UsageCostTests(unittest.TestCase):
         self.assertEqual(result["coverage"]["requests_without_usage"], 1)
 
     def test_amount_is_null_exactly_when_no_published_price_exists(self):
+        # ``omen-alpha`` is the unpriced exemplar after the 2026-10-25
+        # transcription priced ``beam-free``; a published price is a price.
         events = [
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "a", "serving_provider": "opencode_go",
              "serving_model": "claude-haiku-5-5", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0}},
             {"timestamp": "2099-01-01T00:00:00Z", "requested_alias": "b", "serving_provider": "opencode_go",
-             "serving_model": "beam-free", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0}},
+             "serving_model": "omen-alpha", "token_counters": {"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 0}},
         ]
         result = aggregate_usage(events, window_hours=24)
         priced = result["model"]["claude-haiku-5-5"]
-        unpriced = result["model"]["beam-free"]
+        unpriced = result["model"]["omen-alpha"]
         self.assertIsNotNone(priced["amount_usd"])
         self.assertEqual(priced["cost_reason"], None)
         self.assertIsNone(unpriced["amount_usd"])
@@ -155,12 +162,12 @@ class UsageCostTests(unittest.TestCase):
         self.assertEqual(row["cost_reason"], "missing_cached_price")
         self.assertEqual(row["source"], "published")
 
-    def test_unknown_price_dominates_aggregate_instead_of_underreporting(self):
+    def test_unknown_price_dominates_aggregate_instead_of_underreporting(self) -> None:
         events = [{
-            "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "p",
-            "serving_model": "beam-free", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1, "cached_read_tokens": 0},
+            "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "opencode_go",
+            "serving_model": "omen-alpha", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1},
         }]
-        self.assertIsNone(aggregate_usage(events)["model"]["beam-free"]["amount_usd"])
+        self.assertIsNone(aggregate_usage(events)["model"]["omen-alpha"]["amount_usd"])
 
     def test_mixed_priced_and_unpriced_fallback_group_keeps_known_subtotal(self):
         events = [
@@ -177,7 +184,7 @@ class UsageCostTests(unittest.TestCase):
         self.assertEqual(alias["unknown_cost_input_tokens"], 500)
         self.assertEqual(alias["unknown_cost_output_tokens"], 100)
         self.assertTrue(alias["cost_incomplete"])
-        self.assertEqual(alias["source"], "https://opencode.ai/docs/go/")
+        self.assertEqual(alias["source"], "https://opencode.ai/data/anthropic/claude-haiku-5-5")
         self.assertEqual(result["provider"]["opencode_go"]["unknown_cost_requests"], 0)
         self.assertEqual(result["provider"]["chatgpt_codex"]["unknown_cost_requests"], 1)
 
@@ -197,7 +204,7 @@ class UsageCostTests(unittest.TestCase):
         self.assertEqual(row["unknown_cost_output_tokens"], 100)
         self.assertEqual(row["cost_reason"], "missing_cached_tokens")
         self.assertTrue(row["cost_incomplete"])
-        self.assertEqual(row["source"], "https://opencode.ai/docs/go/")
+        self.assertEqual(row["source"], "https://opencode.ai/data/anthropic/claude-haiku-5-5")
 
     def test_caller_provider_model_name_does_not_borrow_published_price(self):
         events = [{
@@ -216,14 +223,14 @@ class UsageCostTests(unittest.TestCase):
                                "cached_tokens_reported": True}, "claude-haiku-5-5")
         self.assertIsNone(cost["amount_usd"])
         self.assertEqual(cost["reason"], "missing_cached_tokens")
-        self.assertEqual(cost["source"], "https://opencode.ai/docs/go/")
+        self.assertEqual(cost["source"], "https://opencode.ai/data/anthropic/claude-haiku-5-5")
 
     def test_unpriced_only_group_has_zero_known_subtotal_but_unknown_coverage(self):
         events = [{
             "timestamp": "2099-01-01T00:00:00Z", "requested_alias": "alias", "serving_provider": "p",
-            "serving_model": "beam-free", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1, "cached_read_tokens": 0},
+            "serving_model": "omen-alpha", "token_counters": {"prompt_tokens": 1, "completion_tokens": 1, "cached_read_tokens": 0},
         }]
-        row = aggregate_usage(events, window_hours=24)["model"]["beam-free"]
+        row = aggregate_usage(events, window_hours=24)["model"]["omen-alpha"]
         self.assertIsNone(row["amount_usd"])
         self.assertTrue(row["cost_incomplete"])
         self.assertEqual(row["unknown_cost_requests"], 1)

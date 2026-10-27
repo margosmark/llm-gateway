@@ -18,8 +18,10 @@ provider accounts, credentials, device codes, or a live LAN listener. Use the
 adapter/client seams and synthetic values that cannot resemble production
 secrets.
 
-Regenerate the dated OpenCode Go catalogue only from the provider's published
-source, review the resulting diff, and record its observation date and source:
+Regenerate the dated OpenCode Go catalogue only from the sources it
+transcribes — the published endpoint/price/limit table, the live catalogue,
+and each model's own data page — review the resulting diff, and record each
+row's observation date and source URL:
 
 ```sh
 python3 scripts/build_go_catalog_snapshot.py
