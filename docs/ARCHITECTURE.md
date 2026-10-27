@@ -325,7 +325,10 @@ explicit credential-isolation review. It is not just a URL plus an API key.
 
 Fallback does not happen by default. A fallback requires an alias-level
 authorization, confirmation of the next provider, and an enabled trigger.
-Tool-bearing requests never fall back. Authentication, policy, and malformed
+A tool-bearing request never falls back from a route that **received** it —
+a failed attempt may have executed it. A skipped primary never reached a
+provider, so a skip is decided by the owner controls and the skip's trigger
+alone. Authentication, policy, and malformed
 request failures also fail closed unless the owner explicitly configures a
 safe policy for that failure class. A plain HTTP 429 is rate limiting, not a
 confirmed allowance exhaustion.
