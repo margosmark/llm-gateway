@@ -1964,3 +1964,41 @@ the claim-branch gate (via a store rigged so only the invocation-boundary
 claim refuses, the one interleaving no test can reach otherwise), the
 recorded refusal outcome, and the owner API/save round-trip for the new
 triggers; full suite green (682 tests, 3 skipped).
+
+
+### R50 — The skip gate's tools control refused every tool-bearing client during a primary cooldown — **closed**
+
+**Severity: medium (availability / policy misapplication).** *(closed)*
+
+Production evidence 2026-10-27: while `chatgpt_codex` was held in its
+exhausted-cooldown loop, every tool-bearing request — all Hermes agent
+sessions and kanban workers — was refused with 503 `fallback_not_permitted`
+("the request carried tools, so a provider switch could repeat a side
+effect") while a plain request in the same window fell back to the healthy
+`opencode_go` fallback (live A/B on alias `pm`: with tools 503 / without
+tools 200; ledger rows carried `attempts: []`). The owner had authorized
+the switch, confirmed `opencode_go`, and enabled every trigger the skip
+could contribute, yet `_switch_preflight`'s side-effect control —
+evaluated against `needs_tools` alone — declined all of it. That control
+exists so a switch never repeats a request an upstream may have executed;
+a **skipped** primary was never invoked (no attempt is recorded on the
+enumeration path by construction, and none at the claim-refusal branch),
+so the hazard cannot exist there. Fail-closed posture was preserved for
+real attempts while the configured resilience became a hard outage for
+agent clients.
+
+**Fix (owner decision, 2026-10-27).** Both skip call sites now compute
+`side_effects_possible` as *the request carries tools **and** an attempt is
+recorded* (`needs_tools and bool(attribution.attempts)`). Authorization,
+confirmation of the next provider, the skip's trigger, and the refusal
+wording are untouched; the AdapterError path is untouched — a failed
+attempt with tools still never falls back
+(`tests/test_end_to_end.py::test_tools_never_trigger_a_fallback`).
+ARCHITECTURE's blanket "Tool-bearing requests never fall back", the
+README's switch list, and the RUNBOOK troubleshooting row now state the
+failed-vs-skipped split.
+
+**Regression evidence:** `tests/test_skipped_primary.py::SkipPathAuthorizationTests`
+— tools switch away from a never-invoked primary on both skip paths
+(enumeration cooldown and the rigged claim refusal) with nothing invoked,
+tools still refused when the owner gate declines; full suite green.
