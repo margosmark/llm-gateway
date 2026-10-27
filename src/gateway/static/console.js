@@ -202,6 +202,9 @@
     }
     app.appendChild(header);
     app.appendChild(el("aside", { class: "card", role: "note", text: "Trusted LAN admin mode — any device that can reach this address can configure and use this gateway." }));
+    (state && state.fallback_policy_warnings || []).forEach(function (warning) {
+      app.appendChild(el("aside", { class: "card warn", role: "alert", text: "Policy gap: " + warning }));
+    });
 
     var main = el("main", { id: "main" });
     app.appendChild(main);
@@ -702,8 +705,8 @@
     if (event.phase) {
       parts.push("phase route: " + event.phase + (event.phase_source ? " (" + event.phase_source + ")" : ""));
     }
-    if (event.fallback_used && event.fallback_reason) {
-      parts.push("fallback: " + event.fallback_reason);
+    if (event.fallback_reason) {
+      parts.push(event.fallback_used ? "fallback: " + event.fallback_reason : event.fallback_reason);
     }
     (event.skipped || []).forEach(function (s) {
       var why = s.reason || "";

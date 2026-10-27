@@ -142,8 +142,13 @@ def validate_phase_routing(
                 )
             if not isinstance(value, dict):
                 raise ValidationError(f"the '{phase_key}' phase route must be an object", "phase_routing.routes")
+            # Owner-state serializes routes as {phase, route:{provider,model},
+            # effort}; accept both that round-trip shape and the original flat
+            # save shape for compatibility.
+            nested_route = value.get("route")
+            route_value: dict[str, Any] = nested_route if isinstance(nested_route, dict) else value
             ref = validate_route(
-                config, registry, value.get("provider"), value.get("model"),
+                config, registry, route_value.get("provider"), route_value.get("model"),
                 f"phase route '{phase_key}'",
             )
             effort = value.get("effort")
