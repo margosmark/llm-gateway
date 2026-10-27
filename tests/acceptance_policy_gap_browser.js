@@ -2,10 +2,21 @@
 // Real Chromium render against isolated server's bundled /owner/ and state API.
 // Invoked by acceptance_isolated_server.py; see that file for run requirements.
 const assert = require("node:assert/strict");
-const { chromium } = require("playwright");
-const base = process.argv[2];
-if (!base) throw new Error("base URL required");
-(async () => {
+
+const SAFE_URL_MESSAGE = "base URL must be http://localhost:<port> or http://127.0.0.1:<port>";
+function validateBaseUrl(input) {
+  // Match the raw authority, not merely URL.hostname: WHATWG URL canonicalizes
+  // shorthand/octal IPv4 and accepts userinfo, both of which are unsafe here.
+  if (typeof input !== "string") throw new Error(SAFE_URL_MESSAGE);
+  const match = /^http:\/\/(localhost|127\.0\.0\.1):([0-9]+)\/?$/.exec(input);
+  if (!match) throw new Error(SAFE_URL_MESSAGE);
+  const port = Number(match[2]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(SAFE_URL_MESSAGE);
+  return `http://${match[1]}:${port}`;
+}
+
+async function run(input, chromium) {
+  const base = validateBaseUrl(input); // MUST precede browser creation/navigation/fetch.
   const browser = await chromium.launch({executablePath: process.env.GATEWAY_CHROMIUM || "/usr/bin/chromium", args: ["--no-sandbox", "--disable-dev-shm-usage"]});
   try {
     const page = await browser.newPage();
@@ -43,4 +54,18 @@ if (!base) throw new Error("base URL required");
   } finally {
     await browser.close();
   }
-})().catch(error => { console.error(error); process.exitCode = 1; });
+}
+
+module.exports = {SAFE_URL_MESSAGE, validateBaseUrl, run};
+if (require.main === module) {
+  const input = process.argv[2];
+  try {
+    // Validate before importing or launching browser transport.
+    validateBaseUrl(input);
+  } catch {
+    console.error(SAFE_URL_MESSAGE);
+    process.exit(2);
+  }
+  const { chromium } = require("playwright");
+  run(input, chromium).catch(error => { console.error(error); process.exitCode = 1; });
+}
