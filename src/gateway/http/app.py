@@ -42,6 +42,7 @@ from gateway.ledger_persistence import ROLLUP_SCHEMA
 from gateway.statistics import aggregate_statistics
 from gateway.provider_health import provider_health
 from gateway.stores import atomic_write_json
+from gateway.capability_discovery import DiscoveryStore, preview_for
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
@@ -338,6 +339,7 @@ class GatewayApp:
         logger: RequestLogger | None = None,
     ) -> None:
         self.config = config
+        self.discovery = DiscoveryStore(config.path.parent / "capability_discovery.json")
         self.credentials = credentials
         self.router = router
         self.registry = registry
@@ -398,6 +400,10 @@ class GatewayApp:
             r.add(["POST"], prefix + "/api/backup/import", self.handle_backup_import)
             r.add(["POST"], prefix + "/api/preview", self.handle_preview)
 
+            r.add(["GET"], prefix + "/api/capabilities", self.handle_capability_read)
+            r.add(["POST"], prefix + "/api/capabilities/preview", self.handle_capability_preview)
+            r.add(["POST"], prefix + "/api/capabilities/run", self.handle_capability_run)
+            r.add(["POST"], prefix + "/api/capabilities/decision", self.handle_capability_decision)
             r.add(["POST"], prefix + "/api/provider", self.handle_provider_action)
             r.add(["POST"], prefix + "/api/model", self.handle_model_action)
             r.add(["POST"], prefix + "/api/alias", self.handle_alias_action)
@@ -1128,6 +1134,46 @@ class GatewayApp:
             {"step": 6, "title": "Test the alias", "done": published},
             {"step": 7, "title": "Use it from a LAN client", "done": published},
         ]
+
+    # --- capability discovery (opt-in, metadata-only) -------------------
+
+    def handle_capability_read(self, request: Request) -> Response:
+        provider_id = request.query_one("provider_id") or ""
+        model_id = request.query_one("model_id") or ""
+        return json_response(self.discovery.read(provider_id, model_id))
+
+    def handle_capability_preview(self, request: Request) -> Response:
+        denied = self._require_mutation(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = request.json()
+            provider_id, model_id, probes = payload["provider_id"], payload["model_id"], payload["probes"]
+            if not isinstance(provider_id, str) or not isinstance(model_id, str) or not isinstance(probes, list):
+                raise ValueError
+            config = self.config.snapshot()
+            provider = config.providers.get(provider_id)
+            if provider is None or model_id not in provider.models:
+                return json_response({"error": {"message": "Exact provider/model is not staged", "type": "unknown_model"}}, 404)
+            result = preview_for(provider_id, model_id, probes, config.revision)
+            return json_response(result, 200 if result["available"] else 422)
+        except (ValueError, TypeError, KeyError):
+            return json_response({"error": {"message": "Invalid capability preview request", "type": "invalid_request"}}, 400)
+
+    def handle_capability_run(self, request: Request) -> Response:
+        denied = self._require_mutation(request)
+        if denied is not None:
+            return denied
+        # Real provider transports intentionally remain disabled until a reviewed,
+        # bounded and priced adapter contract is registered. Never treat a client
+        # confirmation as permission to call arbitrary provider transports.
+        return json_response({"error": {"message": "No provider probe protocol is approved; no upstream request was sent", "type": "probe_unavailable"}}, 422)
+
+    def handle_capability_decision(self, request: Request) -> Response:
+        denied = self._require_mutation(request)
+        if denied is not None:
+            return denied
+        return json_response({"error": {"message": "No pending capability proposal", "type": "unknown_proposal"}}, 404)
 
     # --- provider actions ------------------------------------------------
 
