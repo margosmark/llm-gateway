@@ -2006,11 +2006,12 @@
     refresh();
     // The console is often left open. Refetch whenever the tab is shown
     // again, so the health cards never sit on a snapshot the owner cannot
-    // date. The refetch is skipped while a draft or a mutation is in
-    // flight, so an in-progress form is never wiped.
+    // The refetch is skipped while a mutation is in flight. Otherwise it
+    // always updates the backing snapshot without redrawing the current tab:
+    // a new-alias draft has no editingAlias, but still must survive refresh.
     function refetchIfIdle() {
       if (busy) return;
-      refresh({ preserveDraft: !!editingAlias });
+      refresh({ preserveDraft: true });
     }
     global.addEventListener("focus", refetchIfIdle);
     global.document.addEventListener("visibilitychange", function () {
