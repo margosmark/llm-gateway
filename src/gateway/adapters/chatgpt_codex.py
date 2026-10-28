@@ -91,12 +91,14 @@ MODELS_PATH = "/models"
 #: ``image_input`` under Supported features (read 2026-10-23).
 IMAGE_INPUT_SOURCES = {
     "gpt-5.6-terra": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+    "gpt-6.1-terra": "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
 }
 
 #: The date each source above was read. A claim without a date cannot be
 #: re-checked later, so the date travels with the URL.
 IMAGE_INPUT_OBSERVED_AT = {
     "gpt-5.6-terra": "2026-10-23",
+    "gpt-6.1-terra": "2026-10-28",
 }
 
 
