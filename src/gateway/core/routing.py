@@ -31,7 +31,10 @@ from typing import Any, Iterator
 
 from gateway.adapters.base import Adapter, AdapterError, CLASS_MESSAGES, ProviderRequest, ProviderResponse
 from gateway.bridge.model import ConversionError
-from gateway.bridge.requests import convert_request, payload_has_image_input
+# The anthropic bridge is a superset dispatcher: it handles every Anthropic
+# pair and delegates the OpenAI-family pairs to gateway.bridge.requests, so
+# routing needs only this one seam regardless of the route's dialect.
+from gateway.bridge.anthropic import convert_request, payload_has_image_input
 from gateway.circuits import CircuitStore
 from gateway.config import (
     ERROR_AUTH,
@@ -60,6 +63,7 @@ from gateway.core.capabilities import (
 )
 from gateway.observability import RequestEvent, utc_now_iso
 from gateway.session import derive_session
+from gateway.thinking import DISABLED_LEVEL, is_disabled_level
 
 #: Maps an error class onto the fallback trigger it satisfies. A route the
 #: upstream no longer serves satisfies the "upstream unavailable" trigger:
@@ -110,15 +114,22 @@ def _contains_builtin_tools(payload: dict[str, Any]) -> bool:
 
 
 def _requested_reasoning_effort(payload: dict[str, Any]) -> str | None:
-    """Return an enabled reasoning effort, never treating an explicit disable as a capability request."""
+    """Return the requested reasoning level, including the canonical disabled level.
+
+    Disabled is a preference like other reasoning levels. Keeping it in the
+    same per-route publication check ensures a model that does not publish
+    ``none`` gets a recorded degradation instead of a silent upstream control.
+    """
     effort = payload.get("reasoning_effort")
     reasoning = payload.get("reasoning")
     if isinstance(reasoning, dict):
         if reasoning.get("enabled") is False:
-            return None
+            return DISABLED_LEVEL
         if effort is None:
             effort = reasoning.get("effort")
-    return effort if isinstance(effort, str) and effort != "none" else None
+    if not isinstance(effort, str):
+        return None
+    return DISABLED_LEVEL if is_disabled_level(effort) else effort
 
 
 def _unsupported_payload_fields(adapter: Adapter | None) -> frozenset[str]:
@@ -378,13 +389,9 @@ class Router:
                 candidates.append(candidate)
                 continue
             if reasoning_effort and not capability.supports_effort(reasoning_effort):
-                # A reasoning effort is a *preference*, not a capability: the
-                # model can still answer without it. Excluding the route
-                # would fail the whole request when a usable route exists -
-                # and most OpenCode Go models publish no reasoning levels at
-                # all, so that would exclude every one of them from any
-                # reasoning request. The effort is dropped for this route
-                # and the substitution is recorded, never silent.
+                # A reasoning effort is a *preference*, not a capability. The
+                # route stays eligible and the per-route substitution is
+                # visible in attribution, including disabled `none`.
                 candidate.degraded_reason = (
                     f"the requested reasoning effort '{reasoning_effort}' is not published for "
                     "this model; it will be dropped for this route"
