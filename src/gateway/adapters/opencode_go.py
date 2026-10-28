@@ -60,8 +60,12 @@ CATALOG_PATH = "/v1/models"
 #: The provider routes and caches on this header.
 USER_AGENT = "personal-llm-gateway/2.0"
 
-#: Dialects the gateway can serve through its OpenAI-compatible surface.
-SERVABLE_DIALECTS = frozenset({DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_CHAT})
+#: Dialects the gateway can serve. The two OpenAI dialects and the Anthropic
+#: Messages dialect are all translated by the bridge
+#: (:mod:`gateway.bridge.anthropic`); Google v1beta is not.
+SERVABLE_DIALECTS = frozenset(
+    {DIALECT_OPENAI_RESPONSES, DIALECT_OPENAI_CHAT, DIALECT_ANTHROPIC_MESSAGES}
+)
 
 SNAPSHOT_FILENAME = "go_catalog.json"
 

@@ -228,7 +228,7 @@ class GatewayHarness:
         raw: bool = False,
     ):
         url = f"http://{self.authority}:{port or self.port}{path}"
-        data = json.dumps(body).encode("utf-8") if body is not None else None
+        data = body if isinstance(body, bytes) else (json.dumps(body).encode("utf-8") if body is not None else None)
         request = urllib.request.Request(url=url, data=data, method=method)
         request.add_header("Host", f"{self.authority}:{port or self.port}")
         if data is not None:
