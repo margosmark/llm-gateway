@@ -156,43 +156,61 @@ A request with no capable route fails closed at the gateway. Evidence:
 
 ### T4 — Normalised thinking levels — `done`
 
-**Landed.** One normalisation on the converted paths: both Chat Completions
-spellings parse into one canonical level and render per dialect
-(`reasoning_effort` for Chat Completions, `reasoning: {effort}` for
-Responses). A control the target cannot express - an Anthropic thinking
-budget, an unknown reasoning field, or two controls that contradict - is
+**Landed.** One canonical vocabulary in `src/gateway/thinking.py`,
+reconciled against what providers publish: it is OpenAI's published set
+(`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), every level
+cites its source, and `ultra` is **not** claimed because no provider this
+gateway serves or fronts publishes it. `reasoning_effort`,
+`reasoning.effort`, `reasoning.enabled` and the disabled level `none`
+parse to that one level on **both** source dialects, and render per
+dialect - `reasoning_effort` for Chat Completions, `reasoning: {effort}`
+for Responses. "Disabled" is rendered per dialect rather than dropped:
+Responses spells it `effort: "none"` (both published Responses models
+list it), Chat Completions omits the control (no served chat-dialect
+model publishes that level, and OpenAI documents HTTP 400 from a model
+that does not support it). A control the target cannot express - an
+Anthropic `thinking` budget, a Google `thinkingConfig`, a
+`reasoning.summary` on a Chat Completions target, an unknown reasoning
+field, a wrong-typed value, or two controls that contradict - is
 **refused**, never discarded. A level the selected model does not publish
-is still dropped for that route with the substitution recorded. A
-same-dialect payload the gateway does not model is forwarded untouched,
-because the provider owns its own dialect. Evidence:
-`tests/test_thinking_controls.py`, and R35 closes R25 in
+is still dropped for that route with the substitution recorded, and a
+level outside the gateway's vocabulary is forwarded, so the router - not
+the vocabulary - decides. A same-dialect payload the gateway does not
+model is forwarded untouched, because the provider owns its own dialect.
+Evidence: `tests/test_thinking_levels.py` (19 tests),
+`tests/test_thinking_controls.py`, and R25/R35 in
 [`REVIEW.md`](REVIEW.md). Rendering for the Anthropic and Google dialects
-stays with T5/T6, which are not served yet; until then those conversions
-are refused rather than converted.
+stays with T5/T6: T5 now serves the Anthropic rendering (T6 is declined),
+and a spelling those paths cannot render is refused on a converted path
+and forwarded on a same-dialect one.
 
 **Why.** "Thinking level" is the one control a client is most likely to
-send and the gateway is least able to honour. Today:
+send and the gateway is least able to honour. The state this item was
+written against:
 
-* only OpenAI's flat `reasoning_effort` string is understood
+* only OpenAI's flat `reasoning_effort` string was understood
   (`bridge/requests.py:265`);
-* the newer Chat Completions spelling `reasoning: {"effort": "high"}` is
+* the newer Chat Completions spelling `reasoning: {"effort": "high"}` was
   **silently dropped** on a converted path, even though
-  `_without_disabled_reasoning` reads that same field for the disabled case
-  (`bridge/requests.py:58`) — the two paths disagree about one field;
-* Anthropic's `thinking: {"type": "enabled", "budget_tokens": N}` is not
-  understood at all, and is **silently dropped** on a converted path;
-* Google's `thinkingConfig` / `thinkingLevel` are not understood.
+  `_without_disabled_reasoning` read that same field for the disabled case
+  (`bridge/requests.py:58`) — the two paths disagreed about one field;
+* Anthropic's `thinking: {"type": "enabled", "budget_tokens": N}` was not
+  understood at all, and was **silently dropped** on a converted path;
+* Google's `thinkingConfig` / `thinkingLevel` were not understood.
 
-Both silent drops break the bridge's own stated contract
+Both silent drops broke the bridge's own stated contract
 (`bridge/requests.py:7`: "Nothing is silently dropped. If the target
 dialect cannot express the request, the request is refused."). They are
-filed as **R25** and **R26** in [`REVIEW.md`](REVIEW.md).
+filed as **R25**, closed by **R35** and completed here, in
+[`REVIEW.md`](REVIEW.md). (An earlier draft of this item named R26
+alongside R25; R26 is the unrelated token-accounting finding.)
 
 The published data is thin and must stay honest: only **3 of 40** catalogue
 models publish reasoning levels (`gpt-5.6-luna`, `gpt-6-luna`,
-`minimax-m3.1-flash`), and the
-gateway's own vocabulary (`core/capabilities.py:51`) contains `minimal` and
-`ultra`, which **no** catalogue model publishes.
+`minimax-m3.1-flash`), and the gateway's own vocabulary used to contain
+`ultra`, which **no** catalogue model publishes — it has since been removed,
+and `minimal` was kept because OpenAI publishes it (`src/gateway/thinking.py`
+carries the citations).
 
 **Scope.**
 
@@ -220,9 +238,9 @@ gateway's own vocabulary (`core/capabilities.py:51`) contains `minimal` and
 **Done when.** A client may send any supported spelling and the upstream
 receives the dialect-correct form; a level the model does not publish is
 dropped *and recorded*; a dialect that cannot express it refuses; and
-R25/R26 are closed with regression evidence.
+R25 (closed through R35) carries the fix and its regression evidence.
 
-### T5 — The Anthropic Messages dialect, and a `/v1/messages` surface — `todo`
+### T5 — The Anthropic Messages dialect, and a `/v1/messages` surface — **done**
 
 **Why.** Five of the 40 catalogued models are served over Anthropic
 Messages and are **permanently refused** by the router
@@ -245,6 +263,21 @@ recognisable model in it — sitting permanently outside the product.
 **Note.** Retention differs: `claude-haiku-5-5` is 30 days; the other four
 are 0 days. The console's cross-provider fallback warning must reflect the
 route that is actually selected.
+
+**Done.** Piece 1 landed first: `src/gateway/bridge/anthropic.py` converts
+both directions on the buffered and the streamed path, the four additive
+anchors (`capabilities._CONVERTIBLE_FROM`, the `routing` import seam,
+`opencode_go.SERVABLE_DIALECTS`, the `app.py` response dispatch) make all
+five models servable over `/v1/chat/completions` and `/v1/responses`, and
+`src/gateway/http/messages.py` adds `POST /v1/messages` behind the same
+Host/Origin/forwarded-header policy as the OpenAI surfaces. A control the
+target dialect cannot express is refused or recorded as a substitution,
+never dropped silently. The console's fallback warning now names the
+retention class of each route actually selected (`retention-class-warning`
+anchor in `console.js`). Evidence: `tests/test_anthropic_bridge.py`,
+`tests/test_anthropic_surface.py`, `tests/test_messages_handler.py`,
+`tests/test_messages_routing_streaming.py`, and the retention checks in
+`tests/console_dom_test.js`.
 
 ### T6 — The Google v1beta dialect — `blocked`
 
@@ -1121,7 +1154,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T2 | Local usage and cost accounting | 1 | **done** |
 | T3 | Enforce the declared-but-unchecked capabilities | 1 | todo |
 | T4 | Normalised thinking levels | 1 | **done** |
-| T5 | Anthropic Messages dialect and `/v1/messages` | 1 | todo |
+| T5 | Anthropic Messages dialect and `/v1/messages` | 1 | **done** |
 | T6 | Google v1beta dialect | 1 | declined (owner, 2026-10-23) |
 | T7 | A durable request ledger | 2 | **done** |
 | T8 | Console backup, export and import | 2 | todo |
@@ -1166,8 +1199,9 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 4. **T3** — small, and it closes a class of opaque upstream failures.
 5. **T16** — a live defect: a documented owner action silently destroys
    published capability metadata.
-6. **T5** — the largest functional gain; it unlocks a quarter of the
-   catalogue and a second client shape.
+6. **T5** — done. A quarter of the catalogue and a second client shape
+   are served: Anthropic-dialect models bridge to the OpenAI surfaces and
+   `POST /v1/messages` is public on the LAN trust model.
 7. **T17** — done. 41ms is off every small response.
 8. **T7, T8, T9** — operational durability, then observability.
 9. **T10, T11, T12** — robustness and presentation.

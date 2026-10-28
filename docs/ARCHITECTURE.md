@@ -309,7 +309,7 @@ backstop for a process that exits without it.
   Its upstream is **streaming only** and expects the same request fields
   OpenAI's own client sends. See `CHATGPT_CODEX_CONTRACT.md` and
   `PROVIDER_CONTRACTS.md` for the exact contract.
-* **Anthropic** uses the native Messages dialect and a provider-scoped API-key credential file. Model capabilities and limits are not inferred; catalogue refresh and connection tests are explicit actions.
+* **Anthropic** uses the native Messages dialect and a provider-scoped API-key credential file. Model capabilities and limits are not inferred; catalogue refresh and connection tests are explicit actions. The Anthropic request/response bridge serves Anthropic-dialect models through Chat Completions and Responses, and `POST /v1/messages` converts in the reverse direction for OpenAI-dialect routes. Converted fields without a faithful representation are refused.
 * **OpenCode Go** discovers model IDs from its explicit catalogue endpoint.
   The checked-in `data/go_catalog.json` supplies the dated, published mapping
   from model ID to wire dialect, context and output windows, token prices,

@@ -195,7 +195,11 @@ Optional fallbacks
 
 Cross-provider fallback sends a prompt to a *different* provider, and
 therefore into a *different* data-retention regime. It is off by default.
-You must:
+The alias editor names the retention class of every route you select
+there — primary and each fallback — so a `claude-haiku-5-5` primary
+(30 days) with a `qwen3.8-flash` fallback (0 days) says which regime the
+prompt moves to before you save, and the request ledger records the class
+of the route that actually served. You must:
 
 1. authorise fallback for the alias, **and**
 2. confirm each fallback provider by name.
@@ -678,10 +682,13 @@ them.
   and any credit, discount or plan the owner holds, stay **Unknown**: the
   gateway has no tokenizer and no billing relationship with the provider, and
   a model with no published price reports **Unknown** rather than zero.
-* **No inbound `/v1/messages` endpoint.** Anthropic-shaped clients cannot
-  call the gateway natively; the inbound surface is planned as T5 in
-  `docs/TODO.md`. The native Anthropic provider is outbound only: it
-  serves Anthropic-dialect upstreams through the OpenAI-compatible API.
+* **Anthropic Messages is supported in both directions.** Anthropic-shaped
+  clients can use `POST /v1/messages`; Anthropic-dialect upstream models are
+  also bridged to the OpenAI Chat Completions and Responses surfaces. The
+  supported OpenCode Go Anthropic models include `claude-haiku-5-5`,
+  `minimax-m3`, `qwen3.7-plus`, `qwen3.8-flash`, and `qwen3.8-max`.
+  Cross-dialect controls that cannot be represented are refused rather than
+  silently discarded. Google v1beta remains unsupported.
 
 R1, R8 and R9 are closed in `docs/REVIEW.md`: device-code polling
 completes, ChatGPT model refresh follows the shared adapter contract,
