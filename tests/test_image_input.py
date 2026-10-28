@@ -1098,14 +1098,69 @@ class ImageEvidenceReconciliationTests(unittest.TestCase):
         self.assertNotIn("omen-alpha", evidence)
         self.assertNotIn("iceman-contributor-free", evidence)
 
-    def test_the_codex_hook_reports_gpt_5_6_terra_with_its_read_date(self) -> None:
+    def test_the_codex_hook_reports_terra_image_evidence_per_exact_slug(self) -> None:
         evidence = image_evidence(ChatGPTCodexAdapter(None))
-        terra = evidence["gpt-5.6-terra"]
-        self.assertTrue(terra.supports_image_input)
-        self.assertEqual(terra.source,
-                         "https://developers.openai.com/api/docs/models/gpt-5.6-terra")
-        self.assertEqual(terra.observed_at, "2026-10-23")
-        self.assertEqual(set(evidence), {"gpt-5.6-terra"})
+        self.assertEqual(set(evidence), {"gpt-5.6-terra", "gpt-6.1-terra"})
+        for model_id, source, observed_at in (
+            ("gpt-5.6-terra",
+             "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+             "2026-10-23"),
+            ("gpt-6.1-terra",
+             "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+             "2026-10-28"),
+        ):
+            with self.subTest(model=model_id):
+                self.assertTrue(evidence[model_id].supports_image_input)
+                self.assertEqual(evidence[model_id].source, source)
+                self.assertEqual(evidence[model_id].observed_at, observed_at)
+        self.assertNotIn("gpt-6-luna", evidence)
+        self.assertNotIn("gpt-6-terra", evidence)
+
+    def test_codex_image_evidence_survives_refresh_restart_and_is_slug_scoped(self) -> None:
+        store = self._stored_config()
+        with store.mutate() as config:
+            apply_image_evidence(config, {
+                "chatgpt_codex": image_evidence(ChatGPTCodexAdapter(None)),
+            })
+        with store.mutate() as config:
+            config.providers["chatgpt_codex"].models["gpt-6.1-terra"] = ModelEntry(
+                model_id="gpt-6.1-terra", enabled=True, source="discovered",
+                dialect=DIALECT_OPENAI_RESPONSES,
+            )
+            unrelated_before = config.providers["chatgpt_codex"].models["gpt-5.6-terra"].to_dict()
+            unrelated_sibling_before = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+
+        evidence = {"chatgpt_codex": image_evidence(ChatGPTCodexAdapter(None))}
+        with store.mutate() as config:
+            changed = apply_image_evidence(config, evidence)
+        self.assertEqual(changed, [("chatgpt_codex", "gpt-6.1-terra")])
+        self.assertTrue(store.snapshot().providers["chatgpt_codex"].models[
+            "gpt-6.1-terra"].supports_image_input)
+
+        # Refresh/reconciliation is idempotent and the persisted config can be
+        # reopened; unrelated rows retain every metadata field unchanged.
+        with store.mutate() as config:
+            self.assertEqual(apply_image_evidence(config, evidence), [])
+        rows = ConfigStore(store.path).snapshot().providers["chatgpt_codex"].models
+        self.assertTrue(rows["gpt-6.1-terra"].supports_image_input)
+        self.assertEqual(rows["gpt-5.6-terra"].to_dict(), unrelated_before)
+        self.assertEqual(rows["gpt-6-luna"].to_dict(), unrelated_sibling_before)
+        self.assertFalse(rows["gpt-6-luna"].supports_image_input)
+
+        # Unrelated catalog entries and unlisted siblings have no evidence.
+        self.assertNotIn("gpt-6-luna", evidence["chatgpt_codex"])
+        self.assertNotIn("gpt-6-terra", evidence["chatgpt_codex"])
+        self.assertEqual(rows["gpt-6.1-terra"].dialect, DIALECT_OPENAI_RESPONSES)
+        self.assertTrue(rows["gpt-6.1-terra"].enabled)
+        self.assertEqual(rows["gpt-6.1-terra"].source, "discovered")
+        self.assertFalse(rows["gpt-6.1-terra"].supports_streaming is False)
+        self.assertFalse(rows["gpt-6.1-terra"].supports_function_tools is False)
+        self.assertFalse(rows["gpt-6.1-terra"].supports_builtin_tools)
+        self.assertEqual(rows["gpt-6.1-terra"].retention_class, "unknown")
+        self.assertEqual(rows["gpt-6.1-terra"].limits_source, "unknown")
+        self.assertTrue(ConfigStore(store.path).snapshot().providers["chatgpt_codex"].models[
+            "gpt-6.1-terra"].supports_image_input)
+
 
     def test_reconciliation_promotes_exactly_the_evidenced_true_rows(self) -> None:
         store = self._stored_config()
