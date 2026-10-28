@@ -531,6 +531,58 @@ class ImageCapabilityGateTests(unittest.TestCase):
         # Surface-level malformed JSON refusals are still recorded by the
         # established request logger; no router/provider ledger entry is made.
 
+    def test_an_escaped_quote_cannot_smuggle_deep_nesting_past_the_preflight(self) -> None:
+        r"""SEC-F7b exploit A: a ``\"`` in a prompt must not desync the guard.
+
+        The pre-decode nesting preflight compared a single character against
+        a two-character literal, so its escape branch was dead code and one
+        ``\"`` inside any JSON string flipped guard/parser parity. The deep
+        ``tool_result`` chain behind such a prompt then went uncounted: the
+        guard stayed quiet, depth 5000 decoded and was answered with a
+        non-400, and depth 10000 blew CPython's recursion inside the decode
+        - RecursionError is a RuntimeError, it escapes the ValueError
+        handlers and surfaces as a 500 gateway_error with the traceback on
+        stderr. The scanner now tracks escapes, so both depths are refused
+        up front on both surfaces, before any adapter is called.
+        """
+        adapter, harness = self._alias(image_capable=True)
+        unit = '{"type":"tool_result","tool_use_id":"t1","content":['
+        for depth in (5000, 10000):
+            body = (
+                '{"model":"sec-alias","max_tokens":32,"messages":['
+                '{"role":"user","content":"say \\" hi"},'
+                '{"role":"user","content":[' + unit * depth
+                + '{"type":"text","text":"bottom"}' + ']}' * depth
+                + ']}]}'
+            ).encode("utf-8")
+            for path in ("/v1/messages", "/v1/chat/completions"):
+                with self.subTest(depth=depth, path=path):
+                    status, payload, _ = harness.request("POST", path, body=body)
+                    self.assertEqual(status, 400, payload)
+                    self.assertEqual(payload["error"]["type"], "malformed_request")
+                    self.assertEqual(adapter.calls, [])
+
+    def test_a_bracket_blob_behind_an_escaped_quote_is_still_served(self) -> None:
+        r"""SEC-F7b exploit B: brackets inside a string are never structural.
+
+        A prompt that embeds an escaped quote plus a bracket blob - a code
+        snippet or escaped JSON blob, exactly what callers put in prompts -
+        is valid JSON that plain ``json.loads`` accepts. The string-aware
+        preflight must not count those brackets: when the dead escape branch
+        let the ``\"`` close the scanner's string early, every such prompt
+        was refused with a 400 where the identical body without the
+        backslash was served.
+        """
+        adapter, harness = self._alias(image_capable=True)
+        content = 'say " ' + "[" * 3500
+        body = json.dumps(_messages_body(content)).encode("utf-8")
+        for path in ("/v1/messages", "/v1/chat/completions"):
+            with self.subTest(path=path):
+                adapter.calls.clear()
+                status, payload, _ = harness.request("POST", path, body=body)
+                self.assertEqual(status, 200, payload)
+                self.assertEqual(len(adapter.calls), 1)
+
 
 class SilentDropTests(unittest.TestCase):
     """Blocks the surface accepts must not vanish inside the bridge."""
