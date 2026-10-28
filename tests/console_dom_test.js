@@ -396,14 +396,56 @@ check("stale-beyond-threshold data never claims Healthy", function () {
   assert(/old — showing the last known state/.test(text), "the stale card must carry the age");
 });
 
+check("unavailable refresh never presents stale cached health as Healthy", function () {
+  const text = collectText(helpers.renderStatusForTest(healthyAliasState(), undefined, Date.now(), true)).join("\n");
+  assert(text.includes("coding · Stale"));
+  assert(!text.includes("coding · Healthy"));
+  assert(text.includes("refresh unavailable"));
+});
+
+check("no successful state fetch is unavailable, not fresh or Healthy", function () {
+  const text = collectText(helpers.renderStatusForTest(healthyAliasState(), undefined, null)).join("\n");
+  assert(text.includes("coding · Stale"));
+  assert(!text.includes("coding · Healthy"));
+  assert(text.includes("routing health is unavailable"));
+});
+
+check("failed focus refresh preserves the editor and marks health unavailable", function () {
+  assert(source.includes("if (options.preserveDraft && state)"));
+  assert(source.includes("refreshUnavailable = true;"));
+  assert(source.includes("tickFreshness();\n        toast(\"Routing health refresh unavailable:"));
+});
+
+check("successful focus refresh updates health without redrawing the alias editor", function () {
+  const refresh = source.slice(source.indexOf("function refresh(options)"), source.indexOf("// The DOM helper is exported"));
+  assert(refresh.includes("existingHealth.replaceWith(updatedHealth)"));
+  assert(refresh.includes("if (options.preserveDraft)"));
+  assert(refresh.includes("draw();"), "non-draft refreshes still redraw the console");
+});
+
+check("focus refreshes are requested during editing without replacing the draft", function () {
+  assert(source.includes("refresh({ preserveDraft: !!editingAlias });"));
+  assert(!source.includes("if (busy || editingAlias) return;"));
+});
+
+check("freshness ticker runs independently of editing and mutations", function () {
+  assert(source.includes("global.setInterval(function () {\n      // Freshness is independent of editing and mutations"));
+  assert(source.includes("var stale = refreshUnavailable || ageMs == null || ageMs > STALE_AFTER_MS;"));
+});
+
 check("the console refetches when the tab regains focus and records its fetch time", function () {
   assert(typeof helpers.STALE_AFTER_MS === "number" && helpers.STALE_AFTER_MS > 0);
   assert(source.includes("lastFetchAt = Date.now();"), "a successful /api/state fetch must be timestamped");
   assert(source.includes('global.addEventListener("focus", refetchIfIdle)'));
   assert(source.includes('"visibilitychange"'));
   assert(source.includes('visibilityState === "visible"'));
-  assert(source.includes("if (busy || editingAlias) return;"),
-    "the refetch must never wipe an in-progress draft");
+  assert(source.includes("if (busy) return;"));
+  assert(source.includes("refresh({ preserveDraft: !!editingAlias });"),
+    "focus refresh updates state without replacing an in-progress draft");
+  assert(source.includes("existingHealth.replaceWith(updatedHealth)"),
+    "only routing health is refreshed while preserving the editor and disclosure DOM");
+  assert(source.includes("global.setInterval(function () {\n      // Freshness is independent of editing and mutations"),
+    "the independent ticker must continue during editing and mutations");
 });
 
 check("missing fallback_triggers renders Unknown, never healthy-from-empty", function () {
@@ -628,6 +670,114 @@ check("the analytics payload is metadata only", function () {
   assert(!renderedText.includes("req_"));
   assert(!/\bsk-[A-Za-z0-9_\-]{16,}/.test(renderedText));
   assert(!renderedText.includes("messages"));
+});
+
+// --- the cross-provider fallback warning names the selected routes' retention
+
+const retentionSource = source.slice(
+  source.indexOf("var RETENTION_WORDS ="),
+  source.indexOf("function renderAliasEditor()")
+);
+const retention = new Function(
+  retentionSource +
+    "; return { RETENTION_WORDS: RETENTION_WORDS, modelRetentionClass: modelRetentionClass, retentionWarningText: retentionWarningText };"
+)();
+
+// The catalogue is the authority for the classes; the test asserts against
+// what it actually publishes rather than a copy of it.
+const catalog = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "..", "data", "go_catalog.json"), "utf8")
+);
+const ANTHROPIC_MODELS = [
+  "claude-haiku-5-5",
+  "minimax-m3",
+  "qwen3.7-plus",
+  "qwen3.8-flash",
+  "qwen3.8-max",
+];
+const catalogState = {
+  providers: [
+    {
+      provider_id: "opencode_go",
+      models: ANTHROPIC_MODELS.map((id) => ({
+        model_id: id,
+        retention_class: catalog.models[id].retention_class,
+      })),
+    },
+  ],
+};
+const route = (role, model) => ({
+  role: role,
+  provider: "opencode_go",
+  model: model,
+  provider_label: "OpenCode Go",
+});
+
+check("the warning names the retention class of each route actually selected", function () {
+  const text = retention.retentionWarningText(catalogState, [
+    route("primary", "claude-haiku-5-5"),
+    route("fallback 1", "qwen3.8-flash"),
+  ]);
+  assert(text.includes("primary claude-haiku-5-5 (OpenCode Go) = 30_days"));
+  assert(text.includes("fallback 1 qwen3.8-flash (OpenCode Go) = 0_days"));
+  assert(text.includes("These classes differ"));
+  assert(text.includes("30-day retention (abuse monitoring)"));
+  assert(text.includes("0-day retention"));
+  assert(text.includes("actually served"));
+});
+
+check("the differing classes are the ones the catalogue publishes", function () {
+  // claude-haiku-5-5 is 30 days; the other four Anthropic-dialect models
+  // are 0 days - the two classes must both be visible in the warning.
+  const classes = ANTHROPIC_MODELS.map((id) =>
+    retention.modelRetentionClass(catalogState, "opencode_go", id)
+  );
+  assert.deepStrictEqual(classes, [
+    catalog.models["claude-haiku-5-5"].retention_class,
+    catalog.models["minimax-m3"].retention_class,
+    catalog.models["qwen3.7-plus"].retention_class,
+    catalog.models["qwen3.8-flash"].retention_class,
+    catalog.models["qwen3.8-max"].retention_class,
+  ]);
+  assert.strictEqual(classes[0], "30_days");
+  assert.deepStrictEqual(classes.slice(1), ["0_days", "0_days", "0_days", "0_days"]);
+  const mixed = retention.retentionWarningText(catalogState, [
+    route("primary", "claude-haiku-5-5"),
+    route("fallback 1", "minimax-m3"),
+  ]);
+  assert(mixed.includes("These classes differ"));
+});
+
+check("two routes of the same class do not claim the regime changes", function () {
+  const text = retention.retentionWarningText(catalogState, [
+    route("primary", "qwen3.8-flash"),
+    route("fallback 1", "qwen3.8-max"),
+  ]);
+  assert(text.includes("primary qwen3.8-flash (OpenCode Go) = 0_days"));
+  assert(text.includes("fallback 1 qwen3.8-max (OpenCode Go) = 0_days"));
+  assert(!text.includes("These classes differ"));
+});
+
+check("an unconfigured model reads unknown, never a guess from the provider", function () {
+  assert.strictEqual(retention.modelRetentionClass(catalogState, "opencode_go", "no-such-model"), "unknown");
+  assert.strictEqual(retention.modelRetentionClass(catalogState, "no_such_provider", "qwen3.8-max"), "unknown");
+  const text = retention.retentionWarningText(catalogState, [
+    route("primary", "no-such-model"),
+    route("fallback 1", "qwen3.8-flash"),
+  ]);
+  assert(text.includes("primary no-such-model (OpenCode Go) = unknown"));
+  assert(text.includes("These classes differ"));
+});
+
+check("the fallback warning keeps its generic sentence and adds the classes", function () {
+  // The generic cross-provider sentence is untouched; the per-route line is
+  // appended under it and is recomputed from the editor's own selections.
+  assert(source.includes("It sends a prompt to a different provider, and therefore to a different data-retention regime."));
+  assert(source.includes('ANCHOR t_fd37033b "retention-class-warning"'));
+  assert(source.includes('retentionSpan.textContent = retentionWarningText(state, selectedRoutes());'));
+  assert(source.includes('card.addEventListener("change", renderRetentionWarning);'));
+  assert(source.includes("    renderRetentionWarning();"));
+  assert(source.includes('role: "primary"'));
 });
 
 if (failures.length) {

@@ -174,12 +174,19 @@ class OpenCodeGoAdapterTests(unittest.TestCase):
             adapter.endpoint_for("some-model-that-was-never-published")
         self.assertIn("no published endpoint", ctx.exception.message)
 
-    def test_a_non_openai_dialect_is_refused_rather_than_guessed(self) -> None:
+    def test_the_anthropic_dialect_is_now_servable(self) -> None:
+        # The bridge translates Anthropic Messages, so an Anthropic-dialect
+        # model is admitted and routed to its own endpoint rather than
+        # refused as untranslated (T5).
         adapter = self._adapter()
         self.assertEqual(adapter.endpoint_for("claude-haiku-5-5")[0], DIALECT_ANTHROPIC_MESSAGES)
-        with self.assertRaises(AdapterError) as ctx:
-            adapter.invoke(ProviderRequest(model="claude-haiku-5-5", payload={}))
-        self.assertIn("does not translate", ctx.exception.message)
+        response = adapter.invoke(ProviderRequest(model="claude-haiku-5-5", payload={}, dialect=DIALECT_ANTHROPIC_MESSAGES))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.dialect, DIALECT_ANTHROPIC_MESSAGES)
+        self.assertEqual(
+            adapter._client.requests[0]["url"],
+            "https://opencode.ai/inference/go/anthropic/v1/messages",
+        )
 
     def test_the_google_dialect_is_refused_rather_than_guessed(self) -> None:
         adapter = self._adapter()
