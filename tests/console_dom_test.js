@@ -423,9 +423,14 @@ check("successful focus refresh updates health without redrawing the alias edito
   assert(refresh.includes("draw();"), "non-draft refreshes still redraw the console");
 });
 
-check("focus refreshes are requested during editing without replacing the draft", function () {
-  assert(source.includes("refresh({ preserveDraft: !!editingAlias });"));
-  assert(!source.includes("if (busy || editingAlias) return;"));
+check("focus refresh preserves new-alias drafts, previews, and open disclosures", function () {
+  assert(source.includes("refresh({ preserveDraft: true });"),
+    "refresh must preserve current UI even when a new alias has no editingAlias");
+  const refresh = source.slice(source.indexOf("function refresh(options)"), source.indexOf("// The DOM helper is exported"));
+  assert(refresh.includes("existingHealth.replaceWith(updatedHealth)"),
+    "refresh may replace only health content, not editor or disclosure DOM");
+  assert(refresh.includes("if (options.preserveDraft && state)"),
+    "failed refresh must leave current editor and preview intact");
 });
 
 check("freshness ticker runs independently of editing and mutations", function () {
@@ -440,7 +445,7 @@ check("the console refetches when the tab regains focus and records its fetch ti
   assert(source.includes('"visibilitychange"'));
   assert(source.includes('visibilityState === "visible"'));
   assert(source.includes("if (busy) return;"));
-  assert(source.includes("refresh({ preserveDraft: !!editingAlias });"),
+  assert(source.includes("refresh({ preserveDraft: true });"),
     "focus refresh updates state without replacing an in-progress draft");
   assert(source.includes("existingHealth.replaceWith(updatedHealth)"),
     "only routing health is refreshed while preserving the editor and disclosure DOM");
