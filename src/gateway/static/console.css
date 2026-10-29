@@ -114,6 +114,18 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 500; font-size: 13px; }
 td.actions { white-space: nowrap; text-align: right; }
+.capability-panel { min-width: 560px; white-space: normal; padding: 8px; }
+.capability-panel label { display: inline-flex; align-items: center; gap: 6px; margin: 4px 12px 8px 0; }
+.capability-panel .capability-field { display: flex; align-items: flex-start; }
+.capability-panel .capability-field span { margin: 0; color: var(--fg); }
+.capability-panel button { margin: 4px 8px 4px 0; }
+.capability-detail-row td { background: var(--panel-2); }
+.capability-preview, .capability-evidence { overflow-wrap: anywhere; }
+.capability-preview .notice { white-space: normal; }
+
+@media (max-width: 640px) {
+  .capability-panel { min-width: 0; }
+}
 
 .pill {
   display: inline-block;

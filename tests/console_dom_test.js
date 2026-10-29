@@ -135,6 +135,47 @@ check("empty states are conditional on model and alias collections", function ()
   assert(source.includes("This page does not contact providers automatically."));
 });
 
+check("capability discovery is per exact model and opt-in", function () {
+  assert(source.includes('text: "Discover capabilities"'));
+  assert(source.includes('var readUrl = BASE + "/api/capabilities?provider_id="'));
+  assert(source.includes('text: "Preview selected probes"'));
+  assert(source.includes('text: "Run selected probes"'));
+  assert(source.includes('No probes run on page load or catalogue refresh.'));
+  assert(source.includes('provider.state !== "connected"'));
+});
+
+check("capability preview refuses unknown prices honestly and never runs unavailable probes", function () {
+  assert(source.includes('unavailable.reason + " Price: Unknown. No provider request has been sent."'));
+  assert(source.includes('"Unavailable; Unknown is not false. No probe was executed."'));
+  assert(source.includes('if (preview.available)'));
+  assert(source.includes('Price estimates are not guaranteed billing caps.'));
+  assert(source.includes('Price estimates are not guaranteed billing caps.'));
+});
+
+check("metadata decisions require selected fields, an explicit confirmation, and CAS; no fields preselected", function () {
+  assert(source.includes('check.checked = false;'));
+  assert(source.includes('text: "Approve selected changes"'));
+  assert(source.includes('text: "Reject selected changes"'));
+  assert(source.includes('global.confirm("Explicitly " + value'));
+  assert(source.includes('expected_revision: expectedRevision'));
+  assert(source.includes('expected_fingerprint: fingerprint'));
+  assert(source.includes('refresh and review a new diff.'));
+});
+
+check("capability evidence and proposal text render through text nodes, not HTML", function () {
+  const panel = source.slice(source.indexOf("function renderCapabilityPanel"), source.indexOf("function renderModels()"));
+  assert(panel.includes('text: result.capability + ": " + result.status'));
+  assert(panel.includes('text: field.field + ": "'));
+  assert(!panel.includes("innerHTML"));
+  assert(panel.includes("Routing impact unknown; no automatic policy change"));
+});
+
+check("trusted-LAN boundary and non-guarantee are explicit in discovery UI", function () {
+  assert(source.includes("Any device that can reach this trusted-LAN console is an administrator; there is no individual owner login."));
+  assert(source.includes("Probe results are evidence, not guarantees."));
+  assert(source.includes("Unknown is not false."));
+});
+
 check("empty states and model table remain mobile-contained", function () {
   const css = fs.readFileSync(path.join(__dirname, "..", "src", "gateway", "static", "console.css"), "utf8");
   assert(css.includes(".empty-state {"));

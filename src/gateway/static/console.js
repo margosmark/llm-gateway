@@ -1064,6 +1064,94 @@
 
   // --- models and routes ------------------------------------------------
 
+  function renderCapabilityPanel(provider, model, panel) {
+    var target = { provider_id: provider.provider_id, model_id: model.model_id };
+    var readUrl = BASE + "/api/capabilities?provider_id=" + encodeURIComponent(target.provider_id) + "&model_id=" + encodeURIComponent(target.model_id);
+    panel.appendChild(el("p", { class: "small muted", text: "Optional synthetic capability discovery. No probes run on page load or catalogue refresh. Any device that can reach this trusted-LAN console is an administrator; there is no individual owner login." }));
+    panel.appendChild(el("p", { class: "small muted", text: "Probe results are evidence, not guarantees. Unknown price or unsupported probe protocol blocks execution; estimates are not a bill ceiling. Fixed suite mvp-1: exact bounded synthetic text marker; locally generated inline shape-count image; harmless forced function schema whose returned call is never executed." }));
+    var evidence = el("div", { class: "capability-evidence", role: "status", "aria-live": "polite" });
+    panel.appendChild(evidence);
+    api(readUrl).then(function (data) {
+      (data.runs || []).forEach(function (runRecord) {
+        (runRecord.results || []).forEach(function (result) {
+          evidence.appendChild(el("p", { class: "small", text: result.capability + ": " + result.status + " · " + (result.method || "method unknown") + " · " + when(runRecord.finished_at) + " (observed evidence; not a guarantee)" }));
+        });
+      });
+      (data.approvals || []).forEach(function (approval) {
+        evidence.appendChild(el("p", { class: "small", text: "Approved metadata provenance: " + JSON.stringify(approval) }));
+      });
+      (data.proposals || []).forEach(function (proposal) {
+        if (["pending", "partially_approved"].indexOf(proposal.status) === -1) return;
+        var proposalBox = el("div", { class: "route" }, [el("h4", { text: "Review proposed metadata changes · " + proposal.status })]);
+        var choices = {};
+        (proposal.fields || []).forEach(function (field) {
+          var check = el("input", { type: "checkbox" });
+          check.checked = false;
+          choices[field.field] = check;
+          proposalBox.appendChild(el("label", { class: "capability-field" }, [check, el("span", { text: field.field + ": " + String(field.current_value) + " → " + String(field.proposed_value) + " · " + field.classification + " evidence · " + (field.routing_consequence || "Routing impact unknown; no automatic policy change") })]));
+        });
+        function decide(value) {
+          var decisions = {};
+          Object.keys(choices).forEach(function (field) { if (choices[field].checked) decisions[field] = value; });
+          if (!Object.keys(decisions).length) { toast("Select at least one field; no changes were made.", "bad"); return; }
+          var fingerprint = proposal.base_model_fingerprint || proposal.expected_fingerprint;
+          var expectedRevision = proposal.base_revision;
+          if (!global.confirm("Explicitly " + value + " selected metadata fields for " + target.provider_id + " / " + target.model_id + "? No route or alias settings are changed.")) return;
+          api(BASE + "/api/capabilities/decision", { method: "POST", body: { proposal_id: proposal.proposal_id, decision_id: "ui-" + Date.now() + "-" + Math.random().toString(36).slice(2), decisions: decisions, expected_revision: expectedRevision, expected_fingerprint: fingerprint } })
+            .then(function () { toast("Decision saved.", "ok"); return refresh(); })
+            .catch(function (error) { toast(error.message + (error.payload && error.payload.error && error.payload.error.type === "conflict" ? " — refresh and review a new diff." : ""), "bad"); });
+        }
+        proposalBox.appendChild(el("button", { type: "button", text: "Approve selected changes", disabled: !state.can_mutate, onclick: function () { decide("approved"); } }));
+        proposalBox.appendChild(el("button", { type: "button", class: "secondary", text: "Reject selected changes", disabled: !state.can_mutate, onclick: function () { decide("rejected"); } }));
+        evidence.appendChild(proposalBox);
+      });
+      if (!(data.runs || []).length && !(data.proposals || []).length) evidence.appendChild(el("p", { class: "small muted", text: "No capability evidence or pending proposal for this exact provider/model." }));
+    }).catch(function () { evidence.appendChild(el("p", { class: "small muted", text: "Capability evidence could not be loaded. No provider call was made." })); });
+
+    var choices = {};
+    var probeNames = [["text_generation", "Basic text response"], ["image_input", "Synthetic image understanding"], ["function_tools", "Function tool call (never executed)"]];
+    var probeList = el("div", { class: "row" });
+    probeNames.forEach(function (item) {
+      var input = el("input", { type: "checkbox", value: item[0] });
+      input.checked = false;
+      choices[item[0]] = input;
+      probeList.appendChild(el("label", {}, [input, el("span", { text: item[1] })]));
+    });
+    panel.appendChild(probeList);
+    var previewHost = el("div", { class: "capability-preview", role: "status", "aria-live": "polite" });
+    panel.appendChild(previewHost);
+    var previewButton = el("button", { type: "button", text: "Preview selected probes", disabled: !state.can_mutate, onclick: function () {
+      var selected = Object.keys(choices).filter(function (key) { return choices[key].checked; });
+      if (!selected.length) { toast("Select at least one probe; nothing was sent.", "bad"); return; }
+      previewHost.textContent = "Loading preview…";
+      api(BASE + "/api/capabilities/preview", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected } })
+        .then(function (preview) {
+          previewHost.textContent = "";
+          previewHost.appendChild(el("p", { class: "small", text: "Target: " + preview.provider_id + " / " + preview.model_id + " · selected: " + preview.probes.join(", ") + " · suite " + preview.suite_version + " · max " + preview.maximum_requests + " request(s), output " + preview.max_output_tokens + " tokens, " + preview.timeout_seconds + "s, concurrency " + preview.concurrency + ", retries " + preview.retries + "." }));
+          previewHost.appendChild(el("p", { class: "notice warn", text: preview.reason + " Price: " + (preview.price && preview.price.status === "known" ? preview.price.amount + " " + preview.price.currency + " from " + preview.price.source : "Unknown") + ". No provider request has been sent." }));
+          if (preview.available) {
+            previewHost.appendChild(el("button", { type: "button", text: "Run selected probes", disabled: !state.can_mutate, onclick: function () {
+              if (!global.confirm("Send only these synthetic probes to " + target.provider_id + " / " + target.model_id + "? The provider will receive synthetic data. Price estimates are not guaranteed billing caps.")) return;
+              api(BASE + "/api/capabilities/run", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected, preview: preview, confirmed: true } }).then(function () { return refresh(); }).catch(function (error) { toast(error.message + " No result is treated as unsupported unless the evidence is an unambiguous capability-specific refusal.", "bad"); });
+            } }));
+          } else {
+            previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable: no trustworthy price/probe contract. This probe cannot be run; Unknown is not false." }));
+          }
+        }).catch(function (error) {
+          var unavailable = error.payload && typeof error.payload.available === "boolean" ? error.payload : null;
+          previewHost.textContent = "";
+          if (unavailable) {
+            previewHost.appendChild(el("p", { class: "small", text: "Target: " + unavailable.provider_id + " / " + unavailable.model_id + " · selected: " + (unavailable.probes || []).join(", ") + " · suite " + unavailable.suite_version + " · maximum " + unavailable.maximum_requests + " request(s), output " + unavailable.max_output_tokens + " tokens, timeout " + unavailable.timeout_seconds + "s." }));
+            previewHost.appendChild(el("p", { class: "notice warn", text: unavailable.reason + " Price: Unknown. No provider request has been sent." }));
+            previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable; Unknown is not false. No probe was executed." }));
+          } else {
+            previewHost.appendChild(el("p", { class: "notice warn", text: "Preview refused: " + error.message + ". No provider request was sent." }));
+          }
+        });
+    } });
+    panel.appendChild(previewButton);
+  }
+
   function renderModels() {
     var frag = document.createDocumentFragment();
 
@@ -1099,6 +1187,31 @@
           el("td", { class: "small", text: tokens(model.context_limit) }),
           el("td", { class: "small", text: model.retention_class || "unknown" }),
           el("td", { class: "actions" }, [
+            el("button", {
+              type: "button", class: "secondary", text: "Discover capabilities",
+              disabled: !state.can_mutate || provider.state !== "connected",
+              "aria-expanded": "false",
+              onclick: function (event) {
+                var button = event.currentTarget;
+                var row = button.closest("tr");
+                var existing = row.nextElementSibling;
+                if (existing && existing.classList.contains("capability-detail-row")) {
+                  existing.remove();
+                  button.setAttribute("aria-expanded", "false");
+                  return;
+                }
+                var detailRow = document.createElement("tr");
+                detailRow.className = "capability-detail-row";
+                var detailCell = document.createElement("td");
+                detailCell.colSpan = 6;
+                var panel = el("div", { class: "capability-panel" });
+                renderCapabilityPanel(provider, model, panel);
+                detailCell.appendChild(panel);
+                detailRow.appendChild(detailCell);
+                row.parentNode.insertBefore(detailRow, row.nextSibling);
+                button.setAttribute("aria-expanded", "true");
+              }
+            }),
             el("button", {
               type: "button",
               text: model.enabled ? "Disable" : "Enable",
@@ -1841,6 +1954,15 @@
         state = view;
         try {
           return renderSettings();
+        } finally {
+          state = previous;
+        }
+      },
+      renderModelsForTest: function (view) {
+        var previous = state;
+        state = view;
+        try {
+          return renderModels();
         } finally {
           state = previous;
         }
