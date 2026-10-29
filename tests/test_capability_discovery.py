@@ -250,6 +250,88 @@ class CapabilityApprovalHttpTests(unittest.TestCase):
         finally:
             h.close()
 
+    def test_decision_refuses_missing_classification_before_sidecar_write(self):
+        """R56: a tampered field record with no `classification` key must be
+        refused before decide() persists, so the 0600 evidence sidecar never
+        records an approval that never applied and never burns the proposal."""
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"}], row, config.revision)
+
+            def drop_classification(proposal):
+                proposal["fields"][0].pop("classification", None)
+
+            self._tamper_sidecar(h, proposal_id, drop_classification)
+            proposal = h.app.discovery.proposal(proposal_id)
+            assert proposal is not None
+            before = h.config.snapshot().to_dict()
+            before_disk = (h.data_dir / "config.json").read_bytes()
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "missing-classification-decision",
+                "decisions": {"supports_image_input": "approved"},
+                "expected_revision": config.revision,
+                "expected_fingerprint": proposal["base_model_fingerprint"],
+            })
+            self.assertEqual(status, 400, payload)
+            # Config never changed: no setattr, no provenance, no revision bump.
+            self.assertEqual(h.config.snapshot().to_dict(), before)
+            self.assertEqual((h.data_dir / "config.json").read_bytes(), before_disk)
+            approvals = h.config.snapshot().settings.get("capability_approvals", {})
+            self.assertEqual(approvals.get("chatgpt_codex", {}).get("gpt-6-luna", {}), {})
+            # The evidence store recorded nothing and the proposal is still
+            # decidable by a later legitimate request (not burned/resolved).
+            sidecar = json.loads((h.data_dir / "capability_discovery.json").read_text())
+            self.assertEqual(sidecar.get("decisions"), [])
+            outcome = h.app.discovery.proposal(proposal_id)
+            assert outcome is not None
+            self.assertEqual(outcome["status"], "pending")
+            self.assertEqual(outcome["fields"][0]["decision"], "pending")
+        finally:
+            h.close()
+
+    def test_decision_refuses_out_of_vocabulary_classification(self):
+        """R56: `classification` is spec vocabulary (`documented|observed`), so
+        a tampered value is refused before decide() persists anything, exactly
+        like an out-of-vocabulary field name or a non-boolean value."""
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"}], row, config.revision)
+
+            def fake_classification(proposal):
+                proposal["fields"][0]["classification"] = "totally_verified"
+
+            self._tamper_sidecar(h, proposal_id, fake_classification)
+            proposal = h.app.discovery.proposal(proposal_id)
+            assert proposal is not None
+            before = h.config.snapshot().to_dict()
+            before_disk = (h.data_dir / "config.json").read_bytes()
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "bogus-classification-decision",
+                "decisions": {"supports_image_input": "approved"},
+                "expected_revision": config.revision,
+                "expected_fingerprint": proposal["base_model_fingerprint"],
+            })
+            self.assertEqual(status, 400, payload)
+            self.assertEqual(h.config.snapshot().to_dict(), before)
+            self.assertEqual((h.data_dir / "config.json").read_bytes(), before_disk)
+            sidecar = json.loads((h.data_dir / "capability_discovery.json").read_text())
+            self.assertEqual(sidecar.get("decisions"), [])
+            outcome = h.app.discovery.proposal(proposal_id)
+            assert outcome is not None
+            self.assertEqual(outcome["status"], "pending")
+        finally:
+            h.close()
+
 
 if __name__ == "__main__":
     unittest.main()

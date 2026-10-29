@@ -23,6 +23,13 @@ CAPABILITY_FIELDS = {"image_input": "supports_image_input", "function_tools": "s
 # so the decision path must consult this shared list rather than the proposal's
 # own field names. The catalogue-refresh path reuses the same constant.
 APPROVABLE_METADATA_FIELDS = frozenset(CAPABILITY_FIELDS.values())
+#: The evidence classification a proposal field record may carry (spec:
+#: `"classification": "documented|observed"`). The sidecar loader validates
+#: only schema and bucket types, never field keys, so the decision path must
+#: consult this shared list before any config or evidence write -- otherwise a
+#: deleted or bogus classification key fails only inside the apply loop, after
+#: decide() has already persisted the decision and burned the proposal.
+EVIDENCE_CLASSIFICATIONS = frozenset({"documented", "observed"})
 MAX_RUNS = 500
 PREVIEW_TTL_SECONDS = 300
 
