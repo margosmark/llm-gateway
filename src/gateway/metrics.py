@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-
 LATENCY_BUCKETS = (10, 50, 100, 250, 500, 1000, 2500, 5000, 10000)
 
 

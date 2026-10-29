@@ -10,7 +10,6 @@ from unittest import mock
 
 from gateway.config import (
     ACCESS_AUTHENTICATED,
-    ACCESS_LAN_NOAUTH,
     STATE_CONNECTED,
     STATE_NOT_CONFIGURED,
     Alias,
@@ -19,7 +18,6 @@ from gateway.config import (
     ModelEntry,
     ProviderState,
     RouteRef,
-    utc_now_iso,
 )
 
 
@@ -80,10 +78,12 @@ class ConfigStoreTests(unittest.TestCase):
 
     def test_failed_persist_keeps_published_snapshot_unchanged(self) -> None:
         original = self.store.snapshot()
-        with mock.patch.object(self.store, "_persist", side_effect=OSError("disk unavailable")):
-            with self.assertRaises(OSError):
-                with self.store.mutate() as config:
-                    config.initialized = True
+        with (
+            mock.patch.object(self.store, "_persist", side_effect=OSError("disk unavailable")),
+            self.assertRaises(OSError),
+            self.store.mutate() as config,
+        ):
+            config.initialized = True
         self.assertIs(self.store.snapshot(), original)
         self.assertFalse(self.store.snapshot().initialized)
 

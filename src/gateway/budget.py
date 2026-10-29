@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from gateway.costs import calculate_cost
 
 
 def month_window(now: datetime | None = None) -> tuple[datetime, datetime]:
-    current = now or datetime.now(timezone.utc)
-    current = current.astimezone(timezone.utc)
+    current = now or datetime.now(UTC)
+    current = current.astimezone(UTC)
     start = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     if start.month == 12:
         end = start.replace(year=start.year + 1, month=1)
@@ -27,10 +27,10 @@ def alias_month_spend(events: list[dict[str, Any]], alias: str, now: datetime | 
         if event.get("requested_alias") != alias:
             continue
         try:
-            timestamp = datetime.fromisoformat(str(event.get("timestamp", "")).replace("Z", "+00:00"))
+            timestamp = datetime.fromisoformat(str(event.get("timestamp", "")))
         except (ValueError, TypeError):
             continue
-        if timestamp.tzinfo is None or not start <= timestamp.astimezone(timezone.utc) < end:
+        if timestamp.tzinfo is None or not start <= timestamp.astimezone(UTC) < end:
             continue
         status = event.get("status")
         if not isinstance(status, int) or status < 200 or status >= 300:

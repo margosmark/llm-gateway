@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from gateway.costs import calculate_cost
@@ -22,13 +22,13 @@ def aggregate_statistics(events: list[dict[str, Any]], window: str = "day") -> d
     """Aggregate outcome, latency, usage and local cost metadata in a window."""
     if window not in WINDOW_HOURS:
         raise ValueError("window must be one of: hour, day, month")
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=WINDOW_HOURS[window])
+    cutoff = datetime.now(UTC) - timedelta(hours=WINDOW_HOURS[window])
     groups: dict[str, dict[str, dict[str, Any]]] = {
         key: {} for key in ("alias", "provider", "model")
     }
     for event in events:
         try:
-            stamp = datetime.fromisoformat(str(event.get("timestamp", "")).replace("Z", "+00:00"))
+            stamp = datetime.fromisoformat(str(event.get("timestamp", "")))
             if stamp.tzinfo is None or stamp < cutoff:
                 continue
         except (ValueError, TypeError, OverflowError):

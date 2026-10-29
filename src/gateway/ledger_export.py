@@ -5,7 +5,8 @@ from __future__ import annotations
 import csv
 import io
 import json
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from gateway.observability import redact
 

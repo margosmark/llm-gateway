@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC
 
 from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
 from gateway.costs import (
@@ -306,9 +307,10 @@ if __name__ == "__main__":
 
 class AliasBudgetTests(unittest.TestCase):
     def test_unknown_spend_is_not_free_or_capped(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from gateway.budget import budget_status, over_budget
-        now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+        now = datetime(2026, 10, 21, tzinfo=UTC)
         events = [{"requested_alias": "a", "timestamp": "2026-10-02T00:00:00Z", "status": 200,
                    "serving_provider": "opencode_go", "serving_model": "unknown-model",
                    "token_counters": {"prompt_tokens": 10, "completion_tokens": 2}}]
@@ -318,9 +320,10 @@ class AliasBudgetTests(unittest.TestCase):
         self.assertIsNone(over_budget(events, "a", 1.0, now))
 
     def test_known_excess_refuses_at_utc_month_boundary(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from gateway.budget import budget_status, over_budget
-        now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+        now = datetime(2026, 10, 21, tzinfo=UTC)
         # An explicit reported zero cached counter keeps the spend known under
         # the catalogue's cached-token completeness rule; an absent one is
         # Unknown and must never refuse (covered above).
