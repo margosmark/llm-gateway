@@ -10,7 +10,7 @@ The gateway starts one standard-library HTTP server from `gateway.cli`:
 
 | Listener | Default bind | Mounts | Purpose |
 |---|---|---|---|
-| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version` | direct owner console/configuration and anonymous OpenAI-compatible API |
+| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version`, `/metrics` | direct owner console/configuration, anonymous OpenAI-compatible API, and metadata-only Prometheus exposition |
 
 The owner console, credential forms, provider actions, and client API share the
 same listener. `cli.py` refuses wildcard and unsupported binds. Supported classes are
@@ -27,6 +27,15 @@ worker threads by default; a full pool returns 429 `rate_limited` instead of
 creating unbounded workers. A process-local rolling window allows 120 requests
 per peer IP per 60 seconds by default. These are local capacity protections,
 not an access-control boundary or defense against an on-path LAN attacker.
+
+## Provider concurrency
+
+Inference adapters are wrapped by a process-local concurrency guard with a
+fixed limit of four active requests per provider. Excess calls fail promptly
+with the `rate_limited` error class; no queue or provider probe is introduced.
+A streamed response retains its slot until the stream finishes or closes. This
+is a local protection only, not a provider guarantee or provider-reported
+limit. The cap is not persisted and is independent per process.
 
 ## State boundaries
 
@@ -79,7 +88,12 @@ request identifier, no prompt, no response, and no cost estimate (prices are
 applied at read time); it is written 0600 and is not a billing record.
 
 The Status view reports whether persistence is enabled and the declared
-30-day retention window. Local usage aggregates cover the last 24 hours and
+30-day retention window. Its provider health summary combines configured
+connection/test/catalogue metadata, model counts, current local cooldowns,
+and success/failure rates from the recent metadata ledger. Rates are based on
+requests actually served by each provider; no observations remain Unknown.
+The summary performs no provider calls and does not infer external health or
+entitlement. Local usage aggregates cover the last 24 hours and
 are computed from token counters and published prices, with source and
 observation date. Each alias/provider/model row exposes a **known subtotal**
 (`known_amount_usd` / `amount_usd`) plus explicit unknown coverage:
@@ -122,6 +136,19 @@ interpreted. A rate with no requests behind it is `null`, never `0.0`. The
 console renders this as a fallback card and a day selector on the usage
 table; both state plainly that the data is metadata only.
 
+The owner console can export recent ledger rows as CSV or JSON through a
+read-only endpoint; exports are bounded to 1,000 rows, allow-list only the
+six ledger-table fields, and pass values through the same redaction rules
+as the request log. The endpoint does not create a ledger record.
+observation date; a missing price remains Unknown.
+
+Request statistics can be viewed over the last hour, day or 30 days, grouped
+by requested alias and serving provider/model. They include errors by class,
+fallback rate, recorded latency percentiles, token totals and published-price
+estimates. The aggregate is metadata-only, computed over the recent ledger
+view (up to 10,000 records), not a lifetime accounting source; missing values
+stay Unknown. This estimate is not a provider bill.
+
 The open circuits are the exception: they are written to
 `circuits.json` in the state directory, because a gateway that restarts
 during a provider outage must not call that provider again. The file holds
@@ -142,6 +169,17 @@ the rest of the state.
 4. The owner console may mutate configuration and enroll credentials on this
    listener. Provider tests and catalogue refreshes are explicit actions; no
    page load or ordinary configuration save calls a provider.
+
+### Read-only request preview
+
+`POST /owner/api/preview` accepts an OpenAI Chat Completions request body and
+uses the same profile/alias authorization, route eligibility, request bridge,
+model substitution, reasoning degradation, and derived session rules as
+inference. It returns the primary currently eligible route's upstream payload
+and metadata without invoking an adapter. It does not create ledger events;
+normal metadata-only access logging records the endpoint path/status, never the
+body. Since provider failures cannot be predicted without a provider call,
+fallbacks after an upstream error are explicitly not evaluated.
 
 ### Client inference
 
@@ -227,6 +265,14 @@ An SSE frame is its data lines **plus** the blank line that ends it. The
 upstream reader yields complete frames, and every emitted frame is
 re-terminated. A stream without the terminator is read by a strict client as
 one event with no finish reason.
+
+The HTTP stream writer emits a gateway-owned `: ping` SSE comment after 15
+seconds without client-facing output. It wraps the already-converted stream,
+so keepalives never enter upstream frames or dialect conversion. Each comment
+is sent as its own HTTP chunk and does not alter event framing. The interval
+is fixed; clients may ignore SSE comments as usual. Regression coverage is in
+`tests/test_sse_keepalive.py`; `tests/test_sse_framing.py` still verifies
+upstream frame separators.
 
 ### Response segments
 
@@ -467,6 +513,10 @@ the image revision is read from `release.json` in the data directory when a
 release step has written a digest-shaped value. The endpoint must never become
 a generic environment or configuration inspector.
 
+## Alias groups
+
+Aliases may carry an optional validated tag for owner convenience. The owner can publish or disable all aliases with a tag in one configuration transaction. Group operations change only each alias's enabled flag; routes, fallback authorization and chains, and any per-alias policy or budget remain independent. Publishing a group refuses the whole operation if any member lacks a primary route.
+
 ## Verification boundaries
 
 The unit suite uses fakes and fixtures; it does not authenticate with a
@@ -479,3 +529,8 @@ A complete release verification still needs an exact-image gate and a
 Compose/runtime proof, especially for the writable state-volume ownership and
 listener boundaries. See `DEVELOPMENT.md` and the open findings in
 `REVIEW.md`.
+
+
+### Local alias budgets
+
+Alias budgets are optional monthly USD caps. `gateway.budget` derives spend from metadata-only successful request ledger events and `gateway.costs.calculate_cost`, using published catalogue prices only. Any unpriced/missing usage or incomplete ledger history makes the total Unknown and disables enforcement (never interpreted as zero). The API checks before routing and records actual token usage after completion; concurrent requests may overshoot. The UTC reset is the first instant of the next calendar month.

@@ -357,9 +357,52 @@ check("the daily trend draws a gap as a gap, not as a zero", function () {
   assert.strictEqual(openRow.children.filter(function (c) { return c.tag === "td"; })[1].textContent, "1");
 });
 
+check("the cooldown table renders the reason tied to its own event, with the setting request", function () {
+  const view = fixtureState();
+  view.cooldown_details = {
+    "open-code/model-current": {
+      provider: "open-code", model: "model-current", scope: "route",
+      error_class: "rate_limited", failures: 1, opened_at: 1792612800, until: 1792612819,
+      remaining_seconds: 19, next_probe_at: 1792612819, probe_in_flight: false,
+      reason: "rate limited; the route resumes after the provider's window",
+      request_id: "request-cooldown-setter", set_at: 1792612800, state: "open"
+    }
+  };
+  const rendered = collectText(helpers.renderSettingsForTest(view)).join("\n");
+  assert(rendered.includes("19s"), rendered);
+  assert(rendered.includes("rate limited; the route resumes after the provider's window"), rendered);
+  assert(rendered.includes("event request-cooldown-setter"), rendered);
+  assert(rendered.includes("Local cooldown policy"), rendered);
+});
+
+check("the cooldown table has a clear empty state", function () {
+  const view = fixtureState();
+  view.cooldown_details = {};
+  const rendered = collectText(helpers.renderSettingsForTest(view)).join("\n");
+  assert(rendered.includes("No local cooldowns are open"), rendered);
+});
+
+check("recent outcome note displays skipped-route reasons", function () {
+  const view = fixtureState();
+  view.ledger = [{
+    request_id: "req_1", timestamp: "2026-10-21T12:00:00Z", requested_alias: "coding",
+    serving_provider: "opencode_go", serving_model: "model-backup", status: 200,
+    fallback_used: true, fallback_reason: "primary route was skipped (cooldown)",
+    skipped: [{ provider: "open-code", model: "model-primary", reason: "provider is in a local cooldown" }],
+    degradations: []
+  }];
+  const rendered = collectText(helpers.renderStatusForTest(view)).join("\n");
+  assert(rendered.includes("skipped open-code/model-primary (held by local circuit): provider is in a local cooldown"), rendered);
+});
+
 check("the usage table keeps the live ring as the default window", function () {
-  const selects = findAll(rendered, function (node) { return node.tag === "select"; });
-  assert.strictEqual(selects.length, 1, "expected exactly one window selector");
+  // The statistics card adds its own window selector; this check is about
+  // the usage table's day selector, which is the one offering "live".
+  const selects = findAll(rendered, function (node) {
+    return node.tag === "select" && findAll(node, function (o) { return o.tag === "option"; })
+      .some(function (o) { return o.attributes.value === "live"; });
+  });
+  assert.strictEqual(selects.length, 1, "expected exactly one usage window selector");
   const options = findAll(selects[0], function (node) { return node.tag === "option"; });
   const values = options.map(function (option) { return option.attributes.value; });
   assert.deepStrictEqual(values, ["live", "2026-10-24", "2026-10-21", "2026-10-19", "2026-10-18"]);
@@ -425,7 +468,10 @@ check("unavailable analytics are reported instead of rendered as zeros", functio
   const text = collectText(root).join("\n");
   assert(text.includes("Durable fallback analytics are unavailable"));
   assert(text.includes("request-ledger persistence is off"));
-  assert.strictEqual(findAll(root, function (node) { return node.tag === "select"; }).length, 0);
+  assert.strictEqual(findAll(root, function (node) {
+    return node.tag === "select" && findAll(node, function (o) { return o.tag === "option"; })
+      .some(function (o) { return o.attributes.value === "live"; });
+  }).length, 0);
   assert(!text.includes("37.5%"));
 });
 

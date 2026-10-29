@@ -12,11 +12,11 @@ import socket
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
+from unittest.mock import patch
 
 from gateway.adapters.base import (
     AdapterError,
@@ -26,13 +26,17 @@ from gateway.adapters.base import (
 )
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
-from gateway.config import ConfigStore, Profile, ProviderState, RouteRef, ModelEntry
+from gateway.config import ConfigStore, ModelEntry, Profile, ProviderState, RouteRef
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
-from gateway.logging import RequestLogger
 from gateway.http.core import Response, Server
-from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
+from gateway.http.security import (
+    SecurityPolicy,
+    build_allowed_hosts,
+    build_canonical_origins,
+)
+from gateway.logging import RequestLogger
 from gateway.observability import LimitStore, RequestEvent, RequestLedger, utc_now_iso
 
 FAKE_PROVIDER = "chatgpt_codex"
@@ -265,6 +269,104 @@ class GatewayHarness:
                 return exc.code, payload.decode("utf-8", "replace"), collect(exc)
 
 
+class ProviderConcurrencyTests(unittest.TestCase):
+    def test_requests_over_provider_cap_are_refused_and_capacity_recovers(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        count_lock = threading.Lock()
+        started = 0
+
+        class BlockingAdapter(FakeAdapter):
+            def invoke(self, request: ProviderRequest) -> ProviderResponse:
+                nonlocal started
+                with count_lock:
+                    started += 1
+                    if started == 4:
+                        entered.set()
+                release.wait(timeout=5)
+                return super().invoke(request)
+
+        adapter = BlockingAdapter()
+        harness = GatewayHarness(adapter)
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            config.aliases["coding"] = _alias()
+        results: list[int] = []
+
+        def first_request() -> None:
+            status, _, _ = harness.request(
+                "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+            )
+            results.append(status)
+
+        workers = [threading.Thread(target=first_request) for _ in range(4)]
+        for worker in workers:
+            worker.start()
+        self.assertTrue(entered.wait(timeout=3))
+        status, payload, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        self.assertEqual(status, 502)
+        self.assertEqual(payload["error"]["type"], "rate_limited")
+        self.assertIn("local concurrency limit", payload["error"]["message"])
+        self.assertEqual(len(adapter.calls), 0)
+
+        release.set()
+        for worker in workers:
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [200] * 4)
+        status, _, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        self.assertEqual(status, 200)
+
+    def test_capacity_is_independent_per_provider(self) -> None:
+        from gateway.provider_concurrency import ProviderConcurrency
+
+        cap = ProviderConcurrency(1)
+        cap.acquire("provider-a")
+        cap.acquire("provider-b")
+        with self.assertRaises(Exception) as raised:
+            cap.acquire("provider-a")
+        self.assertEqual(raised.exception.error_class, "rate_limited")
+        cap.release("provider-a")
+        cap.acquire("provider-a")
+        cap.release("provider-a")
+        cap.release("provider-b")
+
+    def test_streaming_response_holds_capacity_until_consumed(self) -> None:
+        from gateway.provider_concurrency import ProviderConcurrency, _CappedAdapter
+
+        class StreamingAdapter:
+            provider_id = "stream-provider"
+
+            def invoke(self, request: ProviderRequest) -> ProviderResponse:
+                return ProviderResponse(
+                    status=200,
+                    stream=iter((b"one", b"two")),
+                    content_type="text/event-stream",
+                    dialect="openai_responses",
+                )
+
+        limits = ProviderConcurrency(1)
+        adapter = _CappedAdapter(StreamingAdapter(), limits)
+        response = adapter.invoke(ProviderRequest(model="m", payload={}, stream=True))
+        with self.assertRaises(Exception) as raised:
+            limits.acquire("stream-provider")
+        self.assertEqual(raised.exception.error_class, "rate_limited")
+        self.assertEqual(list(response.stream or ()), [b"one", b"two"])
+        limits.acquire("stream-provider")
+        limits.release("stream-provider")
+
+    def test_invalid_limit_is_refused(self) -> None:
+        from gateway.provider_concurrency import ProviderConcurrency
+
+        for limit in (0, -1, True, 1.5):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                ProviderConcurrency(limit)
+
+
 class MetadataTests(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = GatewayHarness()
@@ -327,6 +429,54 @@ class MetadataDetailsTests(unittest.TestCase):
         status, payload, _ = self.harness.request("GET", "/health")
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"status": "ok"})
+
+    def test_metrics_uses_prometheus_format_and_rejects_untrusted_headers(self) -> None:
+        status, payload, headers = self.harness.request("GET", "/metrics", raw=True)
+        self.assertEqual(status, 200)
+        self.assertIn("text/plain; version=0.0.4", next(value for key, value in headers.items() if key.lower() == "content-type"))
+        self.assertIn(b"gateway_requests_total", payload)
+        status, _, _ = self.harness.request("GET", "/metrics", headers={"X-Forwarded-For": "203.0.113.9"})
+        self.assertEqual(status, 400)
+        status, _, _ = self.harness.request("GET", "/metrics", headers={"Host": "evil.example"})
+        self.assertEqual(status, 403)
+        status, _, _ = self.harness.request("POST", "/metrics", headers={"Origin": "https://evil.example"}, raw=True)
+        self.assertEqual(status, 405)
+        self.assertNotIn("allow", headers)
+        self.assertNotIn("client_address", payload.decode())
+        self.assertNotIn("credential", payload.decode())
+        self.assertNotIn("prompt", payload.decode())
+        self.assertNotIn("token", payload.decode())
+        from prometheus_client.parser import text_string_to_metric_families
+        self.assertTrue(list(text_string_to_metric_families(payload.decode())))
+
+    def test_metrics_is_not_routed_from_owner_mount(self) -> None:
+        status, _, _ = self.harness.request("GET", "/owner/metrics")
+        self.assertEqual(status, 404)
+
+    def test_metrics_forwarded_and_host_refusals_follow_shared_policy(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/metrics", headers={"X-Forwarded-Host": "bad.example"})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["type"], "forwarded_header_rejected")
+        status, payload, _ = self.harness.request("GET", "/metrics", headers={"Host": "bad.example"})
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error"]["type"], "host_mismatch")
+
+    def test_metrics_emits_cooldown_gauge_from_router_circuits(self) -> None:
+        # Wiring-level regression for QA-W2B-1: handle_metrics must read the
+        # router's real circuit store. With an open circuit, GET /metrics
+        # must carry a gateway_cooldown_remaining_seconds{route="..."} sample.
+        router = self.harness.router
+        self.assertIsNotNone(router)
+        router.circuits.record_failure(FAKE_PROVIDER, "gpt-5-codex", "rate_limited", 30)
+        open_circuits = router.circuits.snapshot()
+        self.assertIn(f"{FAKE_PROVIDER}/gpt-5-codex", open_circuits)
+        status, payload, _ = self.harness.request("GET", "/metrics", raw=True)
+        self.assertEqual(status, 200)
+        text = payload.decode("utf-8")
+        self.assertIn(
+            f'gateway_cooldown_remaining_seconds{{route="{FAKE_PROVIDER}/gpt-5-codex"}} ',
+            text,
+        )
 
 
 class SecurityProbeTests(unittest.TestCase):
@@ -500,6 +650,31 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(len(self.harness.adapter.calls), 1)
         self.assertNotIn("reasoning_effort", self.harness.adapter.calls[0].payload)
 
+    def test_preview_converts_request_without_provider_call_or_ledger_entry(self) -> None:
+        before_events = self.harness.router._ledger.totals()["requests"]
+        status, result, headers = self.harness.request(
+            "POST", "/owner/api/preview",
+            {"model": "coding", "messages": [{"role": "user", "content": "preview marker"}], "stream": False},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["dialect"], "openai_responses")
+        self.assertEqual(result["model"], "gpt-6-luna")
+        self.assertNotIn("coding", json.dumps(result["payload"]))
+        self.assertEqual(result["payload"]["model"], "gpt-6-luna")
+        self.assertEqual(result["payload"]["input"][0]["content"][0]["text"], "preview marker")
+        self.assertTrue(result["session_id"].startswith(FAKE_PROVIDER + "."))
+        self.assertEqual(self.harness.adapter.calls, [])
+        self.assertEqual(self.harness.router._ledger.totals()["requests"], before_events)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+
+    def test_preview_refuses_unpublished_alias(self) -> None:
+        status, result, _ = self.harness.request(
+            "POST", "/owner/api/preview", {"model": "missing", "messages": []}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(result["error"]["type"], "unknown_model")
+        self.assertEqual(self.harness.adapter.calls, [])
+
     def test_chat_request_is_converted_to_the_responses_dialect(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True
@@ -587,6 +762,26 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(events[0]["serving_model"], "gpt-6-luna")
         self.assertEqual(events[0]["token_counters"], {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13})
 
+    def test_over_budget_refuses_before_provider_call_with_actionable_details(self) -> None:
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"].enabled = True
+            config.aliases["coding"].budget = 0.01
+        from gateway.observability import RequestEvent
+        # An explicit reported zero cached counter keeps the recorded spend
+        # known under the catalogue's cached-token completeness rule; a
+        # counter set without it is Unknown and must never refuse.
+        self.harness.router._ledger.record(RequestEvent(
+            "req_prior", "2026-10-02T00:00:00Z", "coding", serving_provider="opencode_go",
+            serving_model="gpt-6-luna", status=200,
+            token_counters={"prompt_tokens": 1_000_000, "completion_tokens": 0, "cached_read_tokens": 0}))
+        status, payload, _ = self.harness.request("POST", "/v1/chat/completions",
+            body={"model": "coding", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(status, 429)
+        self.assertIn("$0.01", payload["error"]["message"])
+        self.assertIn("$0.10", payload["error"]["message"])
+        self.assertIn("2026-11-01T00:00:00Z", payload["error"]["message"])
+        self.assertEqual(self.harness.adapter.calls, [])
+
     def test_streamed_usage_is_amended_into_request_ledger(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True
@@ -610,6 +805,61 @@ def _alias():
         enabled=True,
         primary=RouteRef(FAKE_PROVIDER, "gpt-6-luna"),
     )
+
+
+class AliasGroupHttpTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.harness = GatewayHarness()
+        self.addCleanup(self.harness.close)
+        with self.harness.config.mutate() as config:
+            config.aliases["coding"] = _alias()
+            config.aliases["coding"].tag = "team"
+            config.aliases["coding"].enabled = False
+            config.aliases["coding"].fallbacks = [RouteRef("opencode_go", "private-model")]
+            config.aliases["coding"].fallback_authorized = True
+            config.aliases["writing"] = _alias()
+            config.aliases["writing"].name = "writing"
+            config.aliases["writing"].enabled = False
+            config.aliases["writing"].tag = "team"
+            config.aliases["other"] = _alias()
+            config.aliases["other"].name = "other"
+            config.aliases["other"].enabled = False
+            config.aliases["other"].tag = "solo"
+
+    def test_group_publish_and_disable_only_toggle_tag_members(self) -> None:
+        before = self.harness.config.snapshot().aliases
+        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "team"})
+        self.assertEqual(status, 200)
+        self.assertEqual(result["aliases"], ["coding", "writing"])
+        published = self.harness.config.snapshot().aliases
+        self.assertTrue(published["coding"].enabled)
+        self.assertTrue(published["writing"].enabled)
+        self.assertFalse(published["other"].enabled)
+        self.assertEqual(published["coding"].fallbacks, before["coding"].fallbacks)
+        self.assertEqual(published["coding"].fallback_authorized, before["coding"].fallback_authorized)
+        self.assertEqual(published["coding"].tag, "team")
+        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "disable", "tag": "team"})
+        self.assertEqual(status, 200)
+        self.assertFalse(self.harness.config.snapshot().aliases["coding"].enabled)
+        self.assertFalse(self.harness.config.snapshot().aliases["writing"].enabled)
+        self.assertFalse(self.harness.config.snapshot().aliases["other"].enabled)
+
+    def test_non_object_group_payload_is_rejected_without_mutation(self) -> None:
+        before = self.harness.config.snapshot().aliases
+        status, _result, _ = self.harness.request("POST", "/owner/api/alias-group", ["publish", "team"])
+        self.assertEqual(status, 400)
+        after = self.harness.config.snapshot().aliases
+        self.assertEqual(after, before)
+
+    def test_group_refusal_does_not_partially_publish(self) -> None:
+        with self.harness.config.mutate() as config:
+            config.aliases["writing"].primary = None
+        status, _result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "team"})
+        self.assertEqual(status, 400)
+        self.assertFalse(self.harness.config.snapshot().aliases["coding"].enabled)
+        self.assertFalse(self.harness.config.snapshot().aliases["writing"].enabled)
+        status, _result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "../team"})
+        self.assertEqual(status, 400)
 
 
 class FallbackTests(unittest.TestCase):
@@ -817,6 +1067,20 @@ class ConsoleApiTests(unittest.TestCase):
         self.assertEqual(set(payload["usage_costs"]) - {"window_hours", "coverage"}, {"alias", "provider", "model"})
         self.assertIn("enabled", payload["ledger_durability"])
         self.assertFalse(payload["ledger_durability"]["billing_system"])
+        self.assertEqual(set(payload["request_statistics"]), {"hour", "day", "month"})
+        self.assertEqual(payload["request_statistics"]["day"]["window_hours"], 24)
+        self.assertEqual(set(payload["request_statistics"]["day"]) - {"window", "window_hours"}, {"alias", "provider", "model"})
+        health = payload["provider_health"]
+        # One health row per configured provider, sorted by id — the exact
+        # provider set is whatever this build registers (main has grown one).
+        self.assertEqual(
+            [row["provider_id"] for row in health],
+            sorted(provider["provider_id"] for provider in payload["providers"]),
+        )
+        self.assertEqual(health[0]["connection_state"], "connected")
+        self.assertEqual(health[0]["model_count"], 1)
+        self.assertIsNone(health[0]["recent_success_rate"])
+        self.assertEqual(health[0]["recent_requests"], 0)
 
     def test_state_reports_the_zero_state(self) -> None:
         status, payload, _ = self.harness.request("GET", "/owner/api/state")

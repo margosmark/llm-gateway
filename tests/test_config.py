@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gateway.config import (
     ACCESS_AUTHENTICATED,
-    ACCESS_LAN_NOAUTH,
     STATE_CONNECTED,
     STATE_NOT_CONFIGURED,
     Alias,
@@ -17,7 +18,6 @@ from gateway.config import (
     ModelEntry,
     ProviderState,
     RouteRef,
-    utc_now_iso,
 )
 
 
@@ -66,10 +66,59 @@ class ConfigStoreTests(unittest.TestCase):
         self.assertFalse(self.store.snapshot().initialized)
         self.assertEqual(self.store.snapshot().revision, 0)
 
-    def test_snapshot_is_a_copy_not_a_live_reference(self) -> None:
-        snapshot = self.store.snapshot()
-        snapshot.initialized = True
+    def test_snapshot_is_cached_and_stable_across_mutations(self) -> None:
+        original = self.store.snapshot()
+        self.assertIs(self.store.snapshot(), original)
+        with self.store.mutate() as config:
+            config.initialized = True
+        updated = self.store.snapshot()
+        self.assertIsNot(updated, original)
+        self.assertTrue(updated.initialized)
+        self.assertFalse(original.initialized)
+
+    def test_failed_persist_keeps_published_snapshot_unchanged(self) -> None:
+        original = self.store.snapshot()
+        with (
+            mock.patch.object(self.store, "_persist", side_effect=OSError("disk unavailable")),
+            self.assertRaises(OSError),
+            self.store.mutate() as config,
+        ):
+            config.initialized = True
+        self.assertIs(self.store.snapshot(), original)
         self.assertFalse(self.store.snapshot().initialized)
+
+    def test_reader_never_observes_half_applied_transaction(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        observed: list[tuple[bool, bool, int]] = []
+
+        def mutate() -> None:
+            with self.store.mutate() as config:
+                config.initialized = True
+                started.set()
+                self.assertTrue(release.wait(timeout=2))
+                config.access_mode = ACCESS_AUTHENTICATED
+
+        writer = threading.Thread(target=mutate)
+        writer.start()
+        self.assertTrue(started.wait(timeout=2))
+        reader_done = threading.Event()
+
+        def read_snapshot() -> None:
+            snapshot = self.store.snapshot()
+            observed.append((snapshot.initialized, snapshot.access_mode == ACCESS_AUTHENTICATED, snapshot.revision))
+            reader_done.set()
+
+        reader = threading.Thread(target=read_snapshot)
+        reader.start()
+        self.assertFalse(reader_done.wait(timeout=0.05))
+        release.set()
+        writer.join(timeout=2)
+        reader.join(timeout=2)
+        self.assertFalse(writer.is_alive())
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(observed, [(True, True, 1)])
+        self.assertEqual(self.store.snapshot().revision, 1)
 
     def test_config_file_is_owner_only(self) -> None:
         with self.store.mutate() as config:
@@ -87,6 +136,7 @@ class AliasTests(unittest.TestCase):
             fallback_triggers=["exhausted"],
             fallback_authorized=True,
             cooldown_seconds=600,
+            budget=12.5,
         )
         restored = Alias.from_dict(alias.to_dict())
         assert restored is not None
@@ -96,6 +146,7 @@ class AliasTests(unittest.TestCase):
         self.assertEqual(restored.fallbacks[1].model, "mimo-v2.6-flash")
         self.assertTrue(restored.fallback_authorized)
         self.assertEqual(restored.cooldown_seconds, 600)
+        self.assertEqual(restored.budget, 12.5)
 
     def test_all_routes_lists_primary_first(self) -> None:
         alias = Alias(

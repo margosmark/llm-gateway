@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 import time
@@ -23,6 +24,7 @@ from gateway.bridge.anthropic import aggregate_stream_any, convert_buffered_byte
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import sse_done
 from gateway.backup import export_config, import_config, snapshot_interval_seconds
+from gateway.budget import budget_status, over_budget
 from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
     PROBE_TIMEOUT_SECONDS,
@@ -37,6 +39,8 @@ from gateway.costs import (
     stream_token_counters,
 )
 from gateway.ledger_persistence import ROLLUP_SCHEMA
+from gateway.statistics import aggregate_statistics
+from gateway.provider_health import provider_health
 from gateway.stores import atomic_write_json
 from gateway.config import (
 
@@ -63,9 +67,12 @@ from gateway.fallback_reasons import fallback_reason_class
 from gateway.http import messages as messages_surface
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
-from gateway.identifiers import ValidationError, validate_alias_name, validate_profile_id
+from gateway.identifiers import ValidationError, validate_alias_name, validate_identifier, validate_profile_id
 from gateway.logging import RequestLogger
+from gateway.ledger_export import DEFAULT_EXPORT_ROWS, MAX_EXPORT_ROWS, export_records, render_csv, render_json
+from gateway.metrics import render_metrics
 from gateway.routes import validate_alias_routes, validate_phase_routing
+from gateway.provider_concurrency import CappedAdapterRegistry, ProviderConcurrency
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -334,6 +341,7 @@ class GatewayApp:
         self.credentials = credentials
         self.router = router
         self.registry = registry
+        self.router._registry = CappedAdapterRegistry(registry, ProviderConcurrency())
 
         self.profile_auth = profile_auth
         self.policy = policy
@@ -364,6 +372,7 @@ class GatewayApp:
         r = self._routes
         r.add(["GET"], "/version", self.handle_version)
         r.add(["GET"], "/health", self.handle_health)
+        r.add(["GET"], "/metrics", self.handle_metrics)
         r.add(["GET"], "/favicon.ico", self.handle_favicon)
 
         r.add(["GET"], "/v1/models", self.handle_models)
@@ -384,12 +393,15 @@ class GatewayApp:
             r.add(["GET"], prefix + "/style.css", self.handle_static_css)
             r.add(["GET"], prefix + "/api/status", self.handle_public_status)
             r.add(["GET"], prefix + "/api/state", self.handle_state)
+            r.add(["GET"], prefix + "/api/ledger/export", self.handle_ledger_export)
             r.add(["GET"], prefix + "/api/backup/export", self.handle_backup_export)
             r.add(["POST"], prefix + "/api/backup/import", self.handle_backup_import)
+            r.add(["POST"], prefix + "/api/preview", self.handle_preview)
 
             r.add(["POST"], prefix + "/api/provider", self.handle_provider_action)
             r.add(["POST"], prefix + "/api/model", self.handle_model_action)
             r.add(["POST"], prefix + "/api/alias", self.handle_alias_action)
+            r.add(["POST"], prefix + "/api/alias-group", self.handle_alias_group_action)
             r.add(["POST"], prefix + "/api/profile", self.handle_profile_action)
             r.add(["POST"], prefix + "/api/settings", self.handle_settings_action)
 
@@ -525,6 +537,11 @@ class GatewayApp:
     def handle_health(self, request: Request) -> Response:
         return json_response({"status": "ok"})
 
+    def handle_metrics(self, request: Request) -> Response:
+        cooldowns = self.router.circuits.snapshot()
+        body = render_metrics(self.ledger, cooldowns).encode("utf-8")
+        return Response(200, [("Content-Type", "text/plain; version=0.0.4; charset=utf-8"), ("Cache-Control", "no-store")], body)
+
     def handle_favicon(self, request: Request) -> Response:
         """No icon, but no 404 noise in the browser console either."""
         return Response(204, [("Cache-Control", "max-age=86400")], b"")
@@ -655,6 +672,40 @@ class GatewayApp:
         }
         return Response(200, [("Content-Type", "application/json")], adapter.invoke_systemone(payload))
 
+    def handle_preview(self, request: Request) -> Response:
+        """Show the primary upstream request without invoking a provider."""
+        from gateway.preview import preview_request
+
+        profile = self._resolve_profile(request)
+        try:
+            payload = request.json()
+        except ValueError:
+            raise RoutingError("request body is not valid JSON", code="malformed_request", status=400)
+        if not isinstance(payload, dict):
+            raise RoutingError("request body is not valid JSON", code="malformed_request", status=400)
+        alias_name = payload.get("model")
+        if not isinstance(alias_name, str) or not alias_name:
+            raise RoutingError("request is missing a model", code="malformed_request", status=400)
+        alias = self.config.snapshot().aliases.get(alias_name)
+        if alias is None or not alias.enabled:
+            raise RoutingError(
+                f"model '{alias_name}' is not published by this gateway",
+                code="unknown_model", status=404,
+            )
+        if not profile_allows(profile, alias.name):
+            raise RoutingError(
+                f"this client profile may not use model '{alias_name}'",
+                code="model_not_allowed", status=403,
+            )
+        preview = preview_request(
+            self.router, alias_name, payload,
+            source_dialect=DIALECT_OPENAI_CHAT,
+            profile_id=profile.profile_id,
+            client_ip=request.client_address[0],
+            session_hint=self._session_hint(request),
+        )
+        return json_response(preview, headers=[("Cache-Control", "no-store")])
+
     def handle_chat_completions(self, request: Request) -> Any:
         return self._handle_inference(request, DIALECT_OPENAI_CHAT)
 
@@ -712,6 +763,15 @@ class GatewayApp:
                 code="model_not_allowed",
                 status=403,
             )
+
+        if self.ledger and alias.budget is not None:
+            refusal = over_budget(self.ledger.recent(limit=10_000), alias.name, alias.budget, history_complete=self.ledger.evicted == 0)
+            if refusal is not None:
+                raise RoutingError(
+                    f"monthly budget ${alias.budget:.2f} reached; recorded spend is ${refusal['spend_usd']:.2f}; resets at {refusal['reset_at']} UTC",
+                    code="budget_exceeded",
+                    status=429,
+                )
 
         stream = bool(payload.get("stream"))
         request_id = new_request_id()
@@ -824,6 +884,26 @@ class GatewayApp:
 
     # --- state -----------------------------------------------------------
 
+    def handle_ledger_export(self, request: Request) -> Response:
+        """Export recent ledger metadata; this read-only route records no event."""
+        raw_limit = request.query_one("limit")
+        try:
+            limit = int(raw_limit) if raw_limit is not None else DEFAULT_EXPORT_ROWS
+        except ValueError:
+            return json_response({"error": {"message": "limit must be an integer", "type": "invalid_export_limit"}}, 400)
+        if limit < 1 or limit > MAX_EXPORT_ROWS:
+            return json_response({"error": {"message": f"limit must be between 1 and {MAX_EXPORT_ROWS}", "type": "invalid_export_limit"}}, 400)
+        events = self.ledger.recent(limit=limit) if self.ledger is not None else []
+        # Validate format even when the ledger is unavailable.
+        format_name = request.query_one("format", "csv")
+        if format_name not in ("csv", "json"):
+            return json_response({"error": {"message": "format must be csv or json", "type": "invalid_export_format"}}, 400)
+        records = export_records(events)
+        body = render_csv(records) if format_name == "csv" else render_json(records)
+        content_type = "text/csv; charset=utf-8" if format_name == "csv" else "application/json; charset=utf-8"
+        filename = "ledger.csv" if format_name == "csv" else "ledger.json"
+        return Response(200, [("Content-Type", content_type), ("Content-Disposition", f'attachment; filename="{filename}"'), ("Cache-Control", "no-store")], body)
+
     def handle_public_status(self, request: Request) -> Response:
         """Safe, unauthenticated status.
 
@@ -907,6 +987,7 @@ class GatewayApp:
                 route_limits.append((ref.label(), entry.context_limit if entry else None))
             alias_payload = alias.to_dict()
             alias_payload["context_limit"] = alias_context_limit(route_limits)
+            alias_payload["budget_status"] = budget_status(self.ledger.recent(limit=10_000) if self.ledger else [], alias.name, alias.budget, history_complete=bool(self.ledger and self.ledger.evicted == 0))
             aliases.append(alias_payload)
 
         profiles = []
@@ -988,6 +1069,8 @@ class GatewayApp:
                 "totals": self.ledger.totals() if self.ledger else {},
                 "usage_costs": aggregate_usage(usage_ledger, window_hours=24, evicted_events=self.ledger.evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
                 "analytics": analytics,
+                "request_statistics": {window: aggregate_statistics(self.ledger.recent(limit=10_000), window) for window in ("hour", "day", "month")} if self.ledger else {},
+                "provider_health": provider_health(providers, self.router.circuits.details(), self.ledger.recent(limit=10_000) if self.ledger else []),
                 "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),
@@ -1322,6 +1405,31 @@ class GatewayApp:
                 )
         return json_response({"ok": True})
 
+    # --- alias groups ---------------------------------------------------
+
+    def handle_alias_group_action(self, request: Request) -> Response:
+        denied = self._require_mutation(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = request.json() or {}
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            return json_response({"error": {"message": "request body must be an object", "type": "invalid_request"}}, 400)
+        from gateway.alias_groups import set_group_enabled
+
+        action = payload.get("action")
+        if action not in ("publish", "disable"):
+            return json_response({"error": {"message": "action must be publish or disable", "type": "invalid_group_action"}}, 400)
+        names: list[str] = []
+        try:
+            with self.config.mutate() as config:
+                names = set_group_enabled(config, payload.get("tag"), action == "publish")
+            return json_response({"ok": True, "tag": payload.get("tag"), "enabled": action == "publish", "aliases": names})
+        except ValidationError as exc:
+            return json_response({"error": {"message": exc.message, "type": "invalid_alias_group", "field": exc.field}}, 400)
+
     # --- alias actions ---------------------------------------------------
 
     def handle_alias_action(self, request: Request) -> Response:
@@ -1332,6 +1440,8 @@ class GatewayApp:
             payload = request.json() or {}
         except ValueError:
             payload = {}
+        if not isinstance(payload, dict):
+            return json_response({"error": {"message": "request body must be an object", "type": "invalid_request"}}, 400)
         action = str(payload.get("action") or "")
         name = str(payload.get("name") or "")
 
@@ -1351,6 +1461,13 @@ class GatewayApp:
                     {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}},
                     400,
                 )
+            raw_tag = payload.get("tag", "")
+            try:
+                tag = validate_identifier(raw_tag, "alias tag") if raw_tag else ""
+            except ValidationError as exc:
+                return json_response(
+                    {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}}, 400
+                )
             triggers = [t for t in payload.get("fallback_triggers") or [] if t in FALLBACK_TRIGGERS]
             confirmed = [p for p in payload.get("fallback_confirmed_providers") or [] if isinstance(p, str)]
             safe_classes = [
@@ -1358,6 +1475,9 @@ class GatewayApp:
                 if c in ("auth", "policy", "malformed")
             ]
             cooldown = payload.get("cooldown_seconds")
+            budget = payload.get("budget")
+            if budget is not None and (not isinstance(budget, (int, float)) or isinstance(budget, bool) or not math.isfinite(budget) or not 0 < budget <= 1_000_000):
+                return json_response({"error": {"message": "budget must be a finite USD amount greater than 0 and at most 1000000, or null", "type": "invalid_budget"}}, 400)
             with self.config.mutate() as config:
                 existing = config.aliases.get(alias_name)
                 config.aliases[alias_name] = _alias_from_payload(
@@ -1371,7 +1491,9 @@ class GatewayApp:
                     cooldown if isinstance(cooldown, int) else 300,
                     enabled=bool(payload.get("enabled", existing.enabled if existing else False)),
                     phase_routing=phase_routing,
+                    tag=tag,
                 )
+                config.aliases[alias_name].budget = budget
             return json_response({"ok": True})
 
         if action == "publish":
@@ -1650,6 +1772,7 @@ def _alias_from_payload(
     cooldown: int,
     enabled: bool,
     phase_routing=None,
+    tag: str = "",
 ):
     from gateway.config import Alias
 
@@ -1664,6 +1787,7 @@ def _alias_from_payload(
         fallback_error_classes=safe_classes,
         cooldown_seconds=cooldown,
         phase_routing=phase_routing,
+        tag=tag,
     )
 
 
