@@ -6,7 +6,7 @@ from typing import Any
 
 from gateway.bridge.model import ConversionError
 from gateway.bridge.requests import convert_request
-from gateway.core.routing import RoutingError, Router, _requested_reasoning_effort
+from gateway.core.routing import Router, RoutingError, _requested_reasoning_effort
 from gateway.session import derive_session
 
 

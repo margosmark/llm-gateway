@@ -24,11 +24,12 @@ import socketserver
 import sys
 import threading
 import traceback
-from gateway.http.keepalive import with_sse_keepalives
-
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from http.server import BaseHTTPRequestHandler
-from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
+
+from gateway.http.keepalive import with_sse_keepalives
 
 MAX_BODY_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_WORKERS = 32

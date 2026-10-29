@@ -12,11 +12,11 @@ import socket
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
+from unittest.mock import patch
 
 from gateway.adapters.base import (
     AdapterError,
@@ -26,13 +26,17 @@ from gateway.adapters.base import (
 )
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
-from gateway.config import ConfigStore, Profile, ProviderState, RouteRef, ModelEntry
+from gateway.config import ConfigStore, ModelEntry, Profile, ProviderState, RouteRef
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
 from gateway.http.app import GatewayApp
-from gateway.logging import RequestLogger
 from gateway.http.core import Response, Server
-from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
+from gateway.http.security import (
+    SecurityPolicy,
+    build_allowed_hosts,
+    build_canonical_origins,
+)
+from gateway.logging import RequestLogger
 from gateway.observability import LimitStore, RequestEvent, RequestLedger, utc_now_iso
 
 FAKE_PROVIDER = "chatgpt_codex"
@@ -825,7 +829,7 @@ class AliasGroupHttpTests(unittest.TestCase):
 
     def test_non_object_group_payload_is_rejected_without_mutation(self) -> None:
         before = self.harness.config.snapshot().aliases
-        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", ["publish", "team"])
+        status, _result, _ = self.harness.request("POST", "/owner/api/alias-group", ["publish", "team"])
         self.assertEqual(status, 400)
         after = self.harness.config.snapshot().aliases
         self.assertEqual(after, before)
@@ -833,11 +837,11 @@ class AliasGroupHttpTests(unittest.TestCase):
     def test_group_refusal_does_not_partially_publish(self) -> None:
         with self.harness.config.mutate() as config:
             config.aliases["writing"].primary = None
-        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "team"})
+        status, _result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "team"})
         self.assertEqual(status, 400)
         self.assertFalse(self.harness.config.snapshot().aliases["coding"].enabled)
         self.assertFalse(self.harness.config.snapshot().aliases["writing"].enabled)
-        status, result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "../team"})
+        status, _result, _ = self.harness.request("POST", "/owner/api/alias-group", {"action": "publish", "tag": "../team"})
         self.assertEqual(status, 400)
 
 

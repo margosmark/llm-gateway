@@ -28,7 +28,7 @@ class MetricsTests(unittest.TestCase):
 
     def test_empty_ledger_is_valid_and_no_cooldown_series(self):
         text = render_metrics(None)
-        self.assertEqual(list(text_string_to_metric_families(text))[0].name, "gateway_requests")
+        self.assertEqual(next(iter(text_string_to_metric_families(text))).name, "gateway_requests")
         self.assertNotIn('route=', text)
 
 

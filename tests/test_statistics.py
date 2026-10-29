@@ -1,12 +1,12 @@
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from gateway.statistics import aggregate_statistics
 
 
 class RequestStatisticsTests(unittest.TestCase):
     def test_statistics_group_outcomes_usage_cost_and_latency_per_dimension(self):
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         events = [
             {"timestamp": now, "requested_alias": "chat", "serving_provider": "opencode_go", "serving_model": "claude-haiku-5-5",
              "status": 200, "latency_ms": 100, "fallback_used": True,
@@ -16,7 +16,7 @@ class RequestStatisticsTests(unittest.TestCase):
              "token_counters": {"prompt_tokens": 1000, "completion_tokens": 250}},
             {"timestamp": now, "requested_alias": "chat", "error_class": "exhausted", "status": 503},
             {"timestamp": now, "requested_alias": "other", "serving_provider": "unknown_provider", "serving_model": "unpriced", "latency_ms": 50},
-            {"timestamp": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(), "requested_alias": "chat", "error_class": "stale"},
+            {"timestamp": (datetime.now(UTC) - timedelta(days=40)).isoformat(), "requested_alias": "chat", "error_class": "stale"},
         ]
         result = aggregate_statistics(events, "month")
         alias = result["alias"]["chat"]
@@ -40,8 +40,8 @@ class RequestStatisticsTests(unittest.TestCase):
             aggregate_statistics([], "year")
         result = aggregate_statistics([
             {"timestamp": "not-a-date", "requested_alias": "bad"},
-            {"timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), "requested_alias": "old"},
-            {"timestamp": datetime.now(timezone.utc).isoformat(), "requested_alias": "now", "latency_ms": -1},
+            {"timestamp": (datetime.now(UTC) - timedelta(hours=2)).isoformat(), "requested_alias": "old"},
+            {"timestamp": datetime.now(UTC).isoformat(), "requested_alias": "now", "latency_ms": -1},
         ], "hour")
         self.assertEqual(set(result["alias"]), {"now"})
         self.assertIsNone(result["alias"]["now"]["latency_ms"]["p50"])
