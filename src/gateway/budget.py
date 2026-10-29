@@ -19,7 +19,7 @@ def month_window(now: datetime | None = None) -> tuple[datetime, datetime]:
     return start, end
 
 
-def alias_month_spend(events: list[dict[str, Any]], alias: str, now: datetime | None = None) -> dict[str, Any]:
+def alias_month_spend(events: list[dict[str, Any]], alias: str, now: datetime | None = None, *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     start, end = month_window(now)
     total = 0.0
     unknown = False
@@ -40,7 +40,7 @@ def alias_month_spend(events: list[dict[str, Any]], alias: str, now: datetime | 
             unknown = True
             continue
         counters = event.get("token_counters")
-        cost = calculate_cost(counters if isinstance(counters, dict) else None, model, event.get("serving_provider"))
+        cost = calculate_cost(counters if isinstance(counters, dict) else None, model, event.get("serving_provider"), _prices=_prices)
         if cost["amount_usd"] is None:
             unknown = True
         else:
@@ -48,8 +48,14 @@ def alias_month_spend(events: list[dict[str, Any]], alias: str, now: datetime | 
     return {"amount_usd": None if unknown else total, "reset_at": end.isoformat().replace("+00:00", "Z"), "window_start": start.isoformat().replace("+00:00", "Z")}
 
 
-def budget_status(events: list[dict[str, Any]], alias: str, cap: float | None, now: datetime | None = None, history_complete: bool = True) -> dict[str, Any]:
-    spend = alias_month_spend(events, alias, now)
+def budget_status(events: list[dict[str, Any]], alias: str, cap: float | None, now: datetime | None = None, history_complete: bool = True, *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Per-alias monthly budget status over supplied events.
+
+    ``_prices`` is a caller-materialised published-price snapshot threaded
+    into every per-event cost lookup; leaving it None preserves the
+    per-lookup catalogue read. See :func:`gateway.statistics.aggregate_statistics`.
+    """
+    spend = alias_month_spend(events, alias, now, _prices=_prices)
     if not history_complete:
         spend["amount_usd"] = None
     known = spend["amount_usd"] is not None
