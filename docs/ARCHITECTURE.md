@@ -531,6 +531,10 @@ listener boundaries. See `DEVELOPMENT.md` and the open findings in
 `REVIEW.md`.
 
 
+## Capability discovery foundation (staged)
+
+The capability discovery API (`GET /owner/api/capabilities`, `POST /owner/api/capabilities/preview`, `/run`, and `/decision`) is opt-in and exact-provider/model scoped. Preview validates a closed MVP probe vocabulary and returns fixed request/output/deadline bounds, but reports unknown pricing and refuses paid execution with 422 until a reviewed provider transport contract is registered. No production adapters are enabled. Synthetic results create sanitized proposals only in isolated tests. Decisions are field-level and require the proposal's base config revision and model fingerprint; approved image/function-tool values and provenance persist in config and catalogue refresh reapplies those values. Exact retries return the saved decision without another config mutation. Partial decisions leave unselected fields pending and rebase the proposal CAS to the resulting model state for the next explicit action. Stale compare-and-swap marks the proposal conflicted. Rejected and unselected fields do not change effective metadata. Any reachable trusted-LAN peer may make these explicit decisions under the product's access-by-reachability administrator policy; this is not individual authentication and Host/Origin checks are not identity. See `MODEL_CAPABILITY_DISCOVERY_SPEC.md` for staged limitations.
+
 ### Local alias budgets
 
 Alias budgets are optional monthly USD caps. `gateway.budget` derives spend from metadata-only successful request ledger events and `gateway.costs.calculate_cost`, using published catalogue prices only. Any unpriced/missing usage or incomplete ledger history makes the total Unknown and disables enforcement (never interpreted as zero). The API checks before routing and records actual token usage after completion; concurrent requests may overshoot. The UTC reset is the first instant of the next calendar month.

@@ -1189,6 +1189,11 @@ class GatewayApp:
                     or not isinstance(decisions, dict) or not isinstance(revision, int)
                     or isinstance(revision, bool) or not isinstance(fingerprint, str)):
                 raise ValueError
+            # Exact HTTP retries are idempotent even after their config revision
+            # has advanced. This must precede snapshot CAS and any config mutation.
+            replay = self.discovery.decision_replay(proposal_id, decision_id, decisions)
+            if replay is not None:
+                return json_response(replay)
             proposal = self.discovery.proposal(proposal_id)
             if proposal is None:
                 return json_response({"error": {"message": "Unknown capability proposal", "type": "unknown_proposal"}}, 404)
@@ -1201,8 +1206,10 @@ class GatewayApp:
                 current = row.to_dict()
                 actual_fingerprint = hashlib.sha256(json.dumps(current, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
                 if config.revision != revision or actual_fingerprint != fingerprint:
+                    self.discovery.mark_conflicted(proposal_id)
                     raise RuntimeError("stale config")
                 if proposal["base_revision"] != revision or proposal["base_model_fingerprint"] != fingerprint:
+                    self.discovery.mark_conflicted(proposal_id)
                     raise RuntimeError("stale proposal")
                 # The proposal is untrusted sidecar input: its loader checks
                 # only schema and bucket types, never field names or value
@@ -1241,6 +1248,11 @@ class GatewayApp:
                 if not target:
                     approvals.get(provider_id, {}).pop(model_id, None)
                 result["revision"] = config.revision + 1
+                if result["status"] == "partially_approved":
+                    updated_fingerprint = hashlib.sha256(
+                        json.dumps(row.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    self.discovery.rebase_partial(proposal_id, result["revision"], updated_fingerprint)
             return json_response(result)
         except (ValueError, TypeError, KeyError):
             return json_response({"error": {"message": "Invalid capability decision", "type": "invalid_request"}}, 400)

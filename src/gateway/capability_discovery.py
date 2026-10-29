@@ -134,6 +134,33 @@ class DiscoveryStore:
                     return json.loads(json.dumps(item))
         return None
 
+    def decision_replay(self, proposal_id: str, decision_id: str, decisions: dict[str, str]) -> dict[str, Any] | None:
+        """Return a prior exact decision result; reject decision-id reuse."""
+        with self._lock:
+            for previous in self._data["decisions"]:
+                if previous.get("decision_id") == decision_id:
+                    if previous.get("proposal_id") != proposal_id or previous.get("decisions") != decisions:
+                        raise RuntimeError("decision id conflict")
+                    return json.loads(json.dumps(previous["result"]))
+        return None
+
+    def rebase_partial(self, proposal_id: str, revision: int, fingerprint: str) -> None:
+        """Advance the remaining decision CAS token after our own partial write."""
+        with self._lock:
+            proposal = next((p for p in self._data["proposals"] if p.get("proposal_id") == proposal_id), None)
+            if proposal is not None and proposal.get("status") == "partially_approved":
+                proposal["base_revision"] = revision
+                proposal["base_model_fingerprint"] = fingerprint
+                self._persist()
+
+    def mark_conflicted(self, proposal_id: str) -> None:
+        """Record a stale compare-and-swap against the proposal snapshot."""
+        with self._lock:
+            proposal = next((p for p in self._data["proposals"] if p.get("proposal_id") == proposal_id), None)
+            if proposal is not None and proposal.get("status") in {"pending", "partially_approved"}:
+                proposal["status"] = "conflicted"
+                self._persist()
+
     def decide(self, proposal_id: str, decision_id: str, decisions: dict[str, str], revision: int, fingerprint: str) -> dict[str, Any]:
         if not proposal_id or len(proposal_id) > 64 or not decision_id or len(decision_id) > 64:
             raise ValueError("invalid decision id")
@@ -148,10 +175,16 @@ class DiscoveryStore:
             proposal = next((p for p in self._data["proposals"] if p.get("proposal_id") == proposal_id), None)
             if proposal is None:
                 raise KeyError("unknown proposal")
-            if proposal["status"] != "pending" or datetime.fromisoformat(proposal["expires_at"].replace("Z", "+00:00")) <= _now():
+            if proposal["status"] not in {"pending", "partially_approved"} or datetime.fromisoformat(proposal["expires_at"].replace("Z", "+00:00")) <= _now():
                 proposal["status"] = "expired"
                 self._persist()
                 raise RuntimeError("proposal expired or resolved")
+            # A partial decision is a durable checkpoint, not a terminal state.
+            # Keep subsequent field decisions bound to the original model snapshot.
+            pending_fields = {f.get("field") for f in proposal.get("fields", [])
+                              if isinstance(f, dict) and f.get("decision") == "pending"}
+            if set(decisions) - pending_fields:
+                raise ValueError("field already decided")
             if revision != proposal["base_revision"] or fingerprint != proposal["base_model_fingerprint"]:
                 proposal["status"] = "conflicted"
                 self._persist()
