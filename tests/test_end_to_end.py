@@ -461,6 +461,23 @@ class MetadataDetailsTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"]["type"], "host_mismatch")
 
+    def test_metrics_emits_cooldown_gauge_from_router_circuits(self) -> None:
+        # Wiring-level regression for QA-W2B-1: handle_metrics must read the
+        # router's real circuit store. With an open circuit, GET /metrics
+        # must carry a gateway_cooldown_remaining_seconds{route="..."} sample.
+        router = self.harness.router
+        self.assertIsNotNone(router)
+        router.circuits.record_failure(FAKE_PROVIDER, "gpt-5-codex", "rate_limited", 30)
+        open_circuits = router.circuits.snapshot()
+        self.assertIn(f"{FAKE_PROVIDER}/gpt-5-codex", open_circuits)
+        status, payload, _ = self.harness.request("GET", "/metrics", raw=True)
+        self.assertEqual(status, 200)
+        text = payload.decode("utf-8")
+        self.assertIn(
+            f'gateway_cooldown_remaining_seconds{{route="{FAKE_PROVIDER}/gpt-5-codex"}} ',
+            text,
+        )
+
 
 class SecurityProbeTests(unittest.TestCase):
     def setUp(self) -> None:
