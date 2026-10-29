@@ -62,5 +62,55 @@ class DiscoveryBackendTests(unittest.TestCase):
                     self.assertEqual(store.proposal(proposal)["status"], "conflicted")
 
 
+class CapabilityApprovalHttpTests(unittest.TestCase):
+    def test_decision_endpoint_updates_only_approved_field(self):
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"},
+                {"capability": "function_tools", "status": "observed_unsupported"},
+            ], row, config.revision)
+            proposal = h.app.discovery.proposal(proposal_id)
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "http-decision-1",
+                "decisions": {"supports_image_input": "approved", "supports_function_tools": "rejected"},
+                "expected_revision": config.revision,
+                "expected_fingerprint": proposal["base_model_fingerprint"],
+            })
+            self.assertEqual(status, 200, payload)
+            updated = h.config.snapshot().providers["chatgpt_codex"].models["gpt-6-luna"]
+            self.assertTrue(updated.supports_image_input)
+            self.assertTrue(updated.supports_function_tools)
+            self.assertTrue(updated.enabled)
+        finally:
+            h.close()
+
+    def test_stale_http_decision_conflicts_without_config_mutation(self):
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"}], row, config.revision)
+            proposal = h.app.discovery.proposal(proposal_id)
+            before = h.config.snapshot().to_dict()
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "stale",
+                "decisions": {"supports_image_input": "approved"},
+                "expected_revision": config.revision + 1,
+                "expected_fingerprint": proposal["base_model_fingerprint"],
+            })
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(h.config.snapshot().to_dict(), before)
+        finally:
+            h.close()
+
+
 if __name__ == "__main__":
     unittest.main()
