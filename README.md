@@ -169,6 +169,13 @@ separately from any other provider, and is **never displayed again**.
 
 ## Models and routes
 
+### Capability discovery (staged, synthetic evidence only)
+
+The owner API supports exact-model preview and explicitly selected, provenance-recorded approval of `supports_image_input` and `supports_function_tools`. Approval is per field; fields not selected remain pending and can be decided in a later owner action. The decision endpoint uses revision/fingerprint compare-and-swap, records exact retries idempotently, and rejects stale proposals. Reads and normal configuration operations never probe providers.
+
+The current preview reports unknown price and refuses execution with HTTP 422. **No real provider/model probe protocol is enabled**: this repository has no reviewed, documented safe adapter probing contract with known bounded cost. Text generation, image input, and function-tool capability probes are unsupported for every provider/model. A synthetic isolated test seam exists for exercising approval behavior; it is not an upstream protocol. No capability conclusions should be inferred from these tests.
+
+
 Discovery never auto-publishes. A discovered model is *staged*; it appears in
 `/v1/models` only after you enable it, give it an alias, and publish that
 alias.

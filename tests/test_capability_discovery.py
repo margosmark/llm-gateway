@@ -108,7 +108,7 @@ class CapabilityApprovalHttpTests(unittest.TestCase):
             proposal = h.app.discovery.proposal(proposal_id)
             status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", {
                 "proposal_id": proposal_id, "decision_id": "http-decision-1",
-                "decisions": {"supports_image_input": "approved", "supports_function_tools": "rejected"},
+                "decisions": {"supports_image_input": "approved"},
                 "expected_revision": config.revision,
                 "expected_fingerprint": proposal["base_model_fingerprint"],
             })
@@ -117,6 +117,27 @@ class CapabilityApprovalHttpTests(unittest.TestCase):
             self.assertTrue(updated.supports_image_input)
             self.assertTrue(updated.supports_function_tools)
             self.assertTrue(updated.enabled)
+            revision_after = h.config.snapshot().revision
+            replay_status, replay, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "http-decision-1",
+                "decisions": {"supports_image_input": "approved"},
+                "expected_revision": config.revision, "expected_fingerprint": proposal["base_model_fingerprint"],
+            })
+            self.assertEqual(replay_status, 200, replay)
+            self.assertEqual(replay["decisions"], payload["decisions"])
+            self.assertEqual(h.config.snapshot().revision, revision_after)
+            # Unselected fields remain decidable against the same snapshot.
+            current_proposal = h.app.discovery.proposal(proposal_id)
+            current_row = h.config.snapshot().providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            status, second, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "http-decision-2",
+                "decisions": {"supports_function_tools": "approved"},
+                "expected_revision": revision_after,
+                "expected_fingerprint": row_fingerprint(current_row),
+            })
+            self.assertEqual(current_proposal["base_revision"], revision_after)
+            self.assertEqual(status, 200, second)
+            self.assertEqual(second["status"], "approved")
         finally:
             h.close()
 
@@ -139,6 +160,9 @@ class CapabilityApprovalHttpTests(unittest.TestCase):
             })
             self.assertEqual(status, 409, payload)
             self.assertEqual(h.config.snapshot().to_dict(), before)
+            outcome = h.app.discovery.proposal(proposal_id)
+            assert outcome is not None
+            self.assertEqual(outcome["status"], "conflicted")
         finally:
             h.close()
 
