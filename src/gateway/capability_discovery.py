@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,48 @@ def preview_for(provider_id: str, model_id: str, probes: list[Any], revision: in
     }
 
 
+def _bounded_count(value: Any) -> int:
+    """A request count is a small non-negative integer, or zero."""
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1000:
+        return value
+    return 0
+
+
+def _bounded_summary(value: Any) -> str | None:
+    """A gateway-authored evidence summary: bounded, control-free."""
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", value).strip()
+    return cleaned[:240] or None
+
+
+def _usage_metadata(value: Any) -> dict[str, int | None] | None:
+    """Reported token counts only — never a prompt, completion or secret."""
+    if not isinstance(value, dict):
+        return None
+    def _token(key: str) -> int | None:
+        entry = value.get(key)
+        return entry if isinstance(entry, int) and not isinstance(entry, bool) and entry >= 0 else None
+    tokens = {"input_tokens": _token("input_tokens"), "output_tokens": _token("output_tokens")}
+    return tokens if tokens["input_tokens"] is not None or tokens["output_tokens"] is not None else None
+
+
+def _spend_metadata(value: Any) -> dict[str, Any] | None:
+    """A tariff estimate: an amount, a currency and its provenance."""
+    if not isinstance(value, dict):
+        return None
+    amount = value.get("amount")
+    if not isinstance(amount, (int, float)) or isinstance(amount, bool) or amount < 0:
+        return None
+    entry: dict[str, Any] = {"amount": float(amount), "currency": "USD"}
+    source, as_of = value.get("source"), value.get("as_of")
+    if isinstance(source, str):
+        entry["source"] = source[:256]
+    if isinstance(as_of, str):
+        entry["as_of"] = as_of[:32]
+    return entry
+
+
 class DiscoveryStore:
     """Private atomic evidence store; never contains probe content or credentials."""
     def __init__(self, path: Path) -> None:
@@ -91,11 +134,33 @@ class DiscoveryStore:
 
     def record_fake_result(self, provider_id: str, model_id: str, results: list[dict[str, Any]], row: dict[str, Any], revision: int) -> str:
         """Test seam: persist sanitized synthetic evidence and an unselected proposal."""
-        if len(results) > 3 or any(
-            not isinstance(r, dict)
-            or r.get("capability") not in PROBES
-            or r.get("status") not in {"observed_supported", "observed_unsupported", "inconclusive"}
-            for r in results
+        _run_id, proposal_id = self.record_run(
+            provider_id, model_id, results, row, revision,
+            evidence_method="synthetic_isolated_fake", request_count=1,
+        )
+        return proposal_id
+
+    def record_run(self, provider_id: str, model_id: str, results: list[dict[str, Any]], row: dict[str, Any], revision: int,
+                   *, evidence_method: str, request_count: int, protocol_version: str | None = None,
+                   session_id: str | None = None, trigger: str = "owner_console") -> tuple[str, str]:
+        """Persist one sanitized evidence run and its unselected proposal.
+
+        Evidence rows are a **closed shape**: capability, status, method,
+        error class, bounded request count, a bounded gateway-authored
+        summary, reported usage and the tariff estimate. Anything else a
+        transport or a caller attaches — provider prose, tool arguments,
+        image bytes, unknown keys — is dropped, never stored, never
+        logged. Persisting a run changes no configuration: the proposal it
+        writes is unselected until the owner decides.
+        """
+        if (
+            len(results) > 3
+            or any(
+                not isinstance(r, dict)
+                or r.get("capability") not in PROBES
+                or r.get("status") not in {"observed_supported", "observed_unsupported", "inconclusive", "not_tested"}
+                for r in results
+            )
         ):
             raise ValueError("invalid result")
         now = _now()
@@ -110,12 +175,29 @@ class DiscoveryStore:
                     fields.append({"field": field, "current_value": current, "proposed_value": proposed,
                                    "evidence_refs": [], "classification": "observed", "decision": "pending"})
         run_id, proposal_id = secrets.token_urlsafe(18), secrets.token_urlsafe(18)
-        safe_errors = {"timeout", "rate_limited", "auth", "policy", "malformed", "unsupported", "transport", None}
-        clean = [{"capability": r["capability"], "status": r["status"], "method": "synthetic_isolated_fake",
+        safe_errors = {"timeout", "rate_limited", "auth", "policy", "malformed", "unsupported", "transport", "billing", "route_gone", "unknown", None}
+        clean = [{"capability": r["capability"], "status": r["status"], "method": evidence_method,
                   "error_class": r.get("error_class") if r.get("error_class") in safe_errors else None,
-                  "request_count": 1} for r in results]
+                  "request_count": _bounded_count(r.get("request_count"))}
+                 for r in results]
+        summaries = {r.get("capability"): _bounded_summary(r.get("evidence_summary")) for r in results}
+        usages = {r.get("capability"): _usage_metadata(r.get("reported_usage")) for r in results}
+        spends = {r.get("capability"): _spend_metadata(r.get("spend_estimate")) for r in results}
+        for entry in clean:
+            if summaries.get(entry["capability"]) is not None:
+                entry["evidence_summary"] = summaries[entry["capability"]]
+            if usages.get(entry["capability"]) is not None:
+                entry["reported_usage"] = usages[entry["capability"]]
+            if spends.get(entry["capability"]) is not None:
+                entry["spend_estimate"] = spends[entry["capability"]]
         run = {"run_id": run_id, "provider_id": provider_id, "model_id": model_id, "started_at": _iso(now),
-               "finished_at": _iso(now), "trigger": "owner_console", "suite_version": "mvp-1", "results": clean}
+               "finished_at": _iso(now), "trigger": trigger, "suite_version": "mvp-1",
+               "evidence_method": evidence_method, "request_count": _bounded_count(request_count),
+               "results": clean}
+        if protocol_version is not None and isinstance(protocol_version, str):
+            run["protocol_version"] = protocol_version[:64]
+        if session_id is not None and isinstance(session_id, str):
+            run["session_id"] = session_id[:64]
         proposal = {"proposal_id": proposal_id, "provider_id": provider_id, "model_id": model_id,
                     "base_revision": revision, "base_model_fingerprint": row_fingerprint(row),
                     "created_at": _iso(now), "expires_at": _iso(now + timedelta(seconds=PREVIEW_TTL_SECONDS)),
@@ -125,7 +207,7 @@ class DiscoveryStore:
             for key in ("runs", "proposals"):
                 self._data[key] = self._data[key][-MAX_RUNS:]
             self._persist()
-        return proposal_id
+        return run_id, proposal_id
 
     def proposal(self, proposal_id: str) -> dict[str, Any] | None:
         with self._lock:

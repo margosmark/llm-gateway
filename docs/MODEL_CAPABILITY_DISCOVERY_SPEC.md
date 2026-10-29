@@ -240,3 +240,36 @@ Avoid edits to `src/gateway/core/routing.py` in MVP if possible: route eligibili
 ## 12. Evidence and verification record
 
 Inspected code and docs from candidate `a3d4046a6c8d93c0baa487309161342eb438f8f2` (tree `35a0aab39676f1d2972abb6122febc11ef6b047e`) on 2026-10-28. Read the model/config and owner API paths (`config.py`, `http/app.py`, `cli.py`), current console (`static/console.js`), capability/router/adapter implementation (`core/capabilities.py`, `core/routing.py`, `adapters/`), and architecture/provider contract docs and fake fixture tests. This is repository evidence, not a live production inspection; no provider call, credential read, production request, code edit, build or deployment was performed.
+
+
+## 13. Implementation status (bounded probe)
+
+Implemented for exactly one reviewed pair, `opencode_go` / `mimo-v2.6-flash`,
+in `src/gateway/capability_probe.py`, `src/gateway/adapters/opencode_go.py`
+(`capability_probe_request`, `probe_readiness`), the discovery store's
+`record_run`, and the owner endpoints
+`POST /owner/api/capabilities/preview`, `/run`, `/probe/cancel`.
+
+What is covered, and how:
+
+| Contract clause | Where it lives | Regression test |
+|---|---|---|
+| Exact reviewed pair; no generic probe path | `PROBE_PROTOCOLS`, `protocol_for` | `test_capability_probe.py::ARegisteredProtocolTests`, `..._http.py::test_an_unregistered_pair_keeps_the_existing_refusal` |
+| Owner route authorization + estimate acceptance + spend ceiling | `build_preview`, `_owner_gate` | `test_capability_probe.py::PreviewContractTests` |
+| `hard_cap_required` refused, never faked | `_owner_gate` | `..._http.py::test_a_hard_cap_request_is_refused_not_pretended` |
+| Unknown **or stale** tariff fails closed | `price_status`, `build_preview`, `catalog_price_for` (provider-scoped) | `..._http.py::test_unknown_or_stale_pricing_fails_closed` |
+| At most two one-shot, non-streamed, non-retried requests; concurrency 1 | `plan_requests`, `run_suite`, `RunGate`, `capability_probe_request` | `..._http.py::test_a_confirmed_run_sends_the_bounded_suite_and_records_evidence`, `..._upstream_error_is_inconclusive_and_never_retried`, `..._second_run_is_refused_while_one_is_in_flight` |
+| Time/byte/token bounds and cancellation | `ProbeProtocol`, `RunGate`, `handle_capability_probe_cancel` | `test_capability_probe.py::RunnerBoundsTests`, `..._http.py::test_the_owner_can_cancel_a_run_in_flight` |
+| Inconclusive, never `false` | `classify_text`, `classify_visual` | `test_capability_probe.py::ClassificationTests` |
+| Tool calls inspected, never executed | `_validate_tool_answer` | `..._http.py::test_a_confirmed_run_...` |
+| Evidence-only side effects | `record_run` sanitizer; run writes evidence + unselected proposal | `..._http.py::test_the_run_changes_no_config_no_route_and_no_ledger` |
+| Single-use, expiring confirmation bound to the preview | `ConfirmationStore`, `preview_binding` | `..._http.py::test_a_run_needs_the_confirmation_issued_by_its_own_preview`, `..._single_use` |
+| No credential, content or image bytes in evidence | `record_run` sanitizers | `..._http.py::test_a_confirmed_run_...`, `..._carries_no_response_text` |
+| No provider request without an explicit run | preview/ready paths never build a transport | asserted in `PreviewContractTests` and the HTTP suite |
+
+Unresolved from §11, deliberately: **owner identity** (the trusted-LAN
+access-by-reachability boundary is still the approval boundary, and the
+console/README say so plainly), **retention**, **negative-observation
+policy** (this implementation never emits `observed_unsupported` — a probe
+can only corroborate support), and the **console integration** for the
+preview/confirm/cancel flow, which is scoped as separate work.
