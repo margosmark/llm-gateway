@@ -167,11 +167,23 @@ class DiscoveryStore:
         if not decisions or len(decisions) > 3 or any(v not in {"approved", "rejected"} for v in decisions.values()):
             raise ValueError("invalid decisions")
         with self._lock:
+            original = self._data
+            self._data = json.loads(json.dumps(original))
+            try:
+                return self._decide_locked(proposal_id, decision_id, decisions, revision, fingerprint)
+            except OSError:
+                # Persistence failures must not leave an in-memory decision
+                # that can be replayed as success. Conflicts intentionally
+                # persist their terminal status before raising RuntimeError.
+                self._data = original
+                raise
+
+    def _decide_locked(self, proposal_id: str, decision_id: str, decisions: dict[str, str], revision: int, fingerprint: str) -> dict[str, Any]:
             for previous in self._data["decisions"]:
                 if previous.get("decision_id") == decision_id:
                     if previous.get("proposal_id") != proposal_id or previous.get("decisions") != decisions:
                         raise RuntimeError("decision id conflict")
-                    return previous["result"]
+                    return json.loads(json.dumps(previous["result"]))
             proposal = next((p for p in self._data["proposals"] if p.get("proposal_id") == proposal_id), None)
             if proposal is None:
                 raise KeyError("unknown proposal")
