@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
+import math
 import re
 import secrets
 import struct
@@ -144,6 +146,7 @@ class ProbeProtocol:
     connect_timeout_seconds: float = 10.0
     run_deadline_seconds: float = 45.0
     max_request_bytes: int = 262_144
+    max_response_bytes: int = 1_048_576
     max_image_bytes: int = 65_536
     concurrency: int = 1
     retries: int = 0
@@ -189,6 +192,11 @@ def price_status(price: Any, now: datetime) -> str:
     if not isinstance(price.get("input_per_m"), (int, float)) or isinstance(price.get("input_per_m"), bool):
         return "unknown"
     if not isinstance(price.get("output_per_m"), (int, float)) or isinstance(price.get("output_per_m"), bool):
+        return "unknown"
+    if any(
+        not math.isfinite(float(price[field])) or float(price[field]) < 0
+        for field in ("input_per_m", "output_per_m")
+    ):
         return "unknown"
     source = price.get("source")
     observed = price.get("observed_at")
@@ -1023,13 +1031,23 @@ def run_suite(
 
         outcome.request_count += 1
         try:
-            response = transport(
-                item.payload,
-                timeout=protocol.request_timeout_seconds,
-                connect_timeout=protocol.connect_timeout_seconds,
-                session_id=session,
-            )
+            transport_kwargs = {
+                "timeout": protocol.request_timeout_seconds,
+                "connect_timeout": protocol.connect_timeout_seconds,
+                "session_id": session,
+            }
+            parameters = inspect.signature(transport).parameters
+            if "deadline" in parameters:
+                transport_kwargs["deadline"] = started + protocol.run_deadline_seconds
+                transport_kwargs["cancel_event"] = cancel_event
+                transport_kwargs["max_response_bytes"] = protocol.max_response_bytes
+            response = transport(item.payload, **transport_kwargs)
         except AdapterError as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                outcome.cancelled = True
+                outcome.blocked_reason = "cancelled"
+            elif monotonic() - started >= protocol.run_deadline_seconds:
+                outcome.blocked_reason = "deadline"
             failure = evidence_error_class(exc)
             for capability in item.capabilities:
                 pending[capability] = _result(
@@ -1039,10 +1057,19 @@ def run_suite(
                     error_class=failure,
                     request_count=outcome.request_count,
                 )
-            outcome.blocked_reason = "prior_failure"
+            if not outcome.cancelled and outcome.blocked_reason != "deadline":
+                outcome.blocked_reason = "prior_failure"
             break
 
         payload: Any = None
+        if response.body is not None and len(response.body) > protocol.max_response_bytes:
+            for capability in item.capabilities:
+                pending[capability] = _result(
+                    capability, "inconclusive", "the upstream response exceeded the configured byte limit",
+                    error_class="response_too_large", request_count=outcome.request_count,
+                )
+            outcome.blocked_reason = "prior_failure"
+            break
         try:
             if response.body:
                 payload = json.loads(response.body.decode("utf-8", "replace"))
@@ -1056,6 +1083,17 @@ def run_suite(
                     "the response was not a well-formed object",
                     error_class="malformed",
                     request_count=outcome.request_count,
+                )
+            outcome.blocked_reason = "prior_failure"
+            break
+
+        # Support evidence is only attributable when the provider echoes the
+        # exact reviewed model. Missing or different IDs are inconclusive.
+        if payload.get("model") != protocol.model_id:
+            for capability in item.capabilities:
+                pending[capability] = _result(
+                    capability, "inconclusive", "the response did not identify the exact reviewed model",
+                    error_class="model_mismatch", request_count=outcome.request_count,
                 )
             outcome.blocked_reason = "prior_failure"
             break

@@ -199,6 +199,9 @@ class OpenCodeGoAdapter:
         timeout: float,
         connect_timeout: float,
         session_id: str,
+        deadline: float | None = None,
+        cancel_event=None,
+        max_response_bytes: int = 1_048_576,
     ) -> ProviderResponse:
         """One bounded, non-retried inference request for the probe suite.
 
@@ -234,6 +237,9 @@ class OpenCodeGoAdapter:
                 body=body,
                 stream=False,
                 provider_id=PROVIDER_ID,
+                max_body_bytes=max_response_bytes,
+                deadline=deadline,
+                cancel_event=cancel_event,
             )
         finally:
             client.close()
