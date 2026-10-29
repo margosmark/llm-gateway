@@ -42,7 +42,12 @@ from gateway.ledger_persistence import ROLLUP_SCHEMA
 from gateway.statistics import aggregate_statistics
 from gateway.provider_health import provider_health
 from gateway.stores import atomic_write_json
-from gateway.capability_discovery import APPROVABLE_METADATA_FIELDS, DiscoveryStore, preview_for
+from gateway.capability_discovery import (
+    APPROVABLE_METADATA_FIELDS,
+    EVIDENCE_CLASSIFICATIONS,
+    DiscoveryStore,
+    preview_for,
+)
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
@@ -1204,27 +1209,35 @@ class GatewayApp:
                 # types. Apply the shared capability vocabulary and require a
                 # boolean before any config or evidence write, so this endpoint
                 # can never become an arbitrary metadata patch (spec: decision
-                # endpoint). These checks raise before decide()/setattr, so a
-                # refused request records nothing and leaves config unchanged.
+                # endpoint). Every key the apply loop later reads -- including
+                # `classification` -- is validated here and the approved writes
+                # are precomputed, so these checks raise before decide()/setattr:
+                # a refused request records nothing, leaves config unchanged and
+                # never burns the proposal (a post-decide() refusal would leave
+                # the 0600 sidecar claiming an approval that never applied).
                 field_records = {f.get("field"): f for f in proposal.get("fields", []) if isinstance(f, dict)}
                 if not set(decisions) <= APPROVABLE_METADATA_FIELDS:
                     raise ValueError("field outside capability vocabulary")
-                for field in decisions:
+                approved_writes = []
+                for field, decision in decisions.items():
                     field_record = field_records.get(field)
                     if field_record is None:
                         raise ValueError("unknown proposal field")
                     if not isinstance(field_record.get("proposed_value"), bool):
                         raise ValueError("non-boolean capability value")
+                    if field_record.get("classification") not in EVIDENCE_CLASSIFICATIONS:
+                        raise ValueError("unknown evidence classification")
+                    if decision == "approved":
+                        approved_writes.append(
+                            (field, field_record["proposed_value"], field_record["classification"]))
                 result = self.discovery.decide(proposal_id, decision_id, decisions, revision, fingerprint)
                 approvals = config.settings.setdefault("capability_approvals", {})
                 target = approvals.setdefault(provider_id, {}).setdefault(model_id, {})
-                for field, decision in decisions.items():
-                    if decision == "approved":
-                        field_record = field_records[field]
-                        setattr(row, field, field_record["proposed_value"])
-                        target[field] = {"value": field_record["proposed_value"], "source": "capability_discovery_observation",
-                                         "proposal_id": proposal_id, "decision_id": decision_id,
-                                         "approved_at": utc_now_iso(), "classification": field_record["classification"]}
+                for field, value, classification in approved_writes:
+                    setattr(row, field, value)
+                    target[field] = {"value": value, "source": "capability_discovery_observation",
+                                     "proposal_id": proposal_id, "decision_id": decision_id,
+                                     "approved_at": utc_now_iso(), "classification": classification}
                 if not target:
                     approvals.get(provider_id, {}).pop(model_id, None)
                 result["revision"] = config.revision + 1
