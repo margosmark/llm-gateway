@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import patch
 
-from gateway.adapters.base import AdapterError
+from gateway.adapters.base import AdapterError, ProviderResponse
 
 from gateway.capability_probe import (
     PROBE_PROTOCOLS,
@@ -175,6 +175,41 @@ class PreviewGateTests(unittest.TestCase):
             places=12,
         )
         self.assertEqual(result["price"]["status"], "known")
+
+    def test_response_body_byte_limit_marks_result_inconclusive(self):
+        protocol = dataclasses.replace(PROTOCOL, max_response_bytes=32)
+        planned = plan_requests(protocol, ["text_generation"])
+        outcome = run_suite(
+            protocol, ["text_generation"],
+            lambda *_a, **_kw: ProviderResponse(status=200, body=b"{" + b" " * 64 + b"}"),
+            price=FRESH_PRICE, plan=planned,
+        )
+        self.assertEqual(outcome.results[0]["status"], "inconclusive")
+        self.assertEqual(outcome.results[0]["error_class"], "response_too_large")
+
+    def test_invalid_prices_fail_closed(self):
+        for invalid in (float("nan"), float("inf"), float("-inf"), -0.01):
+            with self.subTest(invalid=invalid):
+                price = dict(FRESH_PRICE, input_per_m=invalid)
+                self.assertEqual(price_status(price, NOW), "unknown")
+                result = preview(owner(), price=price)
+                self.assertFalse(result["available"])
+                self.assertEqual(result["code"], "price_unavailable")
+
+    def test_response_for_different_or_missing_model_is_inconclusive(self):
+        protocol = PROBE_PROTOCOLS[("opencode_go", "mimo-v2.6-flash")]
+        planned = plan_requests(protocol, ["text_generation"])
+        nonce = planned[0].nonce
+        for reported in ("DIFFERENT-MODEL", None):
+            payload = {
+                "model": reported,
+                "choices": [{"message": {"content": nonce}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
+            }
+            outcome = run_suite(protocol, ["text_generation"], lambda *_a, **_kw: ProviderResponse(
+                status=200, body=json.dumps(payload).encode(),
+            ), price=FRESH_PRICE, plan=planned)
+            self.assertEqual(outcome.results[0]["status"], "inconclusive")
 
     def test_price_status_rules(self):
         self.assertEqual(price_status(FRESH_PRICE, NOW), "known")

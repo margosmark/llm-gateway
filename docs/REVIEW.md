@@ -2099,6 +2099,14 @@ The owner API is intentionally exposed to trusted-LAN devices and validates the 
 **Regression evidence.** `tests/test_capability_discovery.py` exercises sequential HTTP decisions with refreshed CAS, exact HTTP replay without another revision bump, stale HTTP conflict status and zero config mutation, and store-level partial progression. Candidate verification: full unittest suite 920 tests, 3 skipped; compileall, console/catalogue checks and `git diff --check` clean.
 
 
+### R59 — Capability probe accepted misattributed model evidence and had unbounded response/deadline paths — **closed**
+
+**Severity: High.** The probe classified a nonce echo as support without requiring the response `model` to match the reviewed model, and treated NaN/infinite/negative published prices as `known`, allowing a nonsensical estimate to pass authorization. In addition, buffered probe reads had no response-byte ceiling or absolute end-to-end timeout; cancellation only set an event checked between requests, so an in-flight read could retain the run gate.
+
+**Fix.** Pricing status now rejects non-finite and negative values; response classification refuses missing or mismatched model IDs as inconclusive. The reviewed probe protocol sets a 1 MiB response ceiling. Its transport reads bounded chunks, applies an absolute run deadline, and watches cancellation/deadline to close the active connection, so trickle progress cannot extend the budget and cancellation interrupts a blocked read. Probe cancellation/deadline errors remain inconclusive and the run reports the correct stop reason.
+
+**Regression evidence.** `tests/test_capability_probe.py` covers NaN, ±infinity, negative pricing, mismatched/absent response model, and oversized response refusal. `tests/test_capability_probe_http.py::ProbeHttpTests::test_the_owner_can_cancel_a_run_in_flight` exercises cancellation against the isolated delayed loopback upstream. On this candidate: focused probe/HTTP/retry/upstream-pool suite 87 tests passed; full unittest suite 988 tests passed (3 skipped) before the final stop-watch cleanup adjustment; `compileall`, `git diff --check`, console DOM and catalogue checks passed. No paid provider calls or production operations.
+
 ### R58 — Proposal expiry prevented recovery of a config-committed approval audit — **closed**
 
 **Severity: Medium (crash recovery and audit availability).** Config-first approval persistence intentionally makes config the durable transaction record. If the process stopped after the config commit but before the discovery sidecar commit, and the proposal TTL elapsed before retry, the exact retry was rejected by `DiscoveryStore.decide()` as expired. Effective config and provenance were already committed, but the sidecar could never be repaired through the owner endpoint.

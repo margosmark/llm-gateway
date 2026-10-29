@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import atexit
 import http.client
+import inspect
 import json
 import select
 import socket
@@ -283,6 +284,8 @@ class UpstreamClient:
         self.connect_timeout = connect_timeout
         self.user_agent = user_agent
         self._pool = _ConnectionPool()
+        self._active_lock = threading.Lock()
+        self._active: set[http.client.HTTPConnection] = set()
         _LIVE_CLIENTS.add(self)
 
     @staticmethod
@@ -300,8 +303,12 @@ class UpstreamClient:
             connection.sock.settimeout(timeout)
 
     def close(self) -> None:
-        """Close every idle connection this client holds. Idempotent."""
+        """Close pooled and active connections. Idempotent."""
         self._pool.close()
+        with self._active_lock:
+            active = list(self._active)
+        for connection in active:
+            connection.close()
 
     @property
     def closed(self) -> bool:
@@ -331,10 +338,18 @@ class UpstreamClient:
         stream: bool = False,
     ) -> tuple[tuple[str, str, int], http.client.HTTPConnection, http.client.HTTPResponse]:
         key, target, host_header = self._connection_key(url)
+        effective_timeout = self.timeout
+        if hasattr(self, "_probe_deadline") and self._probe_deadline is not None:
+            remaining = self._probe_deadline - time.monotonic()
+            if remaining <= 0:
+                raise AdapterError(ERROR_TRANSIENT, "probe deadline exceeded", provider_id=provider_id)
+            effective_timeout = min(effective_timeout, remaining)
         try:
-            connection, reused = self._pool.acquire(key, self.timeout, connect_timeout=self.connect_timeout)
+            connection, reused = self._pool.acquire(key, effective_timeout, connect_timeout=min(self.connect_timeout, effective_timeout))
         except RuntimeError as exc:  # the pool was closed by a shutdown
             raise AdapterError(ERROR_UNKNOWN, f"the gateway is shutting down ({exc})", provider_id=provider_id) from None
+        with self._active_lock:
+            self._active.add(connection)
         request_headers = dict(headers)
         request_headers.setdefault("Host", host_header)
         if self.user_agent:
@@ -353,7 +368,7 @@ class UpstreamClient:
                         "the provider did not accept a connection within the configured timeout",
                         provider_id=provider_id,
                     ) from None
-                self._arm(connection, self.timeout)
+                self._arm(connection, effective_timeout)
             try:
                 # --- read budget: writing the request. Sending is the
                 # gateway's own bytes; a provider that never reads them is
@@ -416,7 +431,12 @@ class UpstreamClient:
         body: bytes | None,
         stream: bool,
         provider_id: str,
+        *,
+        max_body_bytes: int | None = None,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> UpstreamResponse:
+        self._probe_deadline = deadline
         try:
             key, connection, raw = self._open(method, url, headers, body, provider_id, stream)
         except TimeoutError:
@@ -442,6 +462,20 @@ class UpstreamClient:
             ) from None
         except ValueError:
             raise AdapterError(ERROR_UNKNOWN, "the provider URL is invalid", provider_id=provider_id) from None
+
+        stop_watch = threading.Event()
+        if cancel_event is not None or deadline is not None:
+            def interrupt_when_needed() -> None:
+                while not stop_watch.is_set():
+                    if cancel_event is not None and cancel_event.is_set():
+                        connection.close()
+                        return
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        connection.close()
+                        return
+                    stop_watch.wait(min(0.05, remaining) if remaining is not None else 0.05)
+            threading.Thread(target=interrupt_when_needed, daemon=True).start()
 
         headers_map = {name.lower(): value for name, value in raw.getheaders()}
         # A 2xx is assumed to be JSON unless it says otherwise. Anything else
@@ -479,8 +513,43 @@ class UpstreamClient:
         # when every request opened its own connection, and the adapters
         # read ``response.body`` on this path.
         try:
-            payload = raw.read()
+            if max_body_bytes is None and deadline is None and cancel_event is None:
+                payload = raw.read()
+            else:
+                # Read in bounded chunks and check cancellation/deadline between
+                # reads. Re-arm the socket with the remaining overall budget so
+                # trickling bytes cannot extend the request indefinitely.
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise TimeoutError("probe cancelled")
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError("probe deadline")
+                    sock = getattr(getattr(raw, "fp", None), "raw", None)
+                    sock = getattr(sock, "_sock", None)
+                    if sock is not None:
+                        wait_budget = self.timeout if remaining is None else min(self.timeout, remaining)
+                        if cancel_event is not None:
+                            wait_budget = min(wait_budget, 0.1)
+                        sock.settimeout(wait_budget)
+                    chunk = raw.read(min(65_536, max_body_bytes - total + 1) if max_body_bytes is not None else 65_536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if max_body_bytes is not None and total > max_body_bytes:
+                        raise AdapterError(ERROR_TRANSIENT, "the provider response exceeded the configured byte limit", provider_id=provider_id)
+                    chunks.append(chunk)
+                payload = b"".join(chunks)
+        except AdapterError:
+            if 'stop_watch' in locals():
+                stop_watch.set()
+            self._pool.release(key, connection, False)
+            raise
         except TimeoutError:
+            if 'stop_watch' in locals():
+                stop_watch.set()
             self._pool.release(key, connection, False)
             raise AdapterError(
                 ERROR_TRANSIENT,
@@ -494,6 +563,10 @@ class UpstreamClient:
             ) from None
         # The whole body has been read, so the connection is clean and may
         # serve the next request unless the peer asked us not to reuse it.
+        if 'stop_watch' in locals():
+            stop_watch.set()
+        with self._active_lock:
+            self._active.discard(connection)
         self._pool.release(key, connection, not raw.will_close)
 
         return UpstreamResponse(raw.status, headers_map, payload, None, content_type)
@@ -508,6 +581,9 @@ class UpstreamClient:
         provider_id: str = "",
         retry_safe: bool = False,
         retries: int = 2,
+        max_body_bytes: int | None = None,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> UpstreamResponse:
         """Perform one upstream request.
 
@@ -520,7 +596,14 @@ class UpstreamClient:
         attempts = retries + 1 if retry_safe else 1
         last: UpstreamResponse | None = None
         for attempt in range(attempts):
-            last = self._request_once(method, url, headers, body, stream, provider_id)
+            request_kwargs = {}
+            if "max_body_bytes" in inspect.signature(self._request_once).parameters:
+                request_kwargs = {
+                    "max_body_bytes": max_body_bytes,
+                    "deadline": deadline,
+                    "cancel_event": cancel_event,
+                }
+            last = self._request_once(method, url, headers, body, stream, provider_id, **request_kwargs)
             if not retry_safe or last.status < 500 or attempt == attempts - 1:
                 return last
             # A short, bounded backoff. The upstream often answers a
