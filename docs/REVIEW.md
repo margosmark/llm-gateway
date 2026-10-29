@@ -2097,3 +2097,12 @@ The owner API is intentionally exposed to trusted-LAN devices and validates the 
 **Fix.** Partial proposals stay decidable for still-pending fields. Following a successful partial config write, the sidecar advances its CAS base to the new revision and model fingerprint; a later explicit decision can resolve remaining fields, while stale tokens conflict. Exact decision ID + proposal + decision data replays the stored result before config mutation; ID reuse with different data conflicts. Stale CAS marks the proposal `conflicted` before HTTP 409. No automatic metadata updates or provider calls are introduced.
 
 **Regression evidence.** `tests/test_capability_discovery.py` exercises sequential HTTP decisions with refreshed CAS, exact HTTP replay without another revision bump, stale HTTP conflict status and zero config mutation, and store-level partial progression. Candidate verification: full unittest suite 920 tests, 3 skipped; compileall, console/catalogue checks and `git diff --check` clean.
+
+
+### R58 — Proposal expiry prevented recovery of a config-committed approval audit — **closed**
+
+**Severity: Medium (crash recovery and audit availability).** Config-first approval persistence intentionally makes config the durable transaction record. If the process stopped after the config commit but before the discovery sidecar commit, and the proposal TTL elapsed before retry, the exact retry was rejected by `DiscoveryStore.decide()` as expired. Effective config and provenance were already committed, but the sidecar could never be repaired through the owner endpoint.
+
+**Fix.** The handler's config-marker recovery path now explicitly invokes `decide(..., recover_committed=True)` only after matching the durable marker's proposal, decision ID, and decision map. The store still performs its exact decision replay check first; recovery permits an expired proposal status only on that explicit path. Ordinary new decisions remain expiry-gated, while terminal resolved/conflicted states and conflicting decision-ID reuse remain refused.
+
+**Regression evidence.** `tests/test_capability_discovery.py::CapabilityApprovalHttpTests::test_expired_proposal_recovers_only_exact_config_committed_decision` injects sidecar persistence failure, reloads the sidecar after advancing expiry, confirms exact retry recovers approval, and confirms a different decision ID receives 409 without changing the resolved proposal. It exercises the isolated HTTP harness only; no providers or production lifecycle.

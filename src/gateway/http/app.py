@@ -1216,7 +1216,7 @@ class GatewayApp:
             committed = self.config.snapshot()
             decision_marker = committed.settings.get("capability_decisions", {}).get(proposal_id)
             if isinstance(decision_marker, dict) and decision_marker.get("decision_id") == decision_id and decision_marker.get("decisions") == decisions:
-                result = self.discovery.decide(proposal_id, decision_id, decisions, revision, fingerprint)
+                result = self.discovery.decide(proposal_id, decision_id, decisions, revision, fingerprint, recover_committed=True)
                 result["revision"] = committed.revision
                 if result["status"] == "partially_approved":
                     row_now = committed.providers[provider_id].models[model_id]

@@ -161,7 +161,7 @@ class DiscoveryStore:
                 proposal["status"] = "conflicted"
                 self._persist()
 
-    def decide(self, proposal_id: str, decision_id: str, decisions: dict[str, str], revision: int, fingerprint: str) -> dict[str, Any]:
+    def decide(self, proposal_id: str, decision_id: str, decisions: dict[str, str], revision: int, fingerprint: str, *, recover_committed: bool = False) -> dict[str, Any]:
         if not proposal_id or len(proposal_id) > 64 or not decision_id or len(decision_id) > 64:
             raise ValueError("invalid decision id")
         if not decisions or len(decisions) > 3 or any(v not in {"approved", "rejected"} for v in decisions.values()):
@@ -170,7 +170,7 @@ class DiscoveryStore:
             original = self._data
             self._data = json.loads(json.dumps(original))
             try:
-                return self._decide_locked(proposal_id, decision_id, decisions, revision, fingerprint)
+                return self._decide_locked(proposal_id, decision_id, decisions, revision, fingerprint, recover_committed=recover_committed)
             except OSError:
                 # Persistence failures must not leave an in-memory decision
                 # that can be replayed as success. Conflicts intentionally
@@ -178,7 +178,7 @@ class DiscoveryStore:
                 self._data = original
                 raise
 
-    def _decide_locked(self, proposal_id: str, decision_id: str, decisions: dict[str, str], revision: int, fingerprint: str) -> dict[str, Any]:
+    def _decide_locked(self, proposal_id: str, decision_id: str, decisions: dict[str, str], revision: int, fingerprint: str, *, recover_committed: bool = False) -> dict[str, Any]:
             for previous in self._data["decisions"]:
                 if previous.get("decision_id") == decision_id:
                     if previous.get("proposal_id") != proposal_id or previous.get("decisions") != decisions:
@@ -187,9 +187,16 @@ class DiscoveryStore:
             proposal = next((p for p in self._data["proposals"] if p.get("proposal_id") == proposal_id), None)
             if proposal is None:
                 raise KeyError("unknown proposal")
-            if proposal["status"] not in {"pending", "partially_approved"} or datetime.fromisoformat(proposal["expires_at"].replace("Z", "+00:00")) <= _now():
-                proposal["status"] = "expired"
-                self._persist()
+            expired = datetime.fromisoformat(proposal["expires_at"].replace("Z", "+00:00")) <= _now()
+            # Expiry gates new decisions, but not completion of the exact audit
+            # record for a config transaction already durably committed. The
+            # HTTP layer may set this only after matching config's transaction
+            # marker; the decision-id replay check above remains authoritative.
+            recoverable_status = {"pending", "partially_approved", "expired"} if recover_committed else {"pending", "partially_approved"}
+            if proposal["status"] not in recoverable_status or (expired and not recover_committed):
+                if proposal["status"] in {"pending", "partially_approved"}:
+                    proposal["status"] = "expired"
+                    self._persist()
                 raise RuntimeError("proposal expired or resolved")
             # A partial decision is a durable checkpoint, not a terminal state.
             # Keep subsequent field decisions bound to the original model snapshot.
