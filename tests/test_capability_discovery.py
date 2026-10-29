@@ -158,6 +158,59 @@ class CapabilityApprovalHttpTests(unittest.TestCase):
         finally:
             h.close()
 
+    def test_expired_proposal_recovers_only_exact_config_committed_decision(self):
+        from datetime import datetime, timedelta, timezone
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"}], row, config.revision)
+            proposal = h.app.discovery.proposal(proposal_id)
+            assert proposal is not None
+            request = {"proposal_id": proposal_id, "decision_id": "expired-recovery",
+                       "decisions": {"supports_image_input": "approved"},
+                       "expected_revision": config.revision,
+                       "expected_fingerprint": proposal["base_model_fingerprint"]}
+            original_persist = h.app.discovery._persist
+            h.app.discovery._persist = lambda: (_ for _ in ()).throw(OSError("synthetic sidecar failure"))
+            status, _, _ = h.request("POST", "/owner/api/capabilities/decision", request)
+            self.assertEqual(status, 400)
+            h.app.discovery._persist = original_persist
+
+            # Simulate downtime past TTL with config's durable decision marker intact.
+            sidecar_path = h.data_dir / "capability_discovery.json"
+            sidecar = json.loads(sidecar_path.read_text())
+            item = next(x for x in sidecar["proposals"] if x["proposal_id"] == proposal_id)
+            item["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+            sidecar_path.write_text(json.dumps(sidecar))
+            h.app.discovery = DiscoveryStore(sidecar_path)
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", request)
+            self.assertEqual(status, 200, payload)
+            self.assertEqual(payload["status"], "approved")
+            self.assertEqual(h.app.discovery.decision_replay(proposal_id, request["decision_id"], request["decisions"]), payload)
+            config_after = h.config.snapshot()
+            provenance = config_after.settings["capability_approvals"]["chatgpt_codex"]["gpt-6-luna"]["supports_image_input"]
+            self.assertEqual(provenance["decision_id"], request["decision_id"])
+            self.assertEqual(provenance["proposal_id"], proposal_id)
+            self.assertEqual(provenance["source"], "capability_discovery_observation")
+
+            # Reusing the ID with a different payload, or creating a fresh
+            # decision after expiry, cannot mutate config or the audit result.
+            config_before = (h.data_dir / "config.json").read_bytes()
+            conflicting = dict(request, decisions={"supports_image_input": "rejected"})
+            status, _, _ = h.request("POST", "/owner/api/capabilities/decision", conflicting)
+            self.assertEqual(status, 409)
+            unauthorized = dict(request, decision_id="new-expired-decision")
+            status, _, _ = h.request("POST", "/owner/api/capabilities/decision", unauthorized)
+            self.assertEqual(status, 409)
+            self.assertEqual((h.data_dir / "config.json").read_bytes(), config_before)
+            self.assertEqual(h.app.discovery.proposal(proposal_id)["status"], "approved")
+        finally:
+            h.close()
+
     def test_decision_endpoint_updates_only_approved_field(self):
         from tests.test_end_to_end import GatewayHarness
 
