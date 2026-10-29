@@ -94,6 +94,70 @@ class DiscoveryBackendTests(unittest.TestCase):
 
 
 class CapabilityApprovalHttpTests(unittest.TestCase):
+    def test_config_persistence_failure_does_not_consume_decision_and_retry_applies(self):
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"}], row, config.revision)
+            proposal = h.app.discovery.proposal(proposal_id)
+            assert proposal is not None
+            request = {"proposal_id": proposal_id, "decision_id": "disk-failure-1",
+                       "decisions": {"supports_image_input": "approved"},
+                       "expected_revision": config.revision,
+                       "expected_fingerprint": proposal["base_model_fingerprint"]}
+            original_persist = h.config._persist
+            h.config._persist = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic disk full"))
+            status, _, _ = h.request("POST", "/owner/api/capabilities/decision", request)
+            self.assertEqual(status, 400)
+            outcome = h.app.discovery.proposal(proposal_id)
+            assert outcome is not None
+            self.assertEqual(outcome["status"], "pending")
+            self.assertEqual(outcome["fields"][0]["decision"], "pending")
+            self.assertFalse(h.config.snapshot().providers["chatgpt_codex"].models["gpt-6-luna"].supports_image_input)
+            h.config._persist = original_persist
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", request)
+            self.assertEqual(status, 200, payload)
+            self.assertTrue(h.config.snapshot().providers["chatgpt_codex"].models["gpt-6-luna"].supports_image_input)
+            self.assertEqual(h.app.discovery.proposal(proposal_id)["status"], "approved")
+        finally:
+            h.close()
+
+    def test_sidecar_failure_is_recoverable_by_exact_retry_from_config_marker(self):
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"}], row, config.revision)
+            proposal = h.app.discovery.proposal(proposal_id)
+            assert proposal is not None
+            request = {"proposal_id": proposal_id, "decision_id": "sidecar-failure-1",
+                       "decisions": {"supports_image_input": "approved"},
+                       "expected_revision": config.revision,
+                       "expected_fingerprint": proposal["base_model_fingerprint"]}
+            original_persist = h.app.discovery._persist
+            h.app.discovery._persist = lambda: (_ for _ in ()).throw(OSError("synthetic sidecar failure"))
+            status, _, _ = h.request("POST", "/owner/api/capabilities/decision", request)
+            self.assertEqual(status, 400)
+            self.assertTrue(h.config.snapshot().providers["chatgpt_codex"].models["gpt-6-luna"].supports_image_input)
+            h.app.discovery._persist = original_persist
+            # Simulate process restart: reload the durable sidecar, while the
+            # config marker survives in config.json.
+            h.app.discovery = DiscoveryStore(h.data_dir / "capability_discovery.json")
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", request)
+            self.assertEqual(status, 200, payload)
+            replay = h.app.discovery.decision_replay(proposal_id, "sidecar-failure-1", request["decisions"])
+            assert replay is not None
+            self.assertEqual(replay["status"], "approved")
+        finally:
+            h.close()
+
     def test_decision_endpoint_updates_only_approved_field(self):
         from tests.test_end_to_end import GatewayHarness
 

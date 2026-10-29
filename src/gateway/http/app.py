@@ -1193,11 +1193,38 @@ class GatewayApp:
             # has advanced. This must precede snapshot CAS and any config mutation.
             replay = self.discovery.decision_replay(proposal_id, decision_id, decisions)
             if replay is not None:
+                # A prior sidecar commit may have failed while checkpointing
+                # the remaining partial proposal. Repair that checkpoint from
+                # the config snapshot before returning replay success.
+                if replay.get("status") == "partially_approved":
+                    proposal = self.discovery.proposal(proposal_id)
+                    if proposal is not None:
+                        config = self.config.snapshot()
+                        row = config.providers[proposal["provider_id"]].models[proposal["model_id"]]
+                        fingerprint_now = hashlib.sha256(
+                            json.dumps(row.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+                        ).hexdigest()
+                        self.discovery.rebase_partial(proposal_id, config.revision, fingerprint_now)
                 return json_response(replay)
             proposal = self.discovery.proposal(proposal_id)
             if proposal is None:
                 return json_response({"error": {"message": "Unknown capability proposal", "type": "unknown_proposal"}}, 404)
             provider_id, model_id = proposal["provider_id"], proposal["model_id"]
+            # If a previous request durably committed config but failed before
+            # the evidence sidecar commit (or the process stopped there), finish
+            # that exact transaction from config's durable decision marker.
+            committed = self.config.snapshot()
+            decision_marker = committed.settings.get("capability_decisions", {}).get(proposal_id)
+            if isinstance(decision_marker, dict) and decision_marker.get("decision_id") == decision_id and decision_marker.get("decisions") == decisions:
+                result = self.discovery.decide(proposal_id, decision_id, decisions, revision, fingerprint)
+                result["revision"] = committed.revision
+                if result["status"] == "partially_approved":
+                    row_now = committed.providers[provider_id].models[model_id]
+                    updated_fingerprint = hashlib.sha256(
+                        json.dumps(row_now.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    self.discovery.rebase_partial(proposal_id, committed.revision, updated_fingerprint)
+                return json_response(result)
             with self.config.mutate() as config:
                 provider = config.providers.get(provider_id)
                 row = provider.models.get(model_id) if provider else None
@@ -1237,7 +1264,10 @@ class GatewayApp:
                     if decision == "approved":
                         approved_writes.append(
                             (field, field_record["proposed_value"], field_record["classification"]))
-                result = self.discovery.decide(proposal_id, decision_id, decisions, revision, fingerprint)
+                # Persist the effective config before recording the decision in
+                # the evidence sidecar. If config persistence fails, the
+                # proposal remains pending and the same decision can be retried.
+                result = {"proposal_id": proposal_id, "status": "approved", "decisions": decisions}
                 approvals = config.settings.setdefault("capability_approvals", {})
                 target = approvals.setdefault(provider_id, {}).setdefault(model_id, {})
                 for field, value, classification in approved_writes:
@@ -1247,12 +1277,33 @@ class GatewayApp:
                                      "approved_at": utc_now_iso(), "classification": classification}
                 if not target:
                     approvals.get(provider_id, {}).pop(model_id, None)
+                decision_markers = config.settings.setdefault("capability_decisions", {})
+                decision_markers[proposal_id] = {"decision_id": decision_id, "decisions": decisions}
+                # Keep recovery metadata bounded to the proposal-store window.
+                for stale_id in list(decision_markers)[:-500]:
+                    decision_markers.pop(stale_id, None)
                 result["revision"] = config.revision + 1
+                remaining = [
+                    field for field in proposal.get("fields", [])
+                    if isinstance(field, dict) and field.get("field") not in decisions
+                    and field.get("decision") == "pending"
+                ]
+                result["status"] = "partially_approved" if remaining else "approved"
+                result["revision"] = config.revision + 1
+            # Config is now durable. Commit the audit/decision sidecar second;
+            # if it fails the request reports failure, but retry must repair it
+            # from the provenance written atomically with config.
+            committed_config = self.config.snapshot()
+            row_now = committed_config.providers[provider_id].models[model_id]
+            committed_approvals = committed_config.settings.get("capability_approvals", {}).get(provider_id, {}).get(model_id, {})
+            if all(committed_approvals.get(field, {}).get("decision_id") == decision_id for field in decisions if decisions[field] == "approved"):
+                result = self.discovery.decide(proposal_id, decision_id, decisions, revision, fingerprint)
+                result["revision"] = committed_config.revision
                 if result["status"] == "partially_approved":
                     updated_fingerprint = hashlib.sha256(
-                        json.dumps(row.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+                        json.dumps(row_now.to_dict(), sort_keys=True, separators=(",", ":")).encode()
                     ).hexdigest()
-                    self.discovery.rebase_partial(proposal_id, result["revision"], updated_fingerprint)
+                    self.discovery.rebase_partial(proposal_id, committed_config.revision, updated_fingerprint)
             return json_response(result)
         except (ValueError, TypeError, KeyError):
             return json_response({"error": {"message": "Invalid capability decision", "type": "invalid_request"}}, 400)
