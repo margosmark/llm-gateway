@@ -1173,7 +1173,54 @@ class GatewayApp:
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
-        return json_response({"error": {"message": "No pending capability proposal", "type": "unknown_proposal"}}, 404)
+        try:
+            payload = request.json()
+            proposal_id = payload["proposal_id"]
+            decision_id = payload["decision_id"]
+            decisions = payload["decisions"]
+            revision = payload["expected_revision"]
+            fingerprint = payload["expected_fingerprint"]
+            if (not isinstance(proposal_id, str) or not isinstance(decision_id, str)
+                    or not isinstance(decisions, dict) or not isinstance(revision, int)
+                    or isinstance(revision, bool) or not isinstance(fingerprint, str)):
+                raise ValueError
+            proposal = self.discovery.proposal(proposal_id)
+            if proposal is None:
+                return json_response({"error": {"message": "Unknown capability proposal", "type": "unknown_proposal"}}, 404)
+            provider_id, model_id = proposal["provider_id"], proposal["model_id"]
+            with self.config.mutate() as config:
+                provider = config.providers.get(provider_id)
+                row = provider.models.get(model_id) if provider else None
+                if row is None:
+                    return json_response({"error": {"message": "Proposal target no longer exists", "type": "unknown_model"}}, 404)
+                current = row.to_dict()
+                actual_fingerprint = hashlib.sha256(json.dumps(current, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                if config.revision != revision or actual_fingerprint != fingerprint:
+                    raise RuntimeError("stale config")
+                if proposal["base_revision"] != revision or proposal["base_model_fingerprint"] != fingerprint:
+                    raise RuntimeError("stale proposal")
+                result = self.discovery.decide(proposal_id, decision_id, decisions, revision, fingerprint)
+                approvals = config.settings.setdefault("capability_approvals", {})
+                target = approvals.setdefault(provider_id, {}).setdefault(model_id, {})
+                for field, decision in decisions.items():
+                    if decision == "approved":
+                        field_record = next((f for f in proposal["fields"] if f["field"] == field), None)
+                        if field_record is None:
+                            raise ValueError("unknown proposal field")
+                        setattr(row, field, field_record["proposed_value"])
+                        target[field] = {"value": field_record["proposed_value"], "source": "capability_discovery_observation",
+                                         "proposal_id": proposal_id, "decision_id": decision_id,
+                                         "approved_at": utc_now_iso(), "classification": field_record["classification"]}
+                if not target:
+                    approvals.get(provider_id, {}).pop(model_id, None)
+                result["revision"] = config.revision + 1
+            return json_response(result)
+        except (ValueError, TypeError, KeyError):
+            return json_response({"error": {"message": "Invalid capability decision", "type": "invalid_request"}}, 400)
+        except RuntimeError as exc:
+            return json_response({"error": {"message": "Capability proposal conflict or resolved", "type": "conflict"}}, 409)
+        except Exception:
+            return json_response({"error": {"message": "Capability decision could not be applied", "type": "invalid_request"}}, 400)
 
     # --- provider actions ------------------------------------------------
 
@@ -1240,6 +1287,14 @@ class GatewayApp:
                         limits_source=info.limits_source,
                         limits_observed_at=info.limits_observed_at,
                     )
+                    # Explicitly approved discovery overrides survive catalogue refresh.
+                    approved = config.settings.get("capability_approvals", {})
+                    override_fields = approved.get(provider_id, {}).get(info.model_id, {}) if isinstance(approved, dict) else {}
+                    for field_name, record in override_fields.items():
+                        if field_name in {"supports_image_input", "supports_function_tools"} and isinstance(record, dict):
+                            value = record.get("value")
+                            if isinstance(value, bool):
+                                setattr(entry, field_name, value)
                     provider.models[info.model_id] = entry
                 if provider.state == STATE_NOT_CONFIGURED:
                     provider.state = STATE_CONFIGURED_UNTESTED
