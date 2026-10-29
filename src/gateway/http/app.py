@@ -538,7 +538,7 @@ class GatewayApp:
         return json_response({"status": "ok"})
 
     def handle_metrics(self, request: Request) -> Response:
-        cooldowns = self.router.cooldown.snapshot() if hasattr(self.router, "cooldown") else {}
+        cooldowns = self.router.circuits.snapshot()
         body = render_metrics(self.ledger, cooldowns).encode("utf-8")
         return Response(200, [("Content-Type", "text/plain; version=0.0.4; charset=utf-8"), ("Cache-Control", "no-store")], body)
 
