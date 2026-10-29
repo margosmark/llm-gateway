@@ -48,6 +48,21 @@ from gateway.capability_discovery import (
     DiscoveryStore,
     preview_for,
 )
+from gateway.capability_probe import (
+    EVIDENCE_METHOD,
+    catalog_price_for,
+    ConfirmationError,
+    ConfirmationStore,
+    ProbeRefused,
+    RunGate,
+    build_preview,
+    mark_unavailable,
+    plan_requests,
+    preview_binding,
+    protocol_for,
+    price_status,
+    run_suite,
+)
 from gateway.config import (
 
     FALLBACK_TRIGGERS,
@@ -345,6 +360,12 @@ class GatewayApp:
     ) -> None:
         self.config = config
         self.discovery = DiscoveryStore(config.path.parent / "capability_discovery.json")
+        # Bounded probe state: single-use confirmations and a one-run gate.
+        self.probe_confirmations = ConfirmationStore()
+        self.probe_gate = RunGate()
+        #: The tariff lookup. Overridable so a test can prove that unknown
+        #: or stale pricing fails closed without touching the catalogue.
+        self.probe_price_lookup = catalog_price_for
         self.credentials = credentials
         self.router = router
         self.registry = registry
@@ -409,6 +430,7 @@ class GatewayApp:
             r.add(["POST"], prefix + "/api/capabilities/preview", self.handle_capability_preview)
             r.add(["POST"], prefix + "/api/capabilities/run", self.handle_capability_run)
             r.add(["POST"], prefix + "/api/capabilities/decision", self.handle_capability_decision)
+            r.add(["POST"], prefix + "/api/capabilities/probe/cancel", self.handle_capability_probe_cancel)
             r.add(["POST"], prefix + "/api/provider", self.handle_provider_action)
             r.add(["POST"], prefix + "/api/model", self.handle_model_action)
             r.add(["POST"], prefix + "/api/alias", self.handle_alias_action)
@@ -1147,7 +1169,46 @@ class GatewayApp:
         model_id = request.query_one("model_id") or ""
         return json_response(self.discovery.read(provider_id, model_id))
 
+    def _probe_readiness(self, provider_id: str, config: GatewayConfig) -> tuple[str, str] | None:
+        """Why this provider cannot host a paid probe right now, or ``None``.
+
+        Structural only: no connection test, no catalogue refresh and no
+        provider request happens on this path.
+        """
+        provider = config.providers.get(provider_id)
+        if provider is None or provider.state != STATE_CONNECTED:
+            return (
+                "provider_not_configured",
+                "The provider connection has not been confirmed as connected, so no paid probe may run against it.",
+            )
+        adapter = self.registry.get(provider_id)
+        if adapter is None or not callable(getattr(adapter, "capability_probe_request", None)):
+            return (
+                "adapter_not_probe_capable",
+                "The registered adapter for this provider does not implement the reviewed bounded probe transport.",
+            )
+        readiness = getattr(adapter, "probe_readiness", None)
+        if not callable(readiness):
+            return (
+                "adapter_not_probe_capable",
+                "The registered adapter for this provider does not report probe readiness.",
+            )
+        reported = readiness()
+        if not isinstance(reported, tuple) or len(reported) != 2:
+            return (
+                "adapter_not_probe_capable",
+                "The registered adapter for this provider reports probe readiness in an unusable form.",
+            )
+        ready, reason = reported
+        if not ready:
+            return (
+                "provider_not_configured",
+                f"The adapter reports this provider is not ready for a probe ({reason}).",
+            )
+        return None
+
     def handle_capability_preview(self, request: Request) -> Response:
+        """Full preview for a probe run. Sends nothing and costs nothing."""
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
@@ -1156,23 +1217,163 @@ class GatewayApp:
             provider_id, model_id, probes = payload["provider_id"], payload["model_id"], payload["probes"]
             if not isinstance(provider_id, str) or not isinstance(model_id, str) or not isinstance(probes, list):
                 raise ValueError
+            owner = payload.get("owner")
             config = self.config.snapshot()
             provider = config.providers.get(provider_id)
             if provider is None or model_id not in provider.models:
                 return json_response({"error": {"message": "Exact provider/model is not staged", "type": "unknown_model"}}, 404)
-            result = preview_for(provider_id, model_id, probes, config.revision)
+            result = build_preview(
+                provider_id,
+                model_id,
+                probes,
+                config.revision,
+                owner=owner,
+                price_lookup=self.probe_price_lookup,
+            )
+            if result.get("protocol_version") is not None:
+                readiness = self._probe_readiness(provider_id, config)
+                if readiness is not None:
+                    result = mark_unavailable(result, *readiness)
+                elif self.probe_gate.active_targets:
+                    result = mark_unavailable(
+                        result,
+                        "probe_run_in_progress",
+                        "Another capability probe run is in flight; preview again when it finishes.",
+                    )
+                elif result["available"]:
+                    # A run is only possible from this exact preview: issue the
+                    # single-use confirmation that binds the owner's selection.
+                    token, expires_at = self.probe_confirmations.issue(
+                        preview_binding(result, owner if isinstance(owner, dict) else {})
+                    )
+                    result = {**result, "confirmation": token, "confirmation_expires_at": expires_at}
             return json_response(result, 200 if result["available"] else 422)
+        except ProbeRefused as exc:
+            return json_response({"error": {"message": exc.message, "type": exc.code}}, exc.status)
         except (ValueError, TypeError, KeyError):
             return json_response({"error": {"message": "Invalid capability preview request", "type": "invalid_request"}}, 400)
 
     def handle_capability_run(self, request: Request) -> Response:
+        """Execute one confirmed, bounded, paid probe run — or refuse it.
+
+        Every gate is checked before a transport is touched, and each
+        failure names the gate that refused it. Nothing here writes
+        configuration: the run records evidence and leaves an unselected
+        proposal for the owner to decide.
+        """
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
-        # Real provider transports intentionally remain disabled until a reviewed,
-        # bounded and priced adapter contract is registered. Never treat a client
-        # confirmation as permission to call arbitrary provider transports.
-        return json_response({"error": {"message": "No provider probe protocol is approved; no upstream request was sent", "type": "probe_unavailable"}}, 422)
+        try:
+            payload = request.json()
+            provider_id, model_id, probes = payload["provider_id"], payload["model_id"], payload["probes"]
+            if not isinstance(provider_id, str) or not isinstance(model_id, str) or not isinstance(probes, list):
+                raise ValueError
+            owner = payload.get("owner")
+            revision = payload.get("base_revision")
+            if not isinstance(revision, int) or isinstance(revision, bool):
+                raise ValueError
+            config = self.config.snapshot()
+            provider = config.providers.get(provider_id)
+            if provider is None or model_id not in provider.models:
+                return json_response({"error": {"message": "Exact provider/model is not staged", "type": "unknown_model"}}, 404)
+            protocol = protocol_for(provider_id, model_id)
+            if protocol is None:
+                return json_response({"error": {"message": "No provider probe protocol is approved; no upstream request was sent", "type": "probe_unavailable"}}, 422)
+            readiness = self._probe_readiness(provider_id, config)
+            if readiness is not None:
+                code, reason = readiness
+                return json_response({"error": {"message": reason, "type": code}}, 409)
+            # Recompute the preview: the run must match what the owner saw,
+            # including the tariff, the bounds and the selected route.
+            preview = build_preview(
+                provider_id,
+                model_id,
+                probes,
+                config.revision,
+                owner=owner,
+                price_lookup=self.probe_price_lookup,
+            )
+            if not preview["available"]:
+                return json_response({"error": {"message": preview["reason"], "type": preview["code"]}}, 422)
+            if config.revision != revision:
+                return json_response({"error": {"message": "The staged configuration changed after this preview; preview again.", "type": "stale_revision"}}, 409)
+            binding = preview_binding(preview, owner if isinstance(owner, dict) else {})
+            try:
+                self.probe_confirmations.consume(payload.get("confirmation"), binding)
+            except ConfirmationError as exc:
+                return json_response({"error": {"message": exc.message, "type": exc.code}}, 422)
+            price = self.probe_price_lookup(provider_id, model_id)
+            if price_status(price, datetime.now(UTC)) != "known":
+                price = None
+            try:
+                plan = plan_requests(protocol, probes)
+            except ProbeRefused as exc:
+                return json_response({"error": {"message": exc.message, "type": exc.code}}, exc.status)
+            adapter = self.registry.get(provider_id)
+            try:
+                cancel_event = self.probe_gate.acquire(provider_id, model_id)
+            except ProbeRefused as exc:
+                return json_response({"error": {"message": exc.message, "type": exc.code}}, exc.status)
+            session_id = secrets.token_hex(16)
+            started_at = utc_now_iso()
+            try:
+                outcome = run_suite(
+                    protocol,
+                    probes,
+                    adapter.capability_probe_request,
+                    price=price,
+                    cancel_event=cancel_event,
+                    plan=plan,
+                    session_id=session_id,
+                )
+            finally:
+                self.probe_gate.release(provider_id, model_id)
+            row = config.providers[provider_id].models[model_id].to_dict()
+            run_id, proposal_id = self.discovery.record_run(
+                provider_id,
+                model_id,
+                outcome.results,
+                row,
+                config.revision,
+                evidence_method=EVIDENCE_METHOD,
+                request_count=outcome.request_count,
+                protocol_version=protocol.protocol_version,
+                session_id=session_id,
+            )
+            return json_response({
+                "run_id": run_id,
+                "proposal_id": proposal_id,
+                "proposal_decision": "pending",
+                "session_id": session_id,
+                "protocol_version": protocol.protocol_version,
+                "evidence_method": EVIDENCE_METHOD,
+                "request_count": outcome.request_count,
+                "blocked_reason": outcome.blocked_reason,
+                "cancelled": outcome.cancelled,
+                "reported_cost_usd": outcome.reported_cost_usd,
+                "started_at": started_at,
+                "finished_at": utc_now_iso(),
+                "results": outcome.results,
+            })
+        except ProbeRefused as exc:
+            return json_response({"error": {"message": exc.message, "type": exc.code}}, exc.status)
+        except (ValueError, TypeError, KeyError):
+            return json_response({"error": {"message": "Invalid capability run request", "type": "invalid_request"}}, 400)
+
+    def handle_capability_probe_cancel(self, request: Request) -> Response:
+        """Cancel the run in flight. Reports honestly when nothing is running."""
+        denied = self._require_mutation(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = request.json()
+            provider_id, model_id = payload["provider_id"], payload["model_id"]
+            if not isinstance(provider_id, str) or not isinstance(model_id, str):
+                raise ValueError
+        except (ValueError, TypeError, KeyError):
+            return json_response({"error": {"message": "Invalid probe cancel request", "type": "invalid_request"}}, 400)
+        return json_response({"cancelled": self.probe_gate.cancel(provider_id, model_id)})
 
     def handle_capability_decision(self, request: Request) -> Response:
         denied = self._require_mutation(request)
