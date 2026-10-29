@@ -509,9 +509,12 @@ text, or the answer distribution.
 
 `GET /version` returns exactly four keys: `service`, `source_revision`,
 `source_tree`, and `image_revision`. The first two revisions are build inputs;
-the image revision is read from `release.json` in the data directory when a
-release step has written a digest-shaped value. The endpoint must never become
-a generic environment or configuration inspector.
+the image revision is read from `release.json` in the data directory only when
+the release step recorded that digest for the container that is currently
+running — the record carries the container id, and the running id is resolved
+read-only from the process mount table. Anything unbound (an earlier
+container's record, no binding, no record) is reported as `unknown`. The
+endpoint must never become a generic environment or configuration inspector.
 
 ## Alias groups
 
