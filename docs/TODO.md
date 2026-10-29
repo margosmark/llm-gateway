@@ -490,16 +490,19 @@ running upstream and keeps consuming the provider's allowance.
 upstream request, and record the outcome as a client abort rather than a
 provider failure.
 
-### T12 — Present cooldowns and skipped routes properly — `todo`
+### T12 — Present cooldowns and skipped routes properly — `done`
 
-**Why.** Cooldowns are rendered as raw JSON
-(`static/console.js:1027`), and the reason a route was skipped is visible
-only in the ledger. The owner learns that a route is excluded by reading a
-request record, which is the wrong way round: R5 made the record complete
-precisely so that the console could be the friendly view of it.
+**Landed.** Runtime now renders active cooldowns as a readable countdown
+with the reason and request reference recorded at the instant the cooldown
+was set. Recent outcome notes also name skipped routes and their reasons.
+Cooldown wording explicitly describes local policy, and the empty state is
+explicit. R29 in [`REVIEW.md`](REVIEW.md) records the fix and behavioural
+test evidence.
 
-**Scope.** A readable cooldown list with the remaining time and the reason
-it was set, and the skipped-route reasons surfaced on the route itself.
+**Evidence.** `tests/test_skipped_primary.py` verifies that a cooldown
+snapshot carries the triggering failure's reason and request ID and that a
+replacement event updates as one unit. `tests/console_dom_test.js` asserts
+the rendered cooldown text and skipped-route note.
 
 ---
 
@@ -779,7 +782,9 @@ canonical model exists would bake in a second vocabulary.
 allowed and the refused case, and the ledger shows what was changed and
 why.
 
-### T22 — A budget per alias, enforced locally — `todo`
+### T22 — A budget per alias, enforced locally — `done`
+
+**Landed.** Optional monthly USD alias cap; known spend uses successful ledger token counters and the published catalogue prices. Unknown/incomplete totals are explicitly uncapped. The API checks before routing and returns actionable HTTP 429; the console shows spend, soft-cap caveat and UTC reset boundary. See `gateway/budget.py`, `tests/test_costs.py`, and `tests/test_end_to_end.py`.
 
 **Why.** The provider's allowance is **Unknown** for every provider that
 does not publish one, and the gateway calls no undocumented endpoint to
@@ -822,7 +827,7 @@ only, on the same rules as the ledger.
 survive a restart; without it, the windows are in-memory and the console
 must say so.
 
-### T24 — Export the ledger — `todo`
+### T24 — Export the ledger — `done`
 
 **Why.** The data exists; getting it out of the browser is manual.
 
@@ -833,7 +838,7 @@ table as the log.
 
 **Depends on.** **T7** for anything older than the in-memory ring.
 
-### T25 — A dry run: show the upstream payload without sending it — `todo`
+### T25 — A dry run: show the upstream payload without sending it — `done`
 
 **Why.** Every dialect bug in this project's history - R9, R18, R21, R25 -
 was "the upstream received something I did not expect". The alias test
@@ -857,6 +862,14 @@ level, the tool list, and the converted shape of the request.
 
 **Done when.** A preview of a request that would be refused says so, and
 a preview of a converted request shows the converted shape.
+
+**Landed.** `POST /owner/api/preview` returns the converted request for the
+first currently eligible route without invoking an adapter. It uses the normal
+profile/alias authorization, candidate capability checks, model substitution,
+reasoning degradation, and derived session logic. Refusals are returned as
+normal gateway errors. Provider-error fallbacks are explicitly unevaluated.
+Regression evidence: `ApiSurfaceTests.test_preview_converts_request_without_provider_call_or_ledger_entry`
+and `ApiSurfaceTests.test_preview_refuses_unpublished_alias`.
 
 ### T26 — Weighted routes within an alias — `todo`
 
@@ -925,7 +938,7 @@ such. It is not a guarantee the provider made, and the console must not
 imply it is. It is the provider-side counterpart to T10's per-client
 cap.
 
-### T30 — Groups of aliases — `todo`
+### T30 — Groups of aliases — `done`
 
 **Why.** An owner with a dozen aliases wants to publish or disable a
 family of them together - "all the coding aliases", "everything that
@@ -939,7 +952,7 @@ no limit, and each alias keeps its own configuration.
 budget. Those stay per alias, because a shared fallback would quietly
 merge two privacy decisions.
 
-### T31 — One provider health view — `todo`
+### T31 — One provider health view — `done`
 
 **Why.** The facts already exist and are scattered: `ProviderState` holds
 `state`, `last_test_at`, `last_error` and `catalog_observed_at`
@@ -1161,7 +1174,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T9 | A `/metrics` endpoint | 2 | todo |
 | T10 | Concurrency cap and per-client rate limit | 2 | todo |
 | T11 | Cancel the upstream on client disconnect | 2 | todo |
-| T12 | Present cooldowns and skipped routes properly | 2 | todo |
+| T12 | Present cooldowns and skipped routes properly | 2 | **done** |
 | T13 | A plain OpenAI API-key provider | 3 | todo |
 | T14 | A native Anthropic API-key provider | 3 | todo |
 | T15 | A local provider | 3 | todo |
@@ -1171,15 +1184,15 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T19 | Stop deep-copying the configuration on every read | perf | todo |
 | T20 | Separate the connect timeout from the read timeout | perf | todo |
 | T21 | A request policy per alias | 4 | todo |
-| T22 | A budget per alias, enforced locally | 4 | todo |
+| T22 | A budget per alias, enforced locally | 4 | **done** |
 | T23 | Statistics per alias | 4 | todo |
 | T24 | Export the ledger | 4 | todo |
-| T25 | A dry run: show the upstream payload without sending it | 4 | todo |
+| T25 | A dry run: show the upstream payload without sending it | 4 | **done** |
 | T26 | Weighted routes within an alias | 4 | todo |
 | T27 | Honour a client-supplied request id | 4 | todo |
 | T28 | Keepalive comments on a long stream | 4 | todo |
 | T29 | A concurrency cap per provider | 4 | todo |
-| T30 | Groups of aliases | 4 | todo |
+| T30 | Groups of aliases | 4 | **done** |
 | T31 | One provider health view | 4 | todo |
 | T32 | A durable circuit breaker, remembered across restarts | 4 | **done** |
 | T33 | Honour the provider's `Retry-After` | 4 | **done** |

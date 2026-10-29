@@ -37,11 +37,28 @@ never breaks your client's configuration.
 | Owner console and configuration | `http://10.10.11.109:8765/owner/` | Trusted LAN | Full configuration, credential enrollment, provider actions, and status; no login |
 | API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/responses`, plus native Jev `GET /v1/systemone/models` and `POST /v1/systemone` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
+| Request preview | `POST /owner/api/preview` | Trusted LAN | Shows the converted upstream request without calling a provider; Chat Completions body format |
+| Prometheus metrics | `http://10.10.11.109:8765/metrics` | Trusted LAN | Metadata-only operational metrics |
 
-Trusted LAN admin mode: any device that can reach this address can configure
+`GET /metrics` exposes Prometheus text-format metrics derived from the retained
+request metadata ledger and local cooldown state: request and error counts,
+request-latency histogram, fallback counts, and remaining cooldown seconds by
+provider route. It contains no prompt or response content and no credentials.
+No token-total series are exposed; those are intentionally absent while T2 is
+blocked. The endpoint uses the same single-listener trusted-LAN policy as the
+owner console and API: any device able to reach the configured private address
+can access it. It is not a public monitoring endpoint.
+
+Trusted LAN admin mode: any device that can reach this address can configure.
 and use the gateway, including replacing provider credentials. There is no
 owner password, login/session bootstrap, separate setup listener, or
 per-device administrative boundary. Use this only on a LAN you trust.
+
+The owner API also provides a read-only `POST /owner/api/preview` endpoint.
+It returns the request shape for the first currently eligible route without
+calling a provider or adding a ledger event. Provider-error fallback cannot be
+predicted without a call and is reported as unevaluated. The preview body is
+returned only to the LAN caller that submitted it; it is not logged or retained.
 
 The gateway binds an explicit RFC1918 IPv4, IPv6 unique-local (`fc00::/7`),
 or loopback address owned by the host. IPv6 literals are supported by the
@@ -190,6 +207,10 @@ Optional fallbacks
   OpenCode Go → gpt-6-luna
   OpenCode Go → mimo-v2.6-flash
 ```
+
+### Alias groups
+
+Aliases can share an optional tag in the console. Publish or disable a whole tag from the alias list; this toggles only each member's enabled state. Routes, fallback chains, authorization and any per-alias policy remain independent. A group with an alias missing its primary route is refused as a whole.
 
 ### Fallback is opt-in twice
 
@@ -415,6 +436,13 @@ and invoke every published route.
 
 ---
 
+## Local concurrency protection
+
+Inference calls are capped at four in-flight requests per provider, per gateway
+process. This local cap rejects excess requests with `rate_limited` and does
+not represent a provider guarantee or published provider limit. Streaming
+requests hold their slot until their response stream completes.
+
 ## Sensitive data and observability
 
 * It does **not** store prompts, responses, or response content.
@@ -428,7 +456,10 @@ and invoke every published route.
 
 Status, analytics and exports are metadata only. A request ledger records
 which alias was asked for, which provider and model actually served it, how
-long it took and how it ended — never what it said. Token counters come from
+long it took and how it ended — never what it said. Provider health combines
+connection/test/catalogue metadata, model counts, local cooldowns and recent
+served-request success/failure rates; it performs no provider calls, and rates
+remain Unknown without observed requests. Token counters come from
 reported provider usage; local cost estimates use published prices only and
 are not provider bills. The Status page aggregates usage for the last 24 hours
 and displays the price source and observation date, and it can show any
@@ -453,6 +484,22 @@ rate overall and per alias, provider and model, the reasons behind it, and a
 daily series of requests, tokens, fallbacks and errors. Days are reported
 with their own status, so a day with no recorded rows is a gap rather than
 zero, and a rate with no requests behind it is unknown rather than `0.0`.
+Export the recent ledger from the owner console's read-only
+`/owner/api/ledger/export` endpoint; it returns CSV by default or JSON with
+`?format=json`, bounded to 1,000 rows (default 500). Only the six metadata
+columns shown in the ledger table are included, with the same redaction
+rules as the log.
+and displays the price source and observation date.
+
+The **Request statistics** table groups request/error counts, error classes,
+fallback rates, recorded latency percentiles, reported token totals and local
+cost estimates by alias, serving provider and serving model for the last
+hour, day or 30 days. It uses the metadata-only ledger history available to
+the gateway (bounded to the recent 10,000 in-memory records, with
+asynchronously persisted history restored on restart); unavailable usage,
+latency or prices remain Unknown.
+
+Aliases may also have a local monthly USD budget. It is a **soft cap** checked before each request; requests already in flight may overshoot. Spend is computed from recorded successful-request token counters and published per-token prices. If any monthly spend cannot be priced or the ledger history is incomplete, spend is **Unknown** and the alias is reported uncapped rather than free. The console shows the UTC month boundary when the budget resets.
 
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
@@ -634,7 +681,9 @@ with the traps that cost the most time:
   with each model identified by its `slug`, not an `id`.
 * **SSE frames must be terminated.** A frame is its data lines plus the
   blank line that ends it; a stream without it is read by a strict client as
-  one event with no finish reason.
+  one event with no finish reason. The gateway also emits a `: ping` SSE
+  comment after 15 seconds without client-facing output; comments carry no
+  response content.
 
 ## Known limitations
 

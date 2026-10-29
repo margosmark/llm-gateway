@@ -341,6 +341,8 @@ class Router:
                 candidate.excluded_reason = "model is not enabled for exposure"
                 candidates.append(candidate)
                 continue
+            # Enumeration must never claim a recovery probe; only the
+            # invocation path claims, through CircuitStore.claim.
             allowed, circuit_reason = self._circuits.preview(route.provider, route.model)
             if not allowed:
                 candidate.excluded_reason = circuit_reason
@@ -1091,7 +1093,7 @@ class Router:
                             "reason": CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN]),
                         }
                     )
-                    self._maybe_open_circuit(alias, candidate, exc)
+                    self._maybe_open_circuit(alias, candidate, exc, request_id)
 
                     if is_last:
                         break
@@ -1214,7 +1216,9 @@ class Router:
             )
         )
 
-    def _maybe_open_circuit(self, alias: Alias, candidate: Candidate, error: AdapterError) -> None:
+    def _maybe_open_circuit(
+        self, alias: Alias, candidate: Candidate, error: AdapterError, request_id: str = ""
+    ) -> None:
         """Open the circuit a qualifying failure deserves.
 
         The provider's own ``Retry-After`` is honoured when it asks for
@@ -1238,6 +1242,7 @@ class Router:
             error_class=error.error_class,
             base_seconds=alias.cooldown_seconds,
             retry_after=error.retry_after,
+            request_id=request_id,
         )
 
     # --- helpers for the console -----------------------------------------

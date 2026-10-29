@@ -22,6 +22,7 @@
   // day from the durable daily rollup. Kept across redraws so switching
   // sections does not silently reset the owner's choice.
   var usageDay = "live";
+  var statisticsWindow = "day";
 
   // --- tiny helpers -----------------------------------------------------
 
@@ -162,10 +163,10 @@
     return value || "Unknown";
   }
 
-  function emptyState(title, message) {
+  function emptyState(title, detail) {
     return el("div", { class: "empty-state", role: "status", "aria-live": "polite" }, [
       el("strong", { text: title }),
-      el("p", { class: "small", text: message })
+      el("p", { class: "small", text: detail })
     ]);
   }
 
@@ -304,10 +305,34 @@
     });
     frag.appendChild(el("section", {}, [providers]));
 
+    var healthCard = el("div", { class: "card" }, [el("h2", { text: "Provider health" })]);
+    (state.provider_health || []).forEach(function (health) {
+      healthCard.appendChild(el("div", { class: "route" }, [
+        el("div", { class: "head" }, [
+          el("strong", { text: providerLabel(health.provider_id) }),
+          statePill(health.connection_state || "unknown")
+        ]),
+        el("div", { class: "small", text: "Last test: " + (health.last_test_outcome || "unknown") +
+          " · catalogue: " + when(health.catalog_observed_at) +
+          " · models: " + (health.model_count === undefined ? "Unknown" : health.model_count) +
+          " · cooldown: " + (health.cooldown_remaining_seconds || 0) + "s" }),
+        el("div", { class: "small muted", text: "Recent outcomes: " + (health.recent_success_rate === null || health.recent_success_rate === undefined ? "Unknown" : Math.round(health.recent_success_rate * 100) + "% success") +
+          " / " + (health.recent_failure_rate === null || health.recent_failure_rate === undefined ? "Unknown" : Math.round(health.recent_failure_rate * 100) + "% failure") +
+          " (" + (health.recent_requests || 0) + " requests)" }),
+        health.last_error ? el("div", { class: "small muted", text: "Last error: " + health.last_error }) : null
+      ]));
+    });
+    if (!state.provider_health || !state.provider_health.length) {
+      healthCard.appendChild(el("p", { class: "muted", text: "Provider health is Unknown until providers are configured." }));
+    }
+    frag.appendChild(el("section", {}, [healthCard]));
+
     var totals = state.totals || {};
     var ledger = state.ledger || [];
     var ledgerCard = el("div", { class: "card" }, [
       el("h2", { text: "Recent request outcomes" }),
+      el("a", { class: "button", href: BASE + "/api/ledger/export", text: "Download CSV" }),
+      el("a", { class: "button secondary", href: BASE + "/api/ledger/export?format=json", text: "Download JSON" }),
       el("p", { class: "small muted", text: "Metadata only. Prompts, responses, tokens and secrets are never stored." }),
       el("p", { class: "small muted", text: (state.ledger_durability && state.ledger_durability.enabled ? "Recent outcomes are retained on the state volume for up to 30 days, with bounded rotation; the in-memory ring is the hot view. Persistence is asynchronous and may lag briefly. This metadata ledger is not a billing system." : "Durable ledger storage is not enabled; only the bounded in-memory ring is available and is lost when the gateway restarts. This metadata ledger is not a billing system.") }),
       el("div", { class: "row" }, [
@@ -405,6 +430,46 @@
     }
     frag.appendChild(el("section", {}, [costsCard]));
     frag.appendChild(el("section", {}, [renderFallbackCard(analytics)]));
+
+
+    var statisticWindows = state.request_statistics || {};
+    var statistics = statisticWindows[statisticsWindow] || { alias: {}, provider: {}, model: {} };
+    var statisticsCard = el("div", { class: "card" }, [
+      el("h2", { text: "Request statistics" }),
+      el("p", { class: "small muted", text: "Metadata only · retained ledger history, up to 30 days. Percentiles use recorded latencies; token and cost values are Unknown when unavailable." }),
+      el("label", { class: "small", text: "Window " }, [el("select", { "aria-label": "Statistics window", onchange: function (event) { statisticsWindow = event.target.value; draw(); } }, [
+        el("option", { value: "hour", selected: statisticsWindow === "hour" }, ["Last hour"]),
+        el("option", { value: "day", selected: statisticsWindow === "day" }, ["Last day"]),
+        el("option", { value: "month", selected: statisticsWindow === "month" }, ["Last month"])
+      ])])
+    ]);
+    [["Alias", statistics.alias], ["Provider", statistics.provider], ["Model", statistics.model]].forEach(function (group) {
+      var keys = Object.keys(group[1] || {}).sort();
+      if (!keys.length) return;
+      statisticsCard.appendChild(el("h3", { text: group[0] }));
+      var statsTable = el("table", {}, [el("thead", {}, [el("tr", {}, [
+        el("th", { text: group[0] }), el("th", { text: "Requests / errors" }), el("th", { text: "Error classes" }),
+        el("th", { text: "Fallback rate" }), el("th", { text: "Latency p50 / p95 / p99 ms" }),
+        el("th", { text: "Tokens in / out" }), el("th", { text: "Estimated USD" })
+      ])])]);
+      var statsBody = el("tbody");
+      keys.forEach(function (key) {
+        var row = group[1][key];
+        var latency = row.latency_ms || {};
+        var percentile = function (value) { return value == null ? "Unknown" : value; };
+        statsBody.appendChild(el("tr", {}, [
+          el("td", { text: key }), el("td", { text: row.requests + " / " + row.errors }),
+          el("td", { class: "small", text: Object.keys(row.error_classes || {}).sort().map(function (name) { return name + ": " + row.error_classes[name]; }).join(", ") || "—" }),
+          el("td", { text: (Number(row.fallback_rate || 0) * 100).toFixed(1) + "% (" + row.fallbacks + ")" }),
+          el("td", { text: percentile(latency.p50) + " / " + percentile(latency.p95) + " / " + percentile(latency.p99) }),
+          el("td", { text: row.input_tokens == null || row.output_tokens == null ? "Unknown" : row.input_tokens + " / " + row.output_tokens }),
+          el("td", { text: row.estimated_cost_usd == null ? "Unknown" : "$" + Number(row.estimated_cost_usd).toFixed(6) })
+        ]));
+      });
+      statsTable.appendChild(statsBody);
+      statisticsCard.appendChild(statsTable);
+    });
+    frag.appendChild(el("section", {}, [statisticsCard]));
 
     var limitsCard = el("div", { class: "card" }, [
       el("h2", { text: "Usage and limits" }),
@@ -758,7 +823,7 @@
         el("td", { class: "small", text: (entry.remaining_seconds || 0) + "s" }),
         el("td", { class: "small", text: entry.next_probe_at ? when(new Date(entry.next_probe_at * 1000).toISOString()) : "Unknown" }),
         el("td", { class: "small", text: (entry.state || "unknown") + (entry.probe_in_flight ? " · probe in flight" : "") }),
-        el("td", { class: "small muted", text: entry.reason || "" })
+        el("td", { class: "small muted", text: (entry.reason || "") + (entry.request_id ? " · event " + entry.request_id : "") })
       ]));
     });
     table.appendChild(tbody);
@@ -1148,6 +1213,7 @@
     if (editingAlias && !editing) editingAlias = null;
 
     var nameInput = el("input", { placeholder: "coding", value: editing ? editing.name : "", disabled: !!editing });
+    var tagInput = el("input", { placeholder: "coding", value: editing ? (editing.tag || "") : "" });
     var primaryProvider = el("select", {});
     var primaryModel = el("select", {});
     var fallbacks = [];
@@ -1237,6 +1303,7 @@
     renderConfirmProviders();
 
     var cooldown = el("input", { type: "number", value: String(editing ? editing.cooldown_seconds : 300), min: "0" });
+    var budget = el("input", { type: "number", value: editing && editing.budget != null ? String(editing.budget) : "", min: "0.01", step: "0.01", placeholder: "No cap" });
 
     var phasePolicy = editing && editing.phase_routing;
     var phaseEnabled = el("input", { type: "checkbox" });
@@ -1311,6 +1378,7 @@
 
     card.appendChild(el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "Alias name" }), nameInput]),
+      el("label", {}, [el("span", { text: "Group tag (optional)" }), tagInput]),
       el("label", {}, [el("span", { text: "Primary provider" }), primaryProvider]),
       el("label", {}, [el("span", { text: "Primary model" }), primaryModel])
     ]));
@@ -1360,6 +1428,7 @@
     card.appendChild(confirmProviders);
     card.appendChild(el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "Local cooldown (seconds)" }), cooldown]),
+      el("label", {}, [el("span", { text: "Monthly budget (USD; soft cap)" }), budget]),
       el("div", { class: "narrow" }, [
         el("button", {
           class: "primary", type: "button", text: editing ? "Save changes" : "Save alias",
@@ -1403,6 +1472,7 @@
               body: {
                 action: "save",
                 name: nameInput.value,
+                tag: tagInput.value,
                 primary: { provider: primaryProvider.value, model: primaryModel.value },
                 fallbacks: fallbacks.map(function (row) {
                   return { provider: row.provider.value, model: row.model.value };
@@ -1411,6 +1481,7 @@
                 fallback_authorized: authorizeBox.checked,
                 fallback_confirmed_providers: confirmed,
                 cooldown_seconds: parseInt(cooldown.value, 10) || 0,
+                budget: budget.value === "" ? null : Number(budget.value),
                 enabled: editing ? editing.enabled : false,
                 phase_routing: phaseRouting
               }
@@ -1437,7 +1508,7 @@
         ]),
         el("div", {
           class: "small",
-          text: "Primary: " + (alias.primary ? providerLabel(alias.primary.provider) + " → " + alias.primary.model : "none")
+          text: "Group: " + (alias.tag || "none") + " · Primary: " + (alias.primary ? providerLabel(alias.primary.provider) + " → " + alias.primary.model : "none")
         }),
         el("div", {
           class: "small muted",
@@ -1451,7 +1522,10 @@
             ? alias.fallbacks.map(function (f) { return providerLabel(f.provider) + " → " + f.model; }).join(", ")
             : "none") +
             " · triggers: " + (alias.fallback_triggers.join(", ") || "none") +
-            " · cooldown: " + alias.cooldown_seconds + "s"
+            " · cooldown: " + alias.cooldown_seconds + "s" +
+            " · budget: " + (alias.budget_status && alias.budget_status.capped
+              ? money(alias.budget_status.spend_usd) + " / " + money(alias.budget) + " this month (soft; resets " + alias.budget_status.reset_at + ")"
+              : alias.budget == null ? "uncapped" : "budget uncapped: spend Unknown (soft; resets " + (alias.budget_status ? alias.budget_status.reset_at : "UTC month boundary") + ")")
         }),
         el("div", { class: "actions" }, [
           el("button", {
@@ -1492,6 +1566,23 @@
       existing.appendChild(card2);
     });
     card.appendChild(el("h3", { text: "Existing aliases" }));
+    var groupTags = Array.from(new Set(state.aliases.map(function (alias) { return alias.tag; }).filter(Boolean))).sort();
+    groupTags.forEach(function (tag) {
+      var groupAliases = state.aliases.filter(function (alias) { return alias.tag === tag; });
+      existing.appendChild(el("div", { class: "route" }, [
+        el("div", { class: "head" }, [el("strong", { text: "Group: " + tag }), el("span", { class: "small muted", text: groupAliases.length + " aliases" })]),
+        el("div", { class: "actions" }, [
+          el("button", { type: "button", text: "Publish group", disabled: !state.can_mutate || groupAliases.some(function (alias) { return !alias.primary; }), onclick: function () {
+            run(api(BASE + "/api/alias-group", { method: "POST", body: { action: "publish", tag: tag } }))
+              .then(function () { return refresh(); }).catch(function () {});
+          } }),
+          el("button", { type: "button", text: "Disable group", disabled: !state.can_mutate, onclick: function () {
+            run(api(BASE + "/api/alias-group", { method: "POST", body: { action: "disable", tag: tag } }))
+              .then(function () { return refresh(); }).catch(function () {});
+          } })
+        ])
+      ]));
+    });
     if (!state.aliases.length) {
       existing.appendChild(emptyState(
         "No aliases or routes yet",
@@ -1743,6 +1834,15 @@
         } finally {
           state = previous;
           usageDay = previousDay;
+        }
+      },
+      renderSettingsForTest: function (view) {
+        var previous = state;
+        state = view;
+        try {
+          return renderSettings();
+        } finally {
+          state = previous;
         }
       }
     };

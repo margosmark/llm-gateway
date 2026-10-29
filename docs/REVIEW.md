@@ -898,6 +898,21 @@ is created enabled; and the alias's limit survives the edit.
 
 **Planned as** `docs/TODO.md` item **T16**.
 
+### R29 — Cooldown display must cite the cooldown-setting failure — **closed**
+
+A cooldown is now stored together with the failure reason, request ID, and
+set timestamp at the point `_maybe_cooldown` activates it
+(`src/gateway/core/routing.py`). The state API exposes that event with the
+remaining duration; it does not infer a cause by searching unrelated ledger
+attempts. The Runtime console renders a readable countdown and the stored
+reason/event reference, preserves the local-policy warning, and shows an
+explicit empty state (`src/gateway/static/console.js`).
+
+**Evidence:** `node tests/console_dom_test.js` exercises the rendered DOM text
+with a synthetic cooldown event, confirms that the matching failure reason
+and request reference render, and confirms an unrelated stale error is not
+shown. The test also checks the empty state.
+
 ### R28 — Every small response paid a 41ms stall from Nagle and the delayed ACK — **closed**
 **Severity: high latency defect on every request path.** *(closed)*
 
@@ -1608,6 +1623,15 @@ PYTHONPATH=src python3 -m gateway --help                  OK
 git diff --check                                          clean
 ```
 
+### R45 — Alias tags and bulk group publication — **closed**
+
+*(carried from the T30 orphan branch, where this finding was numbered R32;
+renumbered on integration because main's register already uses R32–R44)*
+
+**Resolution.** `Alias` has an optional persisted tag. The owner console exposes group publish/disable, implemented as an atomic enabled-flag update over aliases matching a validated tag. The operation does not modify route configuration, fallback authorization or any per-alias policy, and refuses a group publish if any member has no primary.
+
+**Evidence:** `tests/test_alias_groups.py` exercises published-state changes, preservation of each alias's route and policy, invalid/empty tags, incomplete group refusal, and legacy/tag round-trips. `AliasGroupHttpTests` in `tests/test_end_to_end.py` drives the HTTP action and asserts only members are affected and that refusal is atomic.
+
 ## Recommended order
 
 Findings R0-R27 and R28-R36 are closed or superseded. **R36 and R38 are
@@ -1630,6 +1654,20 @@ is kept so the next agent can see what was already paid for in time.
 7. Resolve the trusted-LAN transport decision in **R13**, and fix **R6** and **R14** with targeted tests and runbook changes. R15 is superseded by removal of the setup surface.
 8. Complete **R36**'s explicit post-deployment route replacement.
    R25 and R27 are closed by R35 and R27's own resolutions.
+
+## Provider health view (T31)
+
+The owner Status view now combines each provider's observed connection state,
+last test outcome/time/error, catalogue observation time, configured model
+count, active cooldown countdown, and recent success/failure rates from the
+bounded metadata ledger. Rates count only requests actually served by that
+provider; absent samples remain Unknown. This is a local metadata summary, not
+a provider probe or claim of external health.
+
+Evidence: `src/gateway/provider_health.py`; `tests/test_provider_health.py`
+(asserts populated and missing-observation outcomes); and
+`tests/test_end_to_end.py::ConsoleApiTests.test_state_reports_usage_costs_and_durability`
+(asserts the integrated state payload).
 ## Trusted LAN admin-mode candidate update
 
 The approved single-listener change resolves the former R0 first-passphrase

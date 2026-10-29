@@ -525,3 +525,8 @@ were the same request.
 
 **Never** print a token, a device code, a prompt or a completion. **Never**
 paste a real credential into a chat message, a card, a file or a commit.
+
+
+### Local budget accounting
+
+Budgets are local estimates, not provider allowance measurements. The gateway uses only published prices and recorded token counters; unsupported prices or missing counters make aggregate spend Unknown. Unknown spend never becomes zero, and an alias cannot be capped while the month total is unknown. The reset boundary is UTC calendar-month start.

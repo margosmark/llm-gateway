@@ -6,6 +6,14 @@ in the browser.
 
 ---
 
+## Operational metrics
+
+`GET /metrics` on the configured trusted-LAN listener returns Prometheus text
+exposition with counts and latency derived from the bounded in-memory request
+ledger and the remaining duration of active local provider cooldowns. It is
+metadata only; the endpoint uses the same canonical Host/Origin and forwarded-
+header checks as other gateway routes. No token totals are currently emitted.
+
 ## 1. First run
 
 ### 1.1 Build the candidate
@@ -96,6 +104,8 @@ address beyond a LAN you trust.
 
 Everything else happens in the browser.
 
+For related aliases, assign the same optional tag in Models & Routes, then use Publish group or Disable group. This only toggles publication for each alias; routes, fallback chains, authorization and per-alias policy remain independent. Publishing refuses the whole group when any member lacks a primary route.
+
 | Task | Where |
 |---|---|
 | Connect a provider | Owner console → Providers |
@@ -106,6 +116,7 @@ Everything else happens in the browser.
 | Manage profile metadata | Owner console → Profiles (does not restrict LAN invocation) |
 | Read status and limits | Owner console → Status |
 | Make the aliases appear in OpenCode's `/models` | Install `integrations/opencode/` once (see §3.1) |
+| Preview a Chat Completions request without sending it | `POST /owner/api/preview` (JSON body, published alias in `model`) |
 
 ### OpenCode Console Jev / System One
 
@@ -122,8 +133,11 @@ The Status ledger is metadata-only and asynchronously persisted to
 bounded rotation (5 MiB active file plus two rotations); disk-write errors or
 a full queue can cause a persistence update to be dropped. The in-memory ring
 is the live view. Local usage aggregates cover the last 24 hours; costs use
-published prices only and display their source and observation date. A model
-without published prices reports **Unknown**. This is not a billing system.
+published prices only and display their source and observation date. Request
+statistics can be selected for the last hour, day or 30 days, grouped by alias,
+serving provider and model. Counts and latency percentiles use available ledger
+history (up to 10,000 recent records); unavailable usage, latency or prices are
+reported as **Unknown**, never zero. This is not a billing system.
 
 The same append path also maintains `request-ledger-rollup.json` beside the
 ledger: one row per UTC day, alias, provider and model with requests, input,
@@ -176,6 +190,12 @@ bridged to Chat Completions and Responses; Anthropic-compatible clients can use
 `POST /v1/messages` under the same Host/Origin and forwarded-header policy as
 the other API routes. Credentials are stored separately and never returned by
 state or status APIs.
+
+The read-only preview endpoint returns the converted payload for the first
+currently eligible route, plus its derived session identifier. It never invokes
+a provider or adds a ledger event; any fallback after a provider error is
+necessarily unevaluated. Treat the returned request body as sensitive: it is
+returned only to the caller and is not logged or retained.
 
 ---
 
@@ -341,6 +361,7 @@ without editing this file by hand.
 | An image request failed with *no eligible route* | No route of the alias accepts image input | Expected: the gateway excludes an image-incapable route rather than letting the provider reject it opaquely. The error names the excluded routes and the reason |
 | `/version` reports `unknown` | The deployment was not released properly | Deploy with `scripts/release.py --build`; it publishes the identity. The gateway also warns about this at startup |
 | A client reports *an empty stream with no finish reason* | The stream was not framed correctly | Update to a build that emits terminated SSE frames; check the raw bytes for `\n\n` between frames |
+| A quiet stream appears idle | The provider has not emitted a frame yet | The gateway sends an SSE `: ping` comment every 15 seconds without client-facing output; SSE clients ignore comments |
 | A fallback did not run | The alias has not authorised it, or the trigger is off | The alias needs **Authorize fallback**, **both** the trigger and the confirmation of the fallback provider. The record says which was missing |
 | A fallback did not run and the record says *skipped* | The primary was in a local cooldown, was not capable of serving the request (for example an image on a text-only route), or was held by a live recovery probe | Skip paths require authorization, confirmation, and the trigger the skip contributes - `route_ineligible` for capability/configuration, the cooldown's own trigger for an automatic cooldown, `explicit_cooldown` for a cooldown you placed, `probe_contention` for a held probe. A skipped primary was never invoked, so tool-bearing requests can switch safely if this owner gate passes; a failed attempted route may have executed a tool and remains non-fallbackable. The side-effect control is not part of this gate for a skip: a skipped primary never reached a provider, so a tool-bearing request may switch (a *failed* attempt with tools still never falls back). The owner console warns when trigger coverage is missing. The cooldown itself is local policy, not evidence the provider reset; the Status view shows the hold and the next probe, and **Clear cooldowns** on the provider card releases it when you have confirmed the reset window yourself |
 | A request was refused with *fallback not used* | The owner's gate declined the switch away from a skipped or failed primary | Expected and safe: the message names what was missing (authorization, confirmation, or the disabled trigger). The ledger records the request as served by nobody with its skips, and no fallback is claimed. Enable what the alias needs on Owner console → Aliases, or accept the refusal |
@@ -427,6 +448,10 @@ PY
   part of a deployment.
 * **Never** sign in to a provider account on the owner's behalf. The owner
   completes the device-code flow in their own browser.
+
+### Alias budgets
+
+Set an optional monthly USD budget while editing an alias. It is a local soft cap: the gateway checks recorded spend before routing, so concurrent in-flight requests may exceed it. Spend uses only successful ledger events with token counters and published per-token prices. If any spend in the month is unpriced or the ledger history is incomplete, the console reports the alias uncapped with Unknown spend; it never treats unknown as free. A refusal returns HTTP 429 with the configured amount, known spend, and the UTC month-boundary reset timestamp.
 
 ---
 

@@ -14,6 +14,7 @@ and it gives the owner a way to tell that a change landed.
 
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -451,6 +452,10 @@ class Alias:
     cooldown_seconds: int = 300
     #: An optional, opt-in phase-routing policy. Disabled by default.
     phase_routing: PhaseRouting | None = None
+    #: An optional local monthly budget in USD for this alias. None = unbudgeted.
+    budget: float | None = None
+    #: Optional group tag; aliases sharing a tag render as one console group.
+    tag: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -464,6 +469,8 @@ class Alias:
             "fallback_error_classes": list(self.fallback_error_classes),
             "cooldown_seconds": self.cooldown_seconds,
             "phase_routing": self.phase_routing.to_dict() if self.phase_routing else None,
+            "budget": self.budget,
+            "tag": self.tag,
         }
 
     @classmethod
@@ -486,6 +493,8 @@ class Alias:
         safe_classes = [c for c in data.get("fallback_error_classes") or [] if c in OWNER_OVERRIDABLE_CLASSES]
         cooldown = data.get("cooldown_seconds")
         phase_routing = PhaseRouting.from_dict(data.get("phase_routing"))
+        budget = data.get("budget")
+        tag = data.get("tag", "")
         return cls(
             name=name,
             enabled=bool(data.get("enabled", False)),
@@ -497,6 +506,8 @@ class Alias:
             fallback_error_classes=safe_classes,
             cooldown_seconds=cooldown if isinstance(cooldown, int) and cooldown >= 0 else 300,
             phase_routing=phase_routing,
+            budget=budget if isinstance(budget, (int, float)) and not isinstance(budget, bool) and math.isfinite(budget) and 0 < budget <= 1_000_000 else None,
+            tag=tag if isinstance(tag, str) else "",
         )
 
     def all_routes(self) -> list[RouteRef]:
@@ -658,15 +669,16 @@ class ConfigStore:
         self._path = path
         self._lock = threading.RLock()
         self._config = GatewayConfig.from_dict(read_json(path, {}))
+        self._snapshot = GatewayConfig.from_dict(self._config.to_dict())
 
     @property
     def path(self) -> Path:
         return self._path
 
     def snapshot(self) -> GatewayConfig:
-        """Return the current configuration. Makes no provider calls."""
+        """Return the current immutable-by-convention configuration view."""
         with self._lock:
-            return GatewayConfig.from_dict(self._config.to_dict())
+            return self._snapshot
 
     def mutate(self) -> "_ConfigTransaction":
         """Open a transaction. The revision is bumped and persisted on exit."""
@@ -674,17 +686,21 @@ class ConfigStore:
 
     def replace(self, config: GatewayConfig) -> None:
         with self._lock:
-            self._config = config
-            self._persist()
+            replacement = GatewayConfig.from_dict(config.to_dict())
+            self._persist(replacement)
+            self._config = replacement
+            self._snapshot = GatewayConfig.from_dict(replacement.to_dict())
 
     def replace_validated(self, config: GatewayConfig) -> None:
         """Persist a prevalidated replacement before publishing it in memory."""
         with self._lock:
-            atomic_write_json(self._path, config.to_dict(), mode=0o600)
-            self._config = GatewayConfig.from_dict(config.to_dict())
+            replacement = GatewayConfig.from_dict(config.to_dict())
+            self._persist(replacement)
+            self._config = replacement
+            self._snapshot = GatewayConfig.from_dict(replacement.to_dict())
 
-    def _persist(self) -> None:
-        atomic_write_json(self._path, self._config.to_dict(), mode=0o600)
+    def _persist(self, config: GatewayConfig | None = None) -> None:
+        atomic_write_json(self._path, (config or self._config).to_dict(), mode=0o600)
 
 
 class _ConfigTransaction:
@@ -703,8 +719,9 @@ class _ConfigTransaction:
         try:
             if exc_type is None and self._config is not None:
                 self._config.revision = self._store._config.revision + 1
+                self._store._persist(self._config)
                 self._store._config = self._config
-                self._store._persist()
+                self._store._snapshot = GatewayConfig.from_dict(self._config.to_dict())
         finally:
             self._store._lock.release()
         return False
