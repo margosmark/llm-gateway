@@ -2065,3 +2065,27 @@ A refused owner gate had a useful HTTP message but `fallback_reason=null` in the
 ### R54 — LAN owner mutation authentication relies on reachability and Origin — **owner decision required**
 
 The owner API is intentionally exposed to trusted-LAN devices and validates the browser Origin, but it has no independent owner token. During the incident the owner confirmed Mark intentionally made the config changes. Whether to add token-based mutation authorization is a separate product/security-boundary decision; this task does not modify that contract.
+
+### R56 — `/owner/api/state` re-derived its ledger and price inputs per consumer — **closed**
+
+Wave-2B (tree `3e2d6c86`, PR #38) made `handle_state` call
+`ledger.recent(limit=10_000)` once per alias per consumer (budget per alias,
+three statistics windows, provider health) and, far worse, every per-event
+`calculate_cost` lookup inside `aggregate_statistics` and `budget_status`
+re-read and re-parsed the 42KB published-price catalogue from disk: over
+100,000 file reads per console poll. Measured 22.2s for a 10,000-row ring
+with 4 aliases locally, 46.9s in production, before the wave-2B rollback of
+2026-10-29; the console never rendered below its banner.
+
+`handle_state` now materialises the ring snapshot and the published-price
+catalogue exactly once per request and threads both into every consumer;
+`aggregate_statistics` and `budget_status` accept an optional `_prices`
+snapshot (default `None` preserves the per-lookup read for other callers).
+Same numbers, same fail-closed history-incomplete semantics
+(`ledger.evicted == 0`).
+
+Regression gate: `tests/test_owner_state_latency.py` seeds 10,000 priced
+ledger rows and 4 budgeted aliases, times `GET /owner/api/state` (asserts
+< 2s; fails on `3e2d6c86`, where the request exceeds even the 10s client
+timeout), and asserts every consumer's payload with hand-computed cost
+totals. Fixed path measured 0.47s on the same fixture.
