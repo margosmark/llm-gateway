@@ -1,4 +1,5 @@
 """Isolated tests for the staged capability-discovery backend."""
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,6 +62,36 @@ class DiscoveryBackendTests(unittest.TestCase):
                         store.decide(proposal, "d", {"supports_image_input": "approved"}, revision, fingerprint)
                     self.assertEqual(store.proposal(proposal)["status"], "conflicted")
 
+    def test_decide_refuses_field_outside_capability_vocabulary(self):
+        """S-1 (store layer): the sidecar is untrusted, so a tampered proposal
+        field name must not be recordable even when the caller bypasses HTTP."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "d.json"
+            store = DiscoveryStore(path)
+            row = {"supports_image_input": False, "dialect": "openai_responses"}
+            proposal_id = store.record_fake_result("p", "m", [
+                {"capability": "image_input", "status": "observed_supported"}], row, 5)
+            # Tamper the persisted sidecar the way a hostile writer would.
+            data = json.loads(path.read_text())
+            for item in data["proposals"]:
+                if item.get("proposal_id") == proposal_id:
+                    item["fields"].append({"field": "dialect", "current_value": "openai_responses",
+                                           "proposed_value": "systemone", "evidence_refs": [],
+                                           "classification": "observed", "decision": "pending"})
+            path.write_text(json.dumps(data))
+            tampered = DiscoveryStore(path)
+            fingerprint = row_fingerprint(row)
+            with self.assertRaises(ValueError):
+                tampered.decide(proposal_id, "oov", {"dialect": "approved"}, 5, fingerprint)
+            # Nothing was recorded: the proposal is still pending.
+            still_pending = tampered.proposal(proposal_id)
+            assert still_pending is not None
+            self.assertEqual(still_pending["status"], "pending")
+            # The legitimate capability vocabulary still decides normally; the
+            # tampered field stays pending, so the proposal is only partial.
+            result = tampered.decide(proposal_id, "legit", {"supports_image_input": "approved"}, 5, fingerprint)
+            self.assertEqual(result["status"], "partially_approved")
+
 
 class CapabilityApprovalHttpTests(unittest.TestCase):
     def test_decision_endpoint_updates_only_approved_field(self):
@@ -108,6 +139,114 @@ class CapabilityApprovalHttpTests(unittest.TestCase):
             })
             self.assertEqual(status, 409, payload)
             self.assertEqual(h.config.snapshot().to_dict(), before)
+        finally:
+            h.close()
+
+    @staticmethod
+    def _tamper_sidecar(h, proposal_id, mutate):
+        """Rewrite the 0600 evidence sidecar as a hostile writer would, then
+        reload it through the real loader (the S-1 attack path)."""
+        path = h.data_dir / "capability_discovery.json"
+        data = json.loads(path.read_text())
+        for item in data["proposals"]:
+            if item.get("proposal_id") == proposal_id:
+                mutate(item)
+        path.write_text(json.dumps(data))
+        h.app.discovery = DiscoveryStore(path)
+
+    def test_decision_refuses_field_outside_capability_vocabulary(self):
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"}], row, config.revision)
+
+            def add_tampered_field(proposal):
+                proposal["fields"].append({"field": "dialect", "current_value": row["dialect"],
+                                           "proposed_value": "systemone", "evidence_refs": [],
+                                           "classification": "observed", "decision": "pending"})
+
+            self._tamper_sidecar(h, proposal_id, add_tampered_field)
+            proposal = h.app.discovery.proposal(proposal_id)
+            assert proposal is not None
+            before = h.config.snapshot().to_dict()
+            before_disk = (h.data_dir / "config.json").read_bytes()
+
+            # An unknown field is rejected outright, never silently ignored.
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "oov-decision",
+                "decisions": {"dialect": "approved"},
+                "expected_revision": config.revision,
+                "expected_fingerprint": proposal["base_model_fingerprint"],
+            })
+            self.assertEqual(status, 400, payload)
+
+            # Mixing a valid field with an unknown one is refused whole, so an
+            # out-of-vocabulary key can never ride along with a valid write.
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "mixed-decision",
+                "decisions": {"supports_image_input": "approved", "dialect": "approved"},
+                "expected_revision": config.revision,
+                "expected_fingerprint": proposal["base_model_fingerprint"],
+            })
+            self.assertEqual(status, 400, payload)
+
+            # Config is byte-identical in memory and on disk: no setattr, no
+            # provenance row, no revision bump, no recorded decision.
+            self.assertEqual(h.config.snapshot().to_dict(), before)
+            self.assertEqual((h.data_dir / "config.json").read_bytes(), before_disk)
+            model = h.config.snapshot().providers["chatgpt_codex"].models["gpt-6-luna"]
+            self.assertEqual(model.dialect, row["dialect"])
+            self.assertEqual(model.supports_image_input, row["supports_image_input"])
+            approvals = h.config.snapshot().settings.get("capability_approvals", {})
+            self.assertEqual(approvals.get("chatgpt_codex", {}).get("gpt-6-luna", {}), {})
+            outcome = h.app.discovery.proposal(proposal_id)
+            assert outcome is not None
+            self.assertEqual(outcome["status"], "pending")
+        finally:
+            h.close()
+
+    def test_decision_refuses_non_boolean_proposed_value(self):
+        from tests.test_end_to_end import GatewayHarness
+
+        h = GatewayHarness()
+        try:
+            config = h.config.snapshot()
+            row = config.providers["chatgpt_codex"].models["gpt-6-luna"].to_dict()
+            proposal_id = h.app.discovery.record_fake_result("chatgpt_codex", "gpt-6-luna", [
+                {"capability": "image_input", "status": "observed_supported"}], row, config.revision)
+
+            def corrupt_value(proposal):
+                proposal["fields"][0]["proposed_value"] = "not-a-bool"
+
+            self._tamper_sidecar(h, proposal_id, corrupt_value)
+            proposal = h.app.discovery.proposal(proposal_id)
+            assert proposal is not None
+            before = h.config.snapshot().to_dict()
+            before_disk = (h.data_dir / "config.json").read_bytes()
+            status, payload, _ = h.request("POST", "/owner/api/capabilities/decision", {
+                "proposal_id": proposal_id, "decision_id": "non-bool-decision",
+                "decisions": {"supports_image_input": "approved"},
+                "expected_revision": config.revision,
+                "expected_fingerprint": proposal["base_model_fingerprint"],
+            })
+            self.assertEqual(status, 400, payload)
+            # Never coerced, never persisted: the boolean field keeps its value
+            # and the string never reaches config.json.
+            self.assertEqual(h.config.snapshot().to_dict(), before)
+            disk = (h.data_dir / "config.json").read_bytes()
+            self.assertEqual(disk, before_disk)
+            self.assertNotIn(b"not-a-bool", disk)
+            model = h.config.snapshot().providers["chatgpt_codex"].models["gpt-6-luna"]
+            self.assertEqual(model.supports_image_input, row["supports_image_input"])
+            approvals = h.config.snapshot().settings.get("capability_approvals", {})
+            self.assertEqual(approvals.get("chatgpt_codex", {}).get("gpt-6-luna", {}), {})
+            outcome = h.app.discovery.proposal(proposal_id)
+            assert outcome is not None
+            self.assertEqual(outcome["status"], "pending")
         finally:
             h.close()
 
