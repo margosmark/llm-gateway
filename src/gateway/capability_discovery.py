@@ -18,6 +18,11 @@ from gateway.stores import atomic_write_json, read_json
 
 PROBES = {"text_generation", "image_input", "function_tools"}
 CAPABILITY_FIELDS = {"image_input": "supports_image_input", "function_tools": "supports_function_tools"}
+# The complete vocabulary an approval decision may ever write. The proposal
+# sidecar is untrusted input (the loader checks only schema and bucket types),
+# so the decision path must consult this shared list rather than the proposal's
+# own field names. The catalogue-refresh path reuses the same constant.
+APPROVABLE_METADATA_FIELDS = frozenset(CAPABILITY_FIELDS.values())
 MAX_RUNS = 500
 PREVIEW_TTL_SECONDS = 300
 
@@ -144,13 +149,19 @@ class DiscoveryStore:
                 proposal["status"] = "conflicted"
                 self._persist()
                 raise RuntimeError("proposal conflict")
-            allowed = {f["field"] for f in proposal["fields"]}
-            if set(decisions) - allowed:
+            proposal_fields = {f.get("field") for f in proposal.get("fields", []) if isinstance(f, dict)}
+            if set(decisions) - APPROVABLE_METADATA_FIELDS:
+                # Defense in depth: the HTTP handler checks first, but the
+                # store must not record a decision naming a non-capability
+                # field even if it is driven by another caller.
+                raise ValueError("field outside capability vocabulary")
+            if set(decisions) - proposal_fields:
                 raise ValueError("unknown proposal field")
             for field in proposal["fields"]:
-                if field["field"] in decisions:
+                if isinstance(field, dict) and field.get("field") in decisions:
                     field["decision"] = decisions[field["field"]]
-            proposal["status"] = "approved" if all(f["decision"] != "pending" for f in proposal["fields"]) else "partially_approved"
+            decided_fields = [f for f in proposal["fields"] if isinstance(f, dict)]
+            proposal["status"] = "approved" if all(f["decision"] != "pending" for f in decided_fields) else "partially_approved"
             result = {"proposal_id": proposal_id, "status": proposal["status"], "decisions": decisions}
             self._data["decisions"].append({"proposal_id": proposal_id, "decision_id": decision_id, "decisions": decisions, "result": result})
             self._data["decisions"] = self._data["decisions"][-MAX_RUNS:]
