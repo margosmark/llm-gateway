@@ -169,6 +169,48 @@ separately from any other provider, and is **never displayed again**.
 
 ## Models and routes
 
+### Capability discovery (staged, synthetic evidence only)
+
+The owner API supports exact-model preview and explicitly selected, provenance-recorded approval of `supports_image_input` and `supports_function_tools`. Approval is per field; fields not selected remain pending and can be decided in a later owner action. The decision endpoint uses revision/fingerprint compare-and-swap, records exact retries idempotently, and rejects stale proposals. Reads and normal configuration operations never probe providers.
+
+**One reviewed probe protocol is enabled, and only one**: `opencode_go` /
+`mimo-v2.6-flash`. Every other provider/model pair keeps the old answer —
+preview available with HTTP 422 and `probe_unavailable`, and no request is
+sent.
+
+A probe is a paid inference request, so the run path fails closed at each
+gate and names the gate that refused it:
+
+| Gate | Behaviour |
+|---|---|
+| Reviewed pair | An unregistered pair is refused; there is no "probe any model" escape hatch. |
+| Connected provider | A provider whose connection has not been confirmed is refused. |
+| Published tariff | Unknown **or stale** pricing (older than 30 days, no source, no date) is refused, not estimated. |
+| Owner selection | The owner must authorize this exact account as the billing route and accept the estimate policy. A `hard_cap_required` policy is refused: OpenCode Go publishes no request-level max-charge control, so no enforceable dollar ceiling can be claimed. |
+| Spend ceiling | The owner must state a maximum estimated spend, and it must cover the worst case. |
+| Confirmation | A run needs the single-use, expiring confirmation issued by the preview that produced the estimate. |
+| Concurrency | One run in flight per gateway. A second run and a second preview are refused while one is running. |
+
+The run itself is at most **two one-shot requests** — one for text, one shared
+by image and function tools — non-streamed, non-retried, never failed over,
+concurrency 1, each bounded by time, request bytes, image bytes and output
+tokens, and cancellable from the console
+(`/owner/api/capabilities/probe/cancel`). Returned tool calls are inspected
+as data and never executed. A failure, a mismatch, a missing tool call or
+absent cost accounting is recorded as `inconclusive` or `not_tested` — never
+as `observed_unsupported`.
+
+The estimate is an estimate: it is arithmetic on the published tariff and the
+declared bounds, not a bill, and the gateway has no preflight token counter.
+
+A run writes **evidence only** — sanitized metadata in the capability store,
+plus an unselected proposal. It changes no configuration, no routing, no
+cooldown and no ledger, and the metadata reaches config only through the
+owner's own field decision. A synthetic isolated test seam still exists for
+exercising approval behaviour; it is not an upstream protocol, and no
+capability conclusions may be inferred from it.
+
+
 Discovery never auto-publishes. A discovered model is *staged*; it appears in
 `/v1/models` only after you enable it, give it an alias, and publish that
 alias.
@@ -566,8 +608,13 @@ details or environment values.
 
 `image_revision` is written by the release step into the persistent volume,
 because an image's own digest is only knowable after the image exists. The
-release gate verifies that the running container reports exactly its own
-digest.
+record carries the id of the container it was written for, and the gateway
+reports the digest only while that container is the one running: a record
+left behind by an earlier cutover, a record with no container binding, or
+an environment whose own container id cannot be resolved all report
+`unknown` rather than a digest that cannot be proven to be the running
+image's identity. The release gate verifies that the running container
+reports exactly its own digest.
 
 ---
 
@@ -691,8 +738,10 @@ To check what is running:
 curl -s http://10.10.11.109:8765/version
 ```
 
-`/version` has exactly four keys, and `image_revision` must be the digest
-of the image that is actually running. The runbook has the rest:
+`/version` has exactly four keys, and `image_revision` is the digest of
+the image that is actually running only when the release step recorded it
+for the running container; otherwise it is `unknown`, never a stale
+digest. The runbook has the rest:
 [`RUNBOOK.md`](docs/RUNBOOK.md) covers verification, cutover and rollback.
 
 ---

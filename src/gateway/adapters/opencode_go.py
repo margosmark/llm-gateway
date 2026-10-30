@@ -177,6 +177,88 @@ class OpenCodeGoAdapter:
             headers.update(extra)
         return headers
 
+    # --- bounded capability probing --------------------------------------
+    #: Self-identifying user agent for the one explicitly confirmed probe.
+    PROBE_USER_AGENT = "personal-llm-gateway/2.0"
+
+    def probe_readiness(self) -> tuple[bool, str]:
+        """Why a probe run cannot be attempted here, or ``""`` if it can.
+
+        Structural readiness only. It never fetches an endpoint, never
+        refreshes a token and never touches the network, so it can be
+        answered before the owner is asked for anything.
+        """
+        if not self._api_key():
+            return False, "provider_not_configured"
+        return True, ""
+
+    def capability_probe_request(
+        self,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+        connect_timeout: float,
+        session_id: str,
+        deadline: float | None = None,
+        cancel_event=None,
+        max_response_bytes: int = 1_048_576,
+    ) -> ProviderResponse:
+        """One bounded, non-retried inference request for the probe suite.
+
+        Exactly one attempt is made against the exact reviewed endpoint for
+        the payload's model: no retry, no fallback, no redirect (so the
+        stored key is never replayed at another host). The response is
+        returned as data — nothing here interprets provider prose or
+        executes a tool call.
+        """
+        model = payload.get("model")
+        if not isinstance(model, str) or not model:
+            raise AdapterError(ERROR_POLICY, "the probe request must name one exact model", provider_id=PROVIDER_ID)
+        dialect, path = self.endpoint_for(model)
+        if dialect != DIALECT_OPENAI_CHAT:
+            raise AdapterError(
+                ERROR_POLICY,
+                f"model '{model}' is not served over the OpenAI Chat Completions dialect this probe reviews",
+                provider_id=PROVIDER_ID,
+            )
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = self._headers(session_id=session_id)
+        headers["Accept"] = "application/json"
+        client = UpstreamClient(
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            user_agent=self.PROBE_USER_AGENT,
+        )
+        try:
+            response = client.request(
+                "POST",
+                f"{self._base_url}{path}",
+                headers=headers,
+                body=body,
+                stream=False,
+                provider_id=PROVIDER_ID,
+                max_body_bytes=max_response_bytes,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
+        finally:
+            client.close()
+        if not 200 <= response.status < 300:
+            raise error_from_response(
+                response.status,
+                response.body,
+                PROVIDER_ID,
+                parse_json_body(response.body),
+                operation="the OpenCode Go capability probe request",
+                headers=response.headers,
+            )
+        return ProviderResponse(
+            status=response.status,
+            headers=dict(response.headers),
+            body=response.body,
+            dialect=dialect,
+        )
+
     def list_models(self) -> list[ModelInfo]:
         """Fetch the live model list. Never called implicitly."""
         response = self._client.request(

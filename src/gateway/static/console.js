@@ -31,6 +31,13 @@
   var leaderboardPayload = null;  // last successful payload
   var leaderboardPhase = "idle";  // idle | loading | ready | error
   var leaderboardError = null;
+  // Routing health renders one /api/state snapshot. The fetch time is
+  // tracked so every card can show an as-of time, the tab can refetch when
+  // it regains focus, and no card may claim Healthy once the snapshot is
+  // older than the staleness threshold (fail-closed on stale data).
+  var STALE_AFTER_MS = 60000;
+  var lastFetchAt = null;
+  var refreshUnavailable = false;
 
   // --- tiny helpers -----------------------------------------------------
 
@@ -128,6 +135,36 @@
     return String(value);
   }
 
+  function dataAgeMs() {
+    return lastFetchAt == null ? null : Date.now() - lastFetchAt;
+  }
+
+  function ageText(ms) {
+    var total = Math.max(0, Math.round(ms / 1000));
+    if (total < 90) return total + "s";
+    var minutes = Math.round(total / 60);
+    if (minutes < 90) return minutes + "m";
+    return Math.round(minutes / 60) + "h";
+  }
+
+  // The freshness line every routing-health card carries: the as-of time of
+  // the snapshot, what keeps it honest (an automatic refetch when the tab
+  // regains focus) and, once stale, the age of the data being shown.
+  function freshnessText() {
+    if (lastFetchAt == null) {
+      return "As of Unknown — this view has not been fetched from the console API; routing health is unavailable.";
+    }
+    var asOf = new Date(lastFetchAt).toLocaleTimeString();
+    var age = dataAgeMs();
+    if (refreshUnavailable) {
+      return "As of " + asOf + " · refresh unavailable — showing the last known state; routing health is stale.";
+    }
+    if (age > STALE_AFTER_MS) {
+      return "As of " + asOf + " · " + ageText(age) + " old — showing the last known state; it refetches when this tab regains focus.";
+    }
+    return "As of " + asOf + " · refetches when this tab regains focus.";
+  }
+
   function money(value) {
     if (value === null || value === undefined) return "Unknown";
     return "$" + Number(value).toFixed(2);
@@ -181,7 +218,7 @@
   // --- shell ------------------------------------------------------------
 
   var TABS = [
-    { id: "status", label: "Status" },
+    { id: "status", label: "Operate now" },
     { id: "providers", label: "Providers" },
     { id: "models", label: "Models & Routes" },
     { id: "profiles", label: "Profiles" },
@@ -245,9 +282,21 @@
 
   function renderStatus() {
     var frag = document.createDocumentFragment();
+    var aliases = Array.isArray(state.aliases) ? state.aliases.filter(function (alias) { return alias.enabled; }) : [];
+    var health = el("section", { class: "routing-health", "aria-labelledby": "routing-health-title" }, [
+      el("div", { class: "card" }, [
+        el("h2", { id: "routing-health-title", text: "Operate now · Routing health" }),
+        el("p", { class: "small muted", text: aliases.length ? "Read-only view of published aliases and their configured fallback policy." : "No published aliases yet. Configure and publish an alias to see routing health." }),
+        routingHealthSummary(aliases)
+      ])
+    ]);
+    frag.appendChild(health);
+    var details = el("details", { class: "status-details", open: !state.initialized }, [
+      el("summary", { text: "More status details · setup, providers, history and cost" })
+    ]);
 
     if (!state.initialized) {
-      frag.appendChild(el("section", {}, [
+      details.appendChild(el("section", {}, [
         el("div", { class: "card" }, [
           el("h2", { text: "Set up your gateway" }),
           el("p", {
@@ -258,13 +307,13 @@
         ])
       ]));
     } else {
-      frag.appendChild(el("section", {}, [
+      details.appendChild(el("section", {}, [
         el("div", { class: "card" }, [el("h2", { text: "Gateway status" }), renderChecklist()])
       ]));
     }
 
     var release = state.release || {};
-    frag.appendChild(el("section", {}, [
+    details.appendChild(el("section", {}, [
       el("div", { class: "card" }, [
         el("h2", { text: "Release identity" }),
         el("dl", { class: "kv" }, [
@@ -277,7 +326,7 @@
       ])
     ]));
 
-    frag.appendChild(el("section", {}, [
+    details.appendChild(el("section", {}, [
       el("div", { class: "card" }, [
         el("h2", { text: "Access mode" }),
         el("p", { class: "small", text: state.access_mode_description || "" }),
@@ -313,7 +362,7 @@
         })
       ]));
     });
-    frag.appendChild(el("section", {}, [providers]));
+    details.appendChild(el("section", {}, [providers]));
 
     var healthCard = el("div", { class: "card" }, [el("h2", { text: "Provider health" })]);
     (state.provider_health || []).forEach(function (health) {
@@ -375,7 +424,7 @@
       table.appendChild(tbody);
       ledgerCard.appendChild(table);
     }
-    frag.appendChild(el("section", {}, [ledgerCard]));
+    details.appendChild(el("section", {}, [ledgerCard]));
 
     var costs = state.usage_costs || { window_hours: 24, alias: {}, provider: {}, model: {} };
     var analytics = state.analytics || {
@@ -438,8 +487,8 @@
         costsCard.appendChild(costTable);
       });
     }
-    frag.appendChild(el("section", {}, [costsCard]));
-    frag.appendChild(el("section", {}, [renderFallbackCard(analytics)]));
+    details.appendChild(el("section", {}, [costsCard]));
+    details.appendChild(el("section", {}, [renderFallbackCard(analytics)]));
 
 
     var statisticWindows = state.request_statistics || {};
@@ -513,9 +562,119 @@
       limitTable.appendChild(limitBody);
       limitsCard.appendChild(limitTable);
     }
-    frag.appendChild(el("section", {}, [limitsCard]));
+    details.appendChild(el("section", {}, [limitsCard]));
 
+    frag.appendChild(details);
     return frag;
+  }
+
+  var REQUIRED_TRIGGER_LABELS = {
+    exhausted: "Exhausted",
+    rate_limited: "Rate limited",
+    upstream_unavailable: "Upstream unavailable",
+    explicit_cooldown: "Explicit cooldown",
+    route_ineligible: "Route ineligible",
+    probe_contention: "Probe contention"
+  };
+
+  // The provider states the console knows how to judge. Anything else — a
+  // future enum value or a typo — is Unknown, never a fall-through to
+  // Healthy (fail-closed allow-list, not a deny-list).
+  var KNOWN_PROVIDER_STATES = {
+    connected: true,
+    configured_untested: true,
+    failed: true,
+    not_configured: true
+  };
+
+  function routeHealthState(alias, providers, cooldowns, required) {
+    if (!alias || !alias.primary || !Array.isArray(alias.fallbacks) || !Array.isArray(alias.fallback_triggers)) return "Unknown";
+    // An absent policy list or absent cooldown details is Unknown, never an
+    // empty pass: "no data" must not read as "nothing wrong".
+    if (!Array.isArray(required)) return "Unknown";
+    if (cooldowns == null) return "Unknown";
+    if (alias.fallbacks.length === 0 || alias.fallback_authorized !== true) return "Policy gap";
+    var disabled = required.filter(function (trigger) { return alias.fallback_triggers.indexOf(trigger) === -1; });
+    if (disabled.length) return "Policy gap";
+    var routes = [alias.primary].concat(alias.fallbacks);
+    var providerStates = routes.map(function (route) { return providers[route.provider]; });
+    if (providerStates.some(function (provider) {
+      return !provider || !provider.state ||
+        !Object.prototype.hasOwnProperty.call(KNOWN_PROVIDER_STATES, provider.state) ||
+        provider.state === "configured_untested";
+    })) return "Unknown";
+    var unavailable = providerStates.some(function (provider) {
+      return provider.state === "failed" || provider.state === "not_configured";
+    });
+    var cooling = Object.keys(cooldowns).some(function (key) {
+      var entry = cooldowns[key] || {};
+      if (entry.armed === false || entry.remaining_seconds <= 0 && entry.state !== "half_open") return false;
+      return routes.some(function (route) {
+        return route.provider === entry.provider && (entry.scope === "provider" || route.model === entry.model);
+      });
+    });
+    if (cooling) return "Cooldown";
+    if (unavailable) return "Degraded";
+    var unconfirmed = alias.fallbacks.some(function (route) {
+      return (alias.fallback_confirmed_providers || []).indexOf(route.provider) === -1;
+    });
+    if (unconfirmed) return "Policy gap";
+    return "Healthy";
+  }
+
+  function routingHealthSummary(aliases) {
+    var providers = {};
+    (state.providers || []).forEach(function (provider) { providers[provider.provider_id] = provider; });
+    // Absent lists stay absent: routeHealthState turns them into Unknown
+    // verdicts instead of treating "missing" as "empty and healthy".
+    var required = state.fallback_triggers;
+    var policyKnown = Array.isArray(required);
+    var cooldowns = state.cooldown_details;
+    var cooldownsKnown = cooldowns != null;
+    if (!cooldownsKnown) cooldowns = {};
+    var ageMs = dataAgeMs();
+    var stale = refreshUnavailable || ageMs == null || ageMs > STALE_AFTER_MS;
+    var cards = aliases.map(function (alias) {
+      var fallbackRoutes = Array.isArray(alias.fallbacks) ? alias.fallbacks : [];
+      var base = routeHealthState(alias, providers, cooldownsKnown ? cooldowns : null, required);
+      // Stale-beyond-threshold data must never claim Healthy: it renders as
+      // Stale with the snapshot's age beside it. Every other verdict is
+      // fail-safe or config-derived and is kept as computed.
+      var stateText = stale && base === "Healthy" ? "Stale" : base;
+      var triggerList = el("ul", { class: "trigger-list", "aria-label": "Fallback trigger status" });
+      Object.keys(REQUIRED_TRIGGER_LABELS).forEach(function (key) {
+        var enabled = policyKnown && required.indexOf(key) !== -1 && (alias.fallback_triggers || []).indexOf(key) !== -1;
+        triggerList.appendChild(el("li", { text: REQUIRED_TRIGGER_LABELS[key] + ": " + (policyKnown ? (enabled ? "enabled" : "disabled") : "unknown") }));
+      });
+      var routeText = function (route) { return route ? providerLabel(route.provider) + " / " + route.model : "None configured"; };
+      var active = Object.keys(cooldowns).filter(function (key) {
+        var entry = cooldowns[key] || {};
+        if (entry.armed === false || (entry.remaining_seconds <= 0 && entry.state !== "half_open")) return false;
+        return [alias.primary].concat(fallbackRoutes).some(function (route) {
+          return route && route.provider === entry.provider && (entry.scope === "provider" || route.model === entry.model);
+        });
+      }).map(function (key) { return cooldowns[key]; });
+      var cooldownText = !cooldownsKnown
+        ? "Unknown — the console state carried no cooldown details, so an open circuit cannot be ruled out."
+        : (active.length ? active.map(function (entry) {
+          return entry.provider + "/" + (entry.model || "all models") + " · " + entry.state + " · " + entry.remaining_seconds + "s remaining";
+        }).join("; ") : "No active cooldown on this alias’s routes.");
+      var confirmed = (alias.fallback_confirmed_providers || []).filter(function (provider) { return fallbackRoutes.some(function (route) { return route.provider === provider; }); });
+      return el("article", { class: "route-health-card", "aria-label": alias.name + " routing health" }, [
+        el("h3", { text: alias.name + " · " + stateText, "data-alias": alias.name, "data-verdict": base }),
+        el("p", { class: "small muted health-freshness", text: freshnessText() }),
+        el("dl", { class: "health-routes" }, [
+          el("dt", { text: "Primary" }), el("dd", { text: routeText(alias.primary) }),
+          el("dt", { text: "Fallback 1" }), el("dd", { text: routeText(fallbackRoutes[0]) }),
+          el("dt", { text: "Fallback 2" }), el("dd", { text: routeText(fallbackRoutes[1]) })
+        ]),
+        el("p", { class: "small", text: "Fallback authorization: " + (alias.fallback_authorized === true ? "enabled" : "disabled") + " · Confirmed providers: " + (confirmed.length ? confirmed.map(providerLabel).join(", ") : "none") }),
+        triggerList,
+        el("p", { class: "small", text: "Applicable cooldown: " + cooldownText })
+      ]);
+    });
+    if (!aliases.length) return emptyState("No published aliases", "No published aliases yet. Configure and publish an alias to see routing health.");
+    return el("div", { class: "routing-health-list" }, cards);
   }
 
   function statBox(label, value) {
@@ -1668,6 +1827,94 @@
 
   // --- models and routes ------------------------------------------------
 
+  function renderCapabilityPanel(provider, model, panel) {
+    var target = { provider_id: provider.provider_id, model_id: model.model_id };
+    var readUrl = BASE + "/api/capabilities?provider_id=" + encodeURIComponent(target.provider_id) + "&model_id=" + encodeURIComponent(target.model_id);
+    panel.appendChild(el("p", { class: "small muted", text: "Optional synthetic capability discovery. No probes run on page load or catalogue refresh. Any device that can reach this trusted-LAN console is an administrator; there is no individual owner login." }));
+    panel.appendChild(el("p", { class: "small muted", text: "Probe results are evidence, not guarantees. Unknown price or unsupported probe protocol blocks execution; estimates are not a bill ceiling. Fixed suite mvp-1: exact bounded synthetic text marker; locally generated inline shape-count image; harmless forced function schema whose returned call is never executed." }));
+    var evidence = el("div", { class: "capability-evidence", role: "status", "aria-live": "polite" });
+    panel.appendChild(evidence);
+    api(readUrl).then(function (data) {
+      (data.runs || []).forEach(function (runRecord) {
+        (runRecord.results || []).forEach(function (result) {
+          evidence.appendChild(el("p", { class: "small", text: result.capability + ": " + result.status + " · " + (result.method || "method unknown") + " · " + when(runRecord.finished_at) + " (observed evidence; not a guarantee)" }));
+        });
+      });
+      (data.approvals || []).forEach(function (approval) {
+        evidence.appendChild(el("p", { class: "small", text: "Approved metadata provenance: " + JSON.stringify(approval) }));
+      });
+      (data.proposals || []).forEach(function (proposal) {
+        if (["pending", "partially_approved"].indexOf(proposal.status) === -1) return;
+        var proposalBox = el("div", { class: "route" }, [el("h4", { text: "Review proposed metadata changes · " + proposal.status })]);
+        var choices = {};
+        (proposal.fields || []).forEach(function (field) {
+          var check = el("input", { type: "checkbox" });
+          check.checked = false;
+          choices[field.field] = check;
+          proposalBox.appendChild(el("label", { class: "capability-field" }, [check, el("span", { text: field.field + ": " + String(field.current_value) + " → " + String(field.proposed_value) + " · " + field.classification + " evidence · " + (field.routing_consequence || "Routing impact unknown; no automatic policy change") })]));
+        });
+        function decide(value) {
+          var decisions = {};
+          Object.keys(choices).forEach(function (field) { if (choices[field].checked) decisions[field] = value; });
+          if (!Object.keys(decisions).length) { toast("Select at least one field; no changes were made.", "bad"); return; }
+          var fingerprint = proposal.base_model_fingerprint || proposal.expected_fingerprint;
+          var expectedRevision = proposal.base_revision;
+          if (!global.confirm("Explicitly " + value + " selected metadata fields for " + target.provider_id + " / " + target.model_id + "? No route or alias settings are changed.")) return;
+          api(BASE + "/api/capabilities/decision", { method: "POST", body: { proposal_id: proposal.proposal_id, decision_id: "ui-" + Date.now() + "-" + Math.random().toString(36).slice(2), decisions: decisions, expected_revision: expectedRevision, expected_fingerprint: fingerprint } })
+            .then(function () { toast("Decision saved.", "ok"); return refresh(); })
+            .catch(function (error) { toast(error.message + (error.payload && error.payload.error && error.payload.error.type === "conflict" ? " — refresh and review a new diff." : ""), "bad"); });
+        }
+        proposalBox.appendChild(el("button", { type: "button", text: "Approve selected changes", disabled: !state.can_mutate, onclick: function () { decide("approved"); } }));
+        proposalBox.appendChild(el("button", { type: "button", class: "secondary", text: "Reject selected changes", disabled: !state.can_mutate, onclick: function () { decide("rejected"); } }));
+        evidence.appendChild(proposalBox);
+      });
+      if (!(data.runs || []).length && !(data.proposals || []).length) evidence.appendChild(el("p", { class: "small muted", text: "No capability evidence or pending proposal for this exact provider/model." }));
+    }).catch(function () { evidence.appendChild(el("p", { class: "small muted", text: "Capability evidence could not be loaded. No provider call was made." })); });
+
+    var choices = {};
+    var probeNames = [["text_generation", "Basic text response"], ["image_input", "Synthetic image understanding"], ["function_tools", "Function tool call (never executed)"]];
+    var probeList = el("div", { class: "row" });
+    probeNames.forEach(function (item) {
+      var input = el("input", { type: "checkbox", value: item[0] });
+      input.checked = false;
+      choices[item[0]] = input;
+      probeList.appendChild(el("label", {}, [input, el("span", { text: item[1] })]));
+    });
+    panel.appendChild(probeList);
+    var previewHost = el("div", { class: "capability-preview", role: "status", "aria-live": "polite" });
+    panel.appendChild(previewHost);
+    var previewButton = el("button", { type: "button", text: "Preview selected probes", disabled: !state.can_mutate, onclick: function () {
+      var selected = Object.keys(choices).filter(function (key) { return choices[key].checked; });
+      if (!selected.length) { toast("Select at least one probe; nothing was sent.", "bad"); return; }
+      previewHost.textContent = "Loading preview…";
+      api(BASE + "/api/capabilities/preview", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected } })
+        .then(function (preview) {
+          previewHost.textContent = "";
+          previewHost.appendChild(el("p", { class: "small", text: "Target: " + preview.provider_id + " / " + preview.model_id + " · selected: " + preview.probes.join(", ") + " · suite " + preview.suite_version + " · max " + preview.maximum_requests + " request(s), output " + preview.max_output_tokens + " tokens, " + preview.timeout_seconds + "s, concurrency " + preview.concurrency + ", retries " + preview.retries + "." }));
+          previewHost.appendChild(el("p", { class: "notice warn", text: preview.reason + " Price: " + (preview.price && preview.price.status === "known" ? preview.price.amount + " " + preview.price.currency + " from " + preview.price.source : "Unknown") + ". No provider request has been sent." }));
+          if (preview.available) {
+            previewHost.appendChild(el("button", { type: "button", text: "Run selected probes", disabled: !state.can_mutate, onclick: function () {
+              if (!global.confirm("Send only these synthetic probes to " + target.provider_id + " / " + target.model_id + "? The provider will receive synthetic data. Price estimates are not guaranteed billing caps.")) return;
+              api(BASE + "/api/capabilities/run", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected, preview: preview, confirmed: true } }).then(function () { return refresh(); }).catch(function (error) { toast(error.message + " No result is treated as unsupported unless the evidence is an unambiguous capability-specific refusal.", "bad"); });
+            } }));
+          } else {
+            previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable: no trustworthy price/probe contract. This probe cannot be run; Unknown is not false." }));
+          }
+        }).catch(function (error) {
+          var unavailable = error.payload && typeof error.payload.available === "boolean" ? error.payload : null;
+          previewHost.textContent = "";
+          if (unavailable) {
+            previewHost.appendChild(el("p", { class: "small", text: "Target: " + unavailable.provider_id + " / " + unavailable.model_id + " · selected: " + (unavailable.probes || []).join(", ") + " · suite " + unavailable.suite_version + " · maximum " + unavailable.maximum_requests + " request(s), output " + unavailable.max_output_tokens + " tokens, timeout " + unavailable.timeout_seconds + "s." }));
+            previewHost.appendChild(el("p", { class: "notice warn", text: unavailable.reason + " Price: Unknown. No provider request has been sent." }));
+            previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable; Unknown is not false. No probe was executed." }));
+          } else {
+            previewHost.appendChild(el("p", { class: "notice warn", text: "Preview refused: " + error.message + ". No provider request was sent." }));
+          }
+        });
+    } });
+    panel.appendChild(previewButton);
+  }
+
   function renderModels() {
     var frag = document.createDocumentFragment();
 
@@ -1703,6 +1950,31 @@
           el("td", { class: "small", text: tokens(model.context_limit) }),
           el("td", { class: "small", text: model.retention_class || "unknown" }),
           el("td", { class: "actions" }, [
+            el("button", {
+              type: "button", class: "secondary", text: "Discover capabilities",
+              disabled: !state.can_mutate || provider.state !== "connected",
+              "aria-expanded": "false",
+              onclick: function (event) {
+                var button = event.currentTarget;
+                var row = button.closest("tr");
+                var existing = row.nextElementSibling;
+                if (existing && existing.classList.contains("capability-detail-row")) {
+                  existing.remove();
+                  button.setAttribute("aria-expanded", "false");
+                  return;
+                }
+                var detailRow = document.createElement("tr");
+                detailRow.className = "capability-detail-row";
+                var detailCell = document.createElement("td");
+                detailCell.colSpan = 6;
+                var panel = el("div", { class: "capability-panel" });
+                renderCapabilityPanel(provider, model, panel);
+                detailCell.appendChild(panel);
+                detailRow.appendChild(detailCell);
+                row.parentNode.insertBefore(detailRow, row.nextSibling);
+                button.setAttribute("aria-expanded", "true");
+              }
+            }),
             el("button", {
               type: "button",
               text: model.enabled ? "Disable" : "Enable",
@@ -1755,6 +2027,76 @@
 
     frag.appendChild(el("section", {}, [renderAliasEditor()]));
     return frag;
+  }
+
+  // A pure summary of one save payload against the saved alias (null for a
+  // new alias): the alias name, the primary and fallback order, and the
+  // trigger/authorization impact, so the owner confirms exactly what will
+  // change before anything is written. Nothing here touches the network.
+  function savePreviewLines(model, previous) {
+    var routeText = function (route) {
+      return route && route.provider ? providerLabel(route.provider) + " → " + route.model : "none";
+    };
+    var list = [];
+    list.push(previous
+      ? "Alias: " + model.name + " (editing the saved alias)"
+      : "Alias: " + model.name + " (new — nothing with this name is saved yet)");
+    if (!previous) {
+      list.push("Primary: " + routeText(model.primary));
+      list.push("Fallback order: " + (model.fallbacks.length ? model.fallbacks.map(routeText).join(" · ") : "none"));
+      list.push("Triggers: " + (model.triggers.length ? model.triggers.join(", ") : "none"));
+      list.push("Cross-provider authorization: " + (model.authorized ? "enabled" : "disabled") +
+        " · confirmed providers: " + (model.confirmed.length ? model.confirmed.join(", ") : "none"));
+      list.push("Cooldown: " + model.cooldown + "s · publish state: not published (publish separately)");
+      list.push("Phase policy: " + (model.phaseRouting ? "enabled" : "none"));
+      return list;
+    }
+    var oldPrimary = routeText(previous.primary);
+    var newPrimary = routeText(model.primary);
+    list.push(oldPrimary === newPrimary
+      ? "Primary: " + newPrimary + " (unchanged)"
+      : "Primary: " + oldPrimary + " → " + newPrimary);
+    var oldFallbacks = (previous.fallbacks || []).map(routeText);
+    var newFallbacks = model.fallbacks.map(routeText);
+    if (oldFallbacks.join(" · ") === newFallbacks.join(" · ")) {
+      list.push("Fallback order: " + (newFallbacks.length ? newFallbacks.join(" · ") : "none") + " (unchanged)");
+    } else {
+      list.push("Fallback order — was: " + (oldFallbacks.length ? oldFallbacks.join(" · ") : "none"));
+      list.push("Fallback order — now: " + (newFallbacks.length ? newFallbacks.join(" · ") : "none"));
+    }
+    var oldTriggers = previous.fallback_triggers || [];
+    var added = model.triggers.filter(function (trigger) { return oldTriggers.indexOf(trigger) === -1; });
+    var removed = oldTriggers.filter(function (trigger) { return model.triggers.indexOf(trigger) === -1; });
+    list.push("Trigger impact: " + (!added.length && !removed.length
+      ? "no trigger changes"
+      : (added.length ? "enable " + added.join(", ") : "") +
+        (added.length && removed.length ? "; " : "") +
+        (removed.length ? "disable " + removed.join(", ") : "")));
+    var oldAuthorized = previous.fallback_authorized === true;
+    list.push("Cross-provider authorization: " + (oldAuthorized === model.authorized
+      ? (model.authorized ? "enabled (unchanged)" : "disabled (unchanged)")
+      : (oldAuthorized ? "enabled → disabled" : "disabled → enabled")));
+    var oldConfirmed = previous.fallback_confirmed_providers || [];
+    var confirmedSame = oldConfirmed.length === model.confirmed.length &&
+      model.confirmed.every(function (providerId) { return oldConfirmed.indexOf(providerId) !== -1; });
+    list.push("Confirmed providers: " + (confirmedSame
+      ? (model.confirmed.length ? model.confirmed.join(", ") : "none") + " (unchanged)"
+      : "was " + (oldConfirmed.length ? oldConfirmed.join(", ") : "none") +
+        " → now " + (model.confirmed.length ? model.confirmed.join(", ") : "none")));
+    var oldCooldown = Number(previous.cooldown_seconds);
+    list.push(oldCooldown === Number(model.cooldown)
+      ? "Cooldown: " + model.cooldown + "s (unchanged)"
+      : "Cooldown: " + previous.cooldown_seconds + "s → " + model.cooldown + "s");
+    var oldPhase = previous.phase_routing || null;
+    list.push("Phase policy: " + (!oldPhase && !model.phaseRouting
+      ? "none"
+      : !oldPhase ? "added"
+      : !model.phaseRouting ? "removed"
+      : "updated"));
+    list.push("Publish state: " + (previous.enabled
+      ? "published — stays published"
+      : "not published — stays unpublished"));
+    return list;
   }
 
   // --- cross-provider fallback: the retention class of the route selected --
@@ -1815,6 +2157,28 @@
     var card = el("div", { class: "card" }, [el("h2", { text: "Aliases and routes" })]);
     var editing = editingAlias && state.aliases.filter(function (alias) { return alias.name === editingAlias; })[0];
     if (editingAlias && !editing) editingAlias = null;
+
+    // RH-05: the first click never mutates. A preview of exactly what will
+    // change is shown with an explicit "Save routing changes"/"Cancel"
+    // choice; a cancel or a rejected save leaves the configuration
+    // untouched, says so, and keeps the form draft for correction.
+    var unchangedBanner = el("div", { class: "notice warn save-unchanged", role: "alert", tabindex: "-1", hidden: true });
+    card.appendChild(unchangedBanner);
+
+    function showUnchangedBanner(detailText) {
+      unchangedBanner.innerHTML = "";
+      unchangedBanner.appendChild(el("strong", { text: "Changes not saved. Current configuration is unchanged." }));
+      if (detailText) {
+        var detail = el("p", { class: "small save-error", tabindex: "-1", text: detailText });
+        unchangedBanner.appendChild(detail);
+        unchangedBanner.appendChild(el("button", {
+          type: "button", text: "Review errors",
+          onclick: function () { detail.focus(); }
+        }));
+      }
+      unchangedBanner.removeAttribute("hidden");
+      unchangedBanner.focus();
+    }
 
     var nameInput = el("input", { placeholder: "coding", value: editing ? editing.name : "", disabled: !!editing });
     var tagInput = el("input", { placeholder: "coding", value: editing ? (editing.tag || "") : "" });
@@ -2030,6 +2394,128 @@
       el("span", { text: "I authorise requests assigned to this alias to be sent to the providers named below" }), authorizeBox
     ]));
     card.appendChild(confirmProviders);
+
+    var previewHost = el("div", { class: "save-preview", hidden: true });
+    card.appendChild(previewHost);
+
+    function openPreview() {
+      var triggers = Object.keys(triggerBoxes).filter(function (key) { return triggerBoxes[key].checked; });
+      var confirmed = Array.prototype.slice.call(confirmProviders.querySelectorAll("input:checked"))
+        .map(function (box) { return box.value; });
+      var phaseRouting = null;
+      // Removal is an explicit owner action and takes precedence over
+      // the enabled toggle. Otherwise retain an existing disabled policy
+      // so it can be re-enabled without rebuilding its configuration.
+      if (!removePhasePolicy.checked && (phaseEnabled.checked || phasePolicy)) {
+        var routes = {};
+        Object.keys(phaseRows).forEach(function (phase) {
+          var item = phaseRows[phase];
+          if (!item.include.checked) return;
+          routes[phase] = {
+            provider: item.route.provider.value,
+            model: item.route.model.value
+          };
+          if (item.effort.value.trim()) routes[phase].effort = item.effort.value.trim();
+        });
+        phaseRouting = {
+          enabled: phaseEnabled.checked,
+          routes: routes,
+          default_route: hasDefault.checked
+            ? { provider: defaultRoute.provider.value, model: defaultRoute.model.value }
+            : null,
+          inference: {
+            enabled: inferenceEnabled.checked,
+            provider: inferenceRoute.provider.value,
+            model: inferenceRoute.model.value,
+            minimum_confidence: confidence.value === "" ? 0.8 : Number(confidence.value),
+            on_uncertain: onUncertain.value
+          }
+        };
+      }
+      var payload = {
+        action: "save",
+        name: nameInput.value,
+        tag: tagInput.value,
+        primary: { provider: primaryProvider.value, model: primaryModel.value },
+        fallbacks: fallbacks.map(function (row) {
+          return { provider: row.provider.value, model: row.model.value };
+        }),
+        fallback_triggers: triggers,
+        fallback_authorized: authorizeBox.checked,
+        fallback_confirmed_providers: confirmed,
+        cooldown_seconds: parseInt(cooldown.value, 10) || 0,
+        budget: budget.value === "" ? null : Number(budget.value),
+        enabled: editing ? editing.enabled : false,
+        phase_routing: phaseRouting
+      };
+      previewHost.innerHTML = "";
+      var title = el("h4", { id: "save-preview-title", tabindex: "-1", text: "Preview — nothing has been saved" });
+      previewHost.appendChild(title);
+      previewHost.appendChild(el("p", {
+        class: "small",
+        text: "Review the routing changes below. The configuration is written only when you choose Save routing changes."
+      }));
+      var list = el("ul", { class: "preview-lines" });
+      savePreviewLines({
+        name: payload.name,
+        primary: payload.primary,
+        fallbacks: payload.fallbacks,
+        triggers: payload.fallback_triggers,
+        authorized: payload.fallback_authorized,
+        confirmed: payload.fallback_confirmed_providers,
+        cooldown: payload.cooldown_seconds,
+        phaseRouting: payload.phase_routing
+      }, editing || null).forEach(function (line) {
+        list.appendChild(el("li", { text: line }));
+      });
+      // tag and budget are written by this same save, so the preview must
+      // show them too — a review that omits a field it will persist is not
+      // an honest review.
+      var previousTag = editing ? (editing.tag || "") : null;
+      list.appendChild(el("li", {
+        text: "Tag: " + (payload.tag || "none") +
+          (previousTag !== null
+            ? (previousTag === payload.tag ? " (unchanged)" : " — was: " + (previousTag || "none"))
+            : "")
+      }));
+      var previousBudget = editing && editing.budget != null ? editing.budget : null;
+      list.appendChild(el("li", {
+        text: "Monthly budget: " + (payload.budget === null ? "no cap" : "$" + payload.budget) +
+          (editing
+            ? (previousBudget === payload.budget
+                ? " (unchanged)"
+                : " — was: " + (previousBudget === null ? "no cap" : "$" + previousBudget))
+            : "")
+      }));
+      previewHost.appendChild(list);
+      previewHost.appendChild(el("div", { class: "row" }, [
+        el("button", {
+          class: "primary", type: "button", text: "Save routing changes",
+          disabled: !state.can_mutate,
+          onclick: function () {
+            run(api(BASE + "/api/alias", { method: "POST", body: payload })).then(function () {
+              editingAlias = null;
+              toast(editing ? "Alias updated." : "Alias saved.", "ok");
+              return refresh();
+            }).catch(function (error) {
+              // The save was refused: nothing was written. Keep the draft
+              // in place and give the owner the error plus a focus target.
+              showUnchangedBanner(error.message || "the console API refused the save.");
+            });
+          }
+        }),
+        el("button", {
+          type: "button", text: "Cancel",
+          onclick: function () {
+            previewHost.setAttribute("hidden", "");
+            showUnchangedBanner(null);
+          }
+        })
+      ]));
+      previewHost.removeAttribute("hidden");
+      title.focus();
+    }
+
     card.appendChild(el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "Local cooldown (seconds)" }), cooldown]),
       el("label", {}, [el("span", { text: "Monthly budget (USD; soft cap)" }), budget]),
@@ -2037,64 +2523,7 @@
         el("button", {
           class: "primary", type: "button", text: editing ? "Save changes" : "Save alias",
           disabled: !state.can_mutate,
-          onclick: function () {
-            var triggers = Object.keys(triggerBoxes).filter(function (key) { return triggerBoxes[key].checked; });
-            var confirmed = Array.prototype.slice.call(confirmProviders.querySelectorAll("input:checked"))
-              .map(function (box) { return box.value; });
-            var phaseRouting = null;
-            // Removal is an explicit owner action and takes precedence over
-            // the enabled toggle. Otherwise retain an existing disabled policy
-            // so it can be re-enabled without rebuilding its configuration.
-            if (!removePhasePolicy.checked && (phaseEnabled.checked || phasePolicy)) {
-              var routes = {};
-              Object.keys(phaseRows).forEach(function (phase) {
-                var item = phaseRows[phase];
-                if (!item.include.checked) return;
-                routes[phase] = {
-                  provider: item.route.provider.value,
-                  model: item.route.model.value
-                };
-                if (item.effort.value.trim()) routes[phase].effort = item.effort.value.trim();
-              });
-              phaseRouting = {
-                enabled: phaseEnabled.checked,
-                routes: routes,
-                default_route: hasDefault.checked
-                  ? { provider: defaultRoute.provider.value, model: defaultRoute.model.value }
-                  : null,
-                inference: {
-                  enabled: inferenceEnabled.checked,
-                  provider: inferenceRoute.provider.value,
-                  model: inferenceRoute.model.value,
-                  minimum_confidence: confidence.value === "" ? 0.8 : Number(confidence.value),
-                  on_uncertain: onUncertain.value
-                }
-              };
-            }
-            run(api(BASE + "/api/alias", {
-              method: "POST",
-              body: {
-                action: "save",
-                name: nameInput.value,
-                tag: tagInput.value,
-                primary: { provider: primaryProvider.value, model: primaryModel.value },
-                fallbacks: fallbacks.map(function (row) {
-                  return { provider: row.provider.value, model: row.model.value };
-                }),
-                fallback_triggers: triggers,
-                fallback_authorized: authorizeBox.checked,
-                fallback_confirmed_providers: confirmed,
-                cooldown_seconds: parseInt(cooldown.value, 10) || 0,
-                budget: budget.value === "" ? null : Number(budget.value),
-                enabled: editing ? editing.enabled : false,
-                phase_routing: phaseRouting
-              }
-            })).then(function () {
-              editingAlias = null;
-              toast(editing ? "Alias updated." : "Alias saved.", "ok");
-              return refresh();
-            }).catch(function () {});
-          }
+          onclick: openPreview
         }),
         editing ? el("button", {
           type: "button", text: "Cancel edit",
@@ -2402,14 +2831,77 @@
   function bootstrap() {
     app = document.getElementById("app");
     refresh();
+    // The console is often left open. Refetch whenever the tab is shown
+    // again, so the health cards never sit on a snapshot the owner cannot
+    // The refetch is skipped while a mutation is in flight. Otherwise it
+    // always updates the backing snapshot without redrawing the current tab:
+    // a new-alias draft has no editingAlias, but still must survive refresh.
+    function refetchIfIdle() {
+      if (busy) return;
+      refresh({ preserveDraft: true });
+    }
+    global.addEventListener("focus", refetchIfIdle);
+    global.document.addEventListener("visibilitychange", function () {
+      if (global.document.visibilityState === "visible") refetchIfIdle();
+    });
+    // Even without a fetch, a rendered snapshot must stop claiming Healthy
+    // once it ages past the threshold; the ticker rewrites only the stale
+    // fields in place (a full redraw would collapse open details).
+    global.setInterval(function () {
+      // Freshness is independent of editing and mutations: a snapshot that
+      // ages out must never remain labelled Healthy behind an open draft.
+      tickFreshness();
+    }, 30000);
   }
 
-  function refresh() {
+  function tickFreshness() {
+    var ageMs = dataAgeMs();
+    var stale = refreshUnavailable || ageMs == null || ageMs > STALE_AFTER_MS;
+    var line = freshnessText();
+    var cards = global.document.querySelectorAll(".route-health-card");
+    Array.prototype.forEach.call(cards, function (card) {
+      var head = card.querySelector("h3[data-verdict]");
+      var ageNode = card.querySelector(".health-freshness");
+      if (!head || !ageNode) return;
+      var base = head.getAttribute("data-verdict");
+      var name = head.getAttribute("data-alias");
+      head.textContent = name + " · " + (stale && base === "Healthy" ? "Stale" : base);
+      ageNode.textContent = line;
+    });
+  }
+
+  function refresh(options) {
+    options = options || {};
     return api(BASE + "/api/state").then(function (full) {
       state = full;
-      draw();
+      lastFetchAt = Date.now();
+      refreshUnavailable = false;
+      if (options.preserveDraft) {
+        // A focus/visibility refresh updates the backing snapshot without
+        // replacing the editor DOM (including its unsaved fields and preview)
+        // or the user's open disclosure state. Refresh only the health view.
+        if (tab === "status") {
+          var existingHealth = app.querySelector(".routing-health");
+          if (existingHealth) {
+            var temporary = el("div");
+            temporary.appendChild(renderStatus());
+            var updatedHealth = temporary.querySelector(".routing-health");
+            if (updatedHealth) existingHealth.replaceWith(updatedHealth);
+          }
+        }
+        tickFreshness();
+      } else {
+        draw();
+      }
       return full;
     }).catch(function (error) {
+      refreshUnavailable = true;
+      if (options.preserveDraft && state) {
+        // Keep the draft and preview intact, but fail closed on health.
+        tickFreshness();
+        toast("Routing health refresh unavailable: " + (error.message || "console API unavailable"), "bad");
+        return null;
+      }
       app.innerHTML = "";
       app.appendChild(el("main", {}, [
         el("div", { class: "card" }, [
@@ -2417,6 +2909,7 @@
           el("p", { class: "small", text: error.message })
         ])
       ]));
+      return null;
     });
   }
 
@@ -2428,16 +2921,26 @@
     module.exports = {
       el: el,
       emptyState: emptyState,
-      renderStatusForTest: function (view, day) {
+      savePreviewLines: savePreviewLines,
+      STALE_AFTER_MS: STALE_AFTER_MS,
+      renderStatusForTest: function (view, day, fetchedAt) {
         var previous = state;
         var previousDay = usageDay;
+        var previousFetchAt = lastFetchAt;
+        var previousRefreshUnavailable = refreshUnavailable;
         state = view;
         if (day !== undefined) usageDay = day;
+        refreshUnavailable = arguments.length > 3 ? !!arguments[3] : false;
+        // A test render is a snapshot like any other: default to a fresh
+        // fetch, or hand it an explicit fetch time to exercise staleness.
+        lastFetchAt = fetchedAt === undefined ? Date.now() : fetchedAt;
         try {
           return renderStatus();
         } finally {
           state = previous;
           usageDay = previousDay;
+          lastFetchAt = previousFetchAt;
+          refreshUnavailable = previousRefreshUnavailable;
         }
       },
       renderSettingsForTest: function (view) {
@@ -2445,6 +2948,15 @@
         state = view;
         try {
           return renderSettings();
+        } finally {
+          state = previous;
+        }
+      },
+      renderModelsForTest: function (view) {
+        var previous = state;
+        state = view;
+        try {
+          return renderModels();
         } finally {
           state = previous;
         }

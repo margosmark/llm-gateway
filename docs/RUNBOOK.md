@@ -235,8 +235,12 @@ curl -s -o /dev/null -w '%{http_code}\n' http://10.10.11.109:8765/health
 curl -s http://10.10.11.109:8765/v1/models
 ```
 
-`/version` must report exactly the four keys, and `image_revision` must be
-the digest of the image that is running.
+`/version` must report exactly the four keys. `image_revision` is the
+digest of the running image only when the release step recorded it for the
+running container; it reports `unknown` otherwise (a cutover that bypassed
+`scripts/release.py`, or a record left behind by an earlier container).
+`docker inspect --format '{{.Image}}'` on the container remains the
+authoritative image check.
 
 ### 3.1 The OpenCode integration
 
@@ -552,3 +556,45 @@ was deliberately not modified as part of the cooldown-recovery feature
 work). If the loopback venv deployment is ever wanted again, it must be
 designed and documented deliberately — do not revive this unit by
 accident with `systemctl --user enable --now`.
+
+
+## 10. Running a bounded capability probe
+
+A probe sends **real, paid inference requests** to one reviewed pair:
+`opencode_go` / `mimo-v2.6-flash`. Nothing else can be probed. Budget and
+time: at most two requests, worst case well under one US cent, and under a
+minute of wall clock.
+
+1. **Stage the pair.** The provider must be `connected` and the model staged
+   with the OpenAI Chat dialect. A provider that has not been tested is
+   refused with `provider_not_configured`.
+2. **Preview** (`POST /owner/api/capabilities/preview`, or the console's
+   capability panel). Send the exact probes and the owner fields:
+   `authorize_billing_route: true`, `spend_policy: "estimate_accepted"`, and
+   `max_spend_estimate_usd` covering the estimate. The preview replies with
+   the full contract — request count, output-token cap, timeouts, byte
+   ceilings, the tariff it priced against and its observation date — plus a
+   single-use `confirmation`. Preview sends nothing upstream.
+   * `price_unavailable` → the published tariff is missing or stale; nothing
+     can run until the catalogue is refreshed.
+   * `hard_cap_unavailable` → a hard dollar ceiling was requested; OpenCode
+     Go publishes no enforceable cap, so the run is refused rather than
+     estimated as guaranteed.
+3. **Run** (`POST /owner/api/capabilities/run`) with that confirmation, the
+   same probes and owner fields, and the preview's `base_revision`. The
+   response carries per-capability evidence, the request count, and a
+   `proposal_id` that is *pending*.
+4. **Cancel if needed** (`POST /owner/api/capabilities/probe/cancel`) while
+   it runs; the response reports `cancelled: true` and the run stops before
+   the next request.
+5. **Decide** the proposal (`POST /owner/api/capabilities/decision`) if the
+   evidence should become metadata. Until you do, the run changes nothing.
+
+Reading the evidence: `observed_supported` is observed; `inconclusive` means
+the run could not tell; `not_tested` means the run stopped before that probe
+(failure, missing cost accounting, cancellation, or the deadline). A probe
+never proves a capability is *unsupported*.
+
+What the run must not disturb: config revision, routing, cooldowns and the
+ledger. If any of those change after a probe, that is a defect — capture the
+run id and open a review finding.

@@ -90,24 +90,20 @@ def http(url: str, timeout: float = 10.0) -> tuple[int, object]:
 
 
 def write_identity(identity: str) -> tuple[bool, str]:
-    """Write the release identity into the state volume, atomically.
+    """Write the release identity into the state volume, atomically, bound
+    to the container that is running.
 
     The write happens inside the running container, as the runtime user, so
-    it uses the same permissions the gateway itself has. The file is
-    replaced atomically, so a reader never sees a partial write.
+    it uses the same permissions the gateway itself has. The record carries
+    the id of the container it was written for; the gateway reports the
+    digest only while that container is the one running, so a record left
+    behind by an earlier cutover can never be mistaken for image
+    provenance. The file is replaced atomically, so a reader never sees a
+    partial write.
     """
-    payload = json.dumps({"image_revision": identity})
-    code = (
-        "import json,os,tempfile;"
-        "d=os.environ['GATEWAY_DATA_DIR'];"
-        "fd,tmp=tempfile.mkstemp(dir=d,prefix='.release-',suffix='.tmp');"
-        "os.write(fd,(" + json.dumps(payload) + ").encode());"
-        "os.close(fd);"
-        "os.chmod(tmp,0o600);"
-        "os.replace(tmp, os.path.join(d,'release.json'));"
-        "print(os.path.join(d,'release.json'))"
+    result = compose(
+        ["exec", "-T", "gateway", "python", "/app/scripts/write_release_identity.py", identity]
     )
-    result = compose(["exec", "-T", "gateway", "python", "-c", code])
     if result.returncode != 0:
         return False, (result.stderr or result.stdout).strip()[:200]
     return True, result.stdout.strip()

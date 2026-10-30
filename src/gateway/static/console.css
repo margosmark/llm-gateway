@@ -114,6 +114,18 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 500; font-size: 13px; }
 td.actions { white-space: nowrap; text-align: right; }
+.capability-panel { min-width: 560px; white-space: normal; padding: 8px; }
+.capability-panel label { display: inline-flex; align-items: center; gap: 6px; margin: 4px 12px 8px 0; }
+.capability-panel .capability-field { display: flex; align-items: flex-start; }
+.capability-panel .capability-field span { margin: 0; color: var(--fg); }
+.capability-panel button { margin: 4px 8px 4px 0; }
+.capability-detail-row td { background: var(--panel-2); }
+.capability-preview, .capability-evidence { overflow-wrap: anywhere; }
+.capability-preview .notice { white-space: normal; }
+
+@media (max-width: 640px) {
+  .capability-panel { min-width: 0; }
+}
 
 .pill {
   display: inline-block;
@@ -237,3 +249,38 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .lb-absent td { color: var(--muted); font-style: italic; }
 .lb-methodology { padding-left: 18px; margin: 0; }
 .lb-methodology li { margin-bottom: 6px; }
+
+/* Routing health is the primary, read-only status surface. */
+.routing-health-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 12px; }
+.route-health-card { min-width: 0; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+.route-health-card h3 { margin-top: 0; }
+.health-routes { display: grid; grid-template-columns: minmax(84px, 110px) minmax(0, 1fr); gap: 6px 10px; }
+.health-routes dt { color: var(--muted); }
+.health-routes dd { margin: 0; overflow-wrap: anywhere; }
+.trigger-list { display: flex; flex-wrap: wrap; gap: 6px 16px; list-style: none; margin: 10px 0; padding: 0; }
+.trigger-list li { border: 1px solid var(--line); border-radius: 4px; padding: 3px 7px; }
+/* Every card carries the as-of time of its snapshot; past the staleness
+ * threshold the verdict flips to Stale and this line carries the age. */
+.health-freshness { margin: 0 0 10px; }
+.status-details > summary { cursor: pointer; font-weight: 600; padding: 12px 0; }
+.status-details > summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 640px) {
+  main { min-width: 0; }
+  .routing-health-list { grid-template-columns: minmax(0, 1fr); }
+  .health-routes { grid-template-columns: minmax(72px, 88px) minmax(0, 1fr); }
+  .trigger-list { gap: 6px; }
+  .trigger-list li { font-size: 13px; }
+  header.top { position: static; padding: 12px 14px; }
+  nav.tabs { max-width: 100%; }
+  table { display: block; max-width: 100%; overflow-x: auto; }
+}
+
+/* The save preview: the owner confirms exactly what changes before
+ * anything mutates; cancel or a rejected save says the config is unchanged. */
+.save-preview { border: 1px solid var(--warn); border-radius: var(--radius); background: var(--panel-2); padding: 12px; margin: 12px 0; }
+.save-preview h4 { margin: 0 0 4px; font-size: 15px; }
+.save-preview h4:focus { outline: 3px solid var(--warn); outline-offset: 2px; }
+.preview-lines { margin: 8px 0 12px; padding-left: 20px; }
+.preview-lines li { margin: 3px 0; overflow-wrap: anywhere; }
+.save-unchanged:focus { outline: 3px solid var(--warn); outline-offset: 2px; }
+.save-error { overflow-wrap: anywhere; }
