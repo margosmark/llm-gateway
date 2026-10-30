@@ -1060,6 +1060,30 @@ def run_suite(
             if not outcome.cancelled and outcome.blocked_reason != "deadline":
                 outcome.blocked_reason = "prior_failure"
             break
+        except Exception:  # noqa: BLE001 - fail closed on anything unexpected
+            # Nothing the transport raises may escape the runner. An
+            # unhandled error here reaches the owner API as an unclassified
+            # 500 with no run recorded - the confirmation consumed and the
+            # evidence trail empty (QA re-gate F3). Whatever escaped, the
+            # honest outcome is the one every transport failure gets:
+            # inconclusive evidence, an honest stop reason, and no claim
+            # about the capability.
+            if cancel_event is not None and cancel_event.is_set():
+                outcome.cancelled = True
+                outcome.blocked_reason = "cancelled"
+            elif monotonic() - started >= protocol.run_deadline_seconds:
+                outcome.blocked_reason = "deadline"
+            for capability in item.capabilities:
+                pending[capability] = _result(
+                    capability,
+                    "inconclusive",
+                    "the upstream request failed (transport); a failure is never evidence of an unsupported capability",
+                    error_class="transport",
+                    request_count=outcome.request_count,
+                )
+            if not outcome.cancelled and outcome.blocked_reason != "deadline":
+                outcome.blocked_reason = "prior_failure"
+            break
 
         payload: Any = None
         if response.body is not None and len(response.body) > protocol.max_response_bytes:
