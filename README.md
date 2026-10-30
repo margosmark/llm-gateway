@@ -571,6 +571,10 @@ digest.
 
 ---
 
+## Client integrations
+
+Use the [client integration guide](docs/CLIENT_INTEGRATIONS.md) for Hermes Agent, Oh My Pi (`omp`), and OpenCode V2 CLI configuration, plugin requirements, compatibility boundaries, verification evidence, and troubleshooting.
+
 ## Development
 
 The project uses the **Python standard library only**. There is no
