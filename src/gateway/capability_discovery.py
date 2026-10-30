@@ -48,6 +48,22 @@ def row_fingerprint(row: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def proposal_expired(proposal: dict[str, Any]) -> bool:
+    """True when the proposal's decision window has closed.
+
+    One definition of "expired" for both call sites: the HTTP handler gates
+    NEW decisions on it *before* the config transaction commits (spec CAP-105
+    / CAP-201: an expired proposal is refused with no state change), and the
+    store re-checks it as defense in depth. Keeping them identical is what
+    stops the two layers from disagreeing about a refusal.
+
+    The proposal is untrusted sidecar input: a missing or unparseable
+    `expires_at` raises here, which the caller turns into a refusal -- expiry
+    is never silently treated as "not expired".
+    """
+    return datetime.fromisoformat(proposal["expires_at"].replace("Z", "+00:00")) <= _now()
+
+
 def preview_for(provider_id: str, model_id: str, probes: list[Any], revision: int) -> dict[str, Any]:
     if not provider_id or len(provider_id) > 64 or not model_id or len(model_id) > 256:
         raise ValueError("invalid target")
@@ -269,11 +285,15 @@ class DiscoveryStore:
             proposal = next((p for p in self._data["proposals"] if p.get("proposal_id") == proposal_id), None)
             if proposal is None:
                 raise KeyError("unknown proposal")
-            expired = datetime.fromisoformat(proposal["expires_at"].replace("Z", "+00:00")) <= _now()
-            # Expiry gates new decisions, but not completion of the exact audit
-            # record for a config transaction already durably committed. The
-            # HTTP layer may set this only after matching config's transaction
-            # marker; the decision-id replay check above remains authoritative.
+            expired = proposal_expired(proposal)
+            # Expiry gates new decisions -- at BOTH layers: the HTTP handler
+            # refuses an expired proposal before the config transaction
+            # commits (no write at all), and this store-side check is defense
+            # in depth for any caller that skips that gate. The exception is
+            # completion of the exact audit record for a config transaction
+            # already durably committed; the HTTP layer may set
+            # recover_committed only after matching config's transaction
+            # marker. The decision-id replay check above remains authoritative.
             recoverable_status = {"pending", "partially_approved", "expired"} if recover_committed else {"pending", "partially_approved"}
             if proposal["status"] not in recoverable_status or (expired and not recover_committed):
                 if proposal["status"] in {"pending", "partially_approved"}:

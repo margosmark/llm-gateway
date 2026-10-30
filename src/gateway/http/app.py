@@ -48,6 +48,7 @@ from gateway.capability_discovery import (
     EVIDENCE_CLASSIFICATIONS,
     DiscoveryStore,
     preview_for,
+    proposal_expired,
 )
 from gateway.capability_probe import (
     EVIDENCE_METHOD,
@@ -1434,6 +1435,16 @@ class GatewayApp:
                     or not isinstance(decisions, dict) or not isinstance(revision, int)
                     or isinstance(revision, bool) or not isinstance(fingerprint, str)):
                 raise ValueError
+            # decide() bounds both ids as well. It used to be the ONLY place
+            # that did, so an over-long id was refused after the config
+            # transaction had committed (revision bump + marker for a decision
+            # that never applied). Every decide() input refusal must be a
+            # no-write refusal, so validate the ids here, before anything is
+            # read, compared or written. Stored decisions can never carry an
+            # out-of-bound id (decide() rejects them before recording), so
+            # this cannot hide a legitimate replay.
+            if not proposal_id or len(proposal_id) > 64 or not decision_id or len(decision_id) > 64:
+                raise ValueError("invalid decision id")
             # Exact HTTP retries are idempotent even after their config revision
             # has advanced. This must precede snapshot CAS and any config mutation.
             replay = self.discovery.decision_replay(proposal_id, decision_id, decisions)
@@ -1470,6 +1481,23 @@ class GatewayApp:
                     ).hexdigest()
                     self.discovery.rebase_partial(proposal_id, committed.revision, updated_fingerprint)
                 return json_response(result)
+            # CAP-105 / CAP-201: an expired proposal cannot be approved by a
+            # NEW decision, and that refusal must carry NO state change.
+            # decide() checks expiry only after the config transaction has
+            # committed, so an expired proposal used to be refused with config
+            # written anyway -- revision bump, capability applied, provenance +
+            # decision marker -- and because the refusal had armed the exact
+            # config marker, the retry then "recovered" into a 200. Gate it
+            # here, before any config mutation, right after the ONE path
+            # allowed past expiry: the exact config-committed marker above
+            # (recover_committed=True, which completes a transaction config
+            # already durably wrote). The sidecar is untrusted input, so a
+            # missing or unparseable expires_at refuses here too -- expiry is
+            # never read as "still valid". None of these refusals touch config
+            # or the sidecar: no revision bump, no provenance, no marker, no
+            # decision row, and the proposal is left exactly as found.
+            if proposal_expired(proposal):
+                raise RuntimeError("proposal expired")
             with self.config.mutate() as config:
                 provider = config.providers.get(provider_id)
                 row = provider.models.get(model_id) if provider else None
@@ -1497,6 +1525,17 @@ class GatewayApp:
                 field_records = {f.get("field"): f for f in proposal.get("fields", []) if isinstance(f, dict)}
                 if not set(decisions) <= APPROVABLE_METADATA_FIELDS:
                     raise ValueError("field outside capability vocabulary")
+                # The decision VALUES are spec vocabulary too (approved|
+                # rejected), and an empty map applies nothing while still
+                # burning the proposal and bumping the revision. decide()
+                # checked this only AFTER the config commit, so a value typo
+                # used to be refused with a marker + revision bump for a
+                # decision that never applied (and a mixed valid+typo map was
+                # refused with its valid field APPLIED). Raise inside the
+                # mutating block: it commits only when no exception escapes,
+                # so this is a guaranteed no-write refusal.
+                if not decisions or not set(decisions.values()) <= {"approved", "rejected"}:
+                    raise ValueError("invalid decision values")
                 approved_writes = []
                 for field, decision in decisions.items():
                     field_record = field_records.get(field)
