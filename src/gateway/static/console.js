@@ -1881,21 +1881,71 @@
       probeList.appendChild(el("label", {}, [input, el("span", { text: item[1] })]));
     });
     panel.appendChild(probeList);
+
+    // The owner's billing-route authorisation. It is captured here from an
+    // explicit, owner-facing interaction and held in this panel's memory
+    // only: nothing is written to config, storage or the server, so a page
+    // reload or a closed panel requires a fresh authorisation. The backend
+    // owner gate still refuses any run without it, and without the
+    // single-use confirmation issued by the matching preview.
+    var authorisedOwner = null;
+    // Captured at render time: click handlers must not read the live state
+    // (a test render restores it), and refresh() re-renders this panel.
+    var canMutate = !!state.can_mutate;
+    var authHost = el("div", { class: "capability-authorisation" });
+    panel.appendChild(authHost);
+
+    function renderAuthorisationPrompt() {
+      authHost.textContent = "";
+      authHost.appendChild(el("h4", { text: "Authorise a paid probe run" }));
+      authHost.appendChild(el("p", { class: "small", text: "Probes are paid inference requests sent to the configured OpenCode Go account for " + target.provider_id + " / " + target.model_id + ", billed through that account as the billing route. OpenCode Go publishes no request-level max-charge control, so no hard dollar ceiling can be enforced: the price shown is a worst-case estimate for this exact run, not a cap. The spend ceiling below bounds the estimate the gateway will accept before sending — it is not a provider-enforced limit." }));
+      var ceilingInput = el("input", { type: "number", min: "0.01", step: "any", value: "0.1" });
+      authHost.appendChild(el("label", { class: "capability-field" }, [el("span", { text: "Maximum estimated spend for this run (USD)" }), ceilingInput]));
+      authHost.appendChild(el("button", { type: "button", text: "Authorise billing route", disabled: !canMutate, onclick: function () {
+        var ceiling = Number(ceilingInput.value);
+        if (!isFinite(ceiling) || ceiling <= 0) { toast("The spend ceiling must be a number greater than zero; nothing was sent.", "bad"); return; }
+        authorisedOwner = { authorize_billing_route: true, spend_policy: "estimate_accepted", max_spend_estimate_usd: ceiling };
+        renderAuthorisationGranted(ceiling);
+        previewButton.disabled = !canMutate;
+      } }));
+      authHost.appendChild(el("button", { type: "button", class: "secondary", text: "Cancel", disabled: !canMutate, onclick: function () {
+        authorisedOwner = null;
+        previewButton.disabled = true;
+        authHost.textContent = "";
+        authHost.appendChild(el("p", { class: "small muted", text: "No billing route authorised. Nothing was sent to the provider." }));
+        authHost.appendChild(el("button", { type: "button", text: "Authorise a paid probe run", disabled: !canMutate, onclick: function () { renderAuthorisationPrompt(); } }));
+      } }));
+    }
+
+    function renderAuthorisationGranted(ceiling) {
+      authHost.textContent = "";
+      authHost.appendChild(el("p", { class: "small", text: "Billing route authorised for this panel: " + target.provider_id + " / " + target.model_id + " · spend ceiling " + String(ceiling) + " USD · estimate policy (not a hard cap). Held in this page only — a reload or a closed panel requires authorising again." }));
+      authHost.appendChild(el("button", { type: "button", class: "secondary", text: "Withdraw authorisation", onclick: function () {
+        authorisedOwner = null;
+        previewButton.disabled = true;
+        renderAuthorisationPrompt();
+      } }));
+    }
+
+    renderAuthorisationPrompt();
+
     var previewHost = el("div", { class: "capability-preview", role: "status", "aria-live": "polite" });
     panel.appendChild(previewHost);
-    var previewButton = el("button", { type: "button", text: "Preview selected probes", disabled: !state.can_mutate, onclick: function () {
+    var previewButton = el("button", { type: "button", text: "Preview selected probes", disabled: true, onclick: function () {
       var selected = Object.keys(choices).filter(function (key) { return choices[key].checked; });
       if (!selected.length) { toast("Select at least one probe; nothing was sent.", "bad"); return; }
+      if (!authorisedOwner) { toast("Authorise the billing route first; nothing was sent.", "bad"); return; }
       previewHost.textContent = "Loading preview…";
-      api(BASE + "/api/capabilities/preview", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected } })
+      api(BASE + "/api/capabilities/preview", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected, owner: authorisedOwner } })
         .then(function (preview) {
           previewHost.textContent = "";
           previewHost.appendChild(el("p", { class: "small", text: "Target: " + preview.provider_id + " / " + preview.model_id + " · selected: " + preview.probes.join(", ") + " · suite " + preview.suite_version + " · max " + preview.maximum_requests + " request(s), output " + preview.max_output_tokens + " tokens, " + preview.timeout_seconds + "s, concurrency " + preview.concurrency + ", retries " + preview.retries + "." }));
           previewHost.appendChild(el("p", { class: "notice warn", text: preview.reason + " Price: " + (preview.price && preview.price.status === "known" ? preview.price.amount + " " + preview.price.currency + " from " + preview.price.source : "Unknown") + ". No provider request has been sent." }));
+          previewHost.appendChild(el("p", { class: "small muted", text: "Estimate is not a bill guarantee: worst-case tariff arithmetic on the published bounds; no provider-enforced hard ceiling exists for this route." }));
           if (preview.available) {
-            previewHost.appendChild(el("button", { type: "button", text: "Run selected probes", disabled: !state.can_mutate, onclick: function () {
+            previewHost.appendChild(el("button", { type: "button", text: "Run selected probes", disabled: !canMutate, onclick: function () {
               if (!global.confirm("Send only these synthetic probes to " + target.provider_id + " / " + target.model_id + "? The provider will receive synthetic data. Price estimates are not guaranteed billing caps.")) return;
-              api(BASE + "/api/capabilities/run", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected, preview: preview, confirmed: true } }).then(function () { return refresh(); }).catch(function (error) { toast(error.message + " No result is treated as unsupported unless the evidence is an unambiguous capability-specific refusal.", "bad"); });
+              api(BASE + "/api/capabilities/run", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected, owner: authorisedOwner, base_revision: preview.base_revision, confirmation: preview.confirmation, confirmed: true } }).then(function () { return refresh(); }).catch(function (error) { toast(error.message + " No result is treated as unsupported unless the evidence is an unambiguous capability-specific refusal.", "bad"); });
             } }));
           } else {
             previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable: no trustworthy price/probe contract. This probe cannot be run; Unknown is not false." }));
@@ -2957,6 +3007,17 @@
         state = view;
         try {
           return renderModels();
+        } finally {
+          state = previous;
+        }
+      },
+      renderCapabilityPanelForTest: function (provider, model, panel, view) {
+        // A test hands the panel a fixture state; the panel's evidence read
+        // goes through the same api() seam the test stubs.
+        var previous = state;
+        state = view;
+        try {
+          return renderCapabilityPanel(provider, model, panel);
         } finally {
           state = previous;
         }
