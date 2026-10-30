@@ -39,6 +39,7 @@ from gateway.costs import (
     stream_token_counters,
 )
 from gateway.ledger_persistence import ROLLUP_SCHEMA
+from gateway.leaderboard import build_leaderboard
 from gateway.statistics import aggregate_statistics
 from gateway.provider_health import provider_health
 from gateway.stores import atomic_write_json
@@ -393,6 +394,13 @@ class GatewayApp:
             r.add(["GET"], prefix + "/style.css", self.handle_static_css)
             r.add(["GET"], prefix + "/api/status", self.handle_public_status)
             r.add(["GET"], prefix + "/api/state", self.handle_state)
+            # The leaderboard is a separate read-only endpoint on purpose:
+            # its ranked rows and date x model matrix are a second O(rows)
+            # pass, and folding it into /owner/api/state would put the
+            # console poll's mandatory sub-2s bar (R56) back at risk. Same
+            # listener, same mounts, same Host/Origin/forwarded checks as
+            # every other owner route - no new exposure.
+            r.add(["GET"], prefix + "/api/leaderboard", self.handle_leaderboard)
             r.add(["GET"], prefix + "/api/ledger/export", self.handle_ledger_export)
             r.add(["GET"], prefix + "/api/backup/export", self.handle_backup_export)
             r.add(["POST"], prefix + "/api/backup/import", self.handle_backup_import)
@@ -936,6 +944,28 @@ class GatewayApp:
                 "checklist": self._checklist(config),
             }
         )
+
+    def handle_leaderboard(self, request: Request) -> Response:
+        """The private model leaderboard: ranked models + date x model matrix.
+
+        Deliberately a separate endpoint from ``/owner/api/state`` (see the
+        route table), so the console poll keeps its sub-2s bar. The rollup is
+        the in-memory one the ledger already maintains - this path never opens
+        the ledger file - and the published-price catalogue is read exactly
+        once here, then shared by every model priced below (the R56 rule: one
+        materialisation per request, not per consumer). The payload holds
+        aggregates only: no request identifier, prompt, response or
+        credential can reach it.
+        """
+        days, requested_days = analytics_days(request)
+        payload = build_leaderboard(
+            self.ledger.rollup() if self.ledger else None,
+            days=days,
+            prices=published_prices(),
+        )
+        if requested_days is not None:
+            payload["requested_days"] = requested_days
+        return json_response(payload)
 
     def handle_state(self, request: Request) -> Response:
         config = self.config.snapshot()

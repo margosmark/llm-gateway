@@ -182,6 +182,20 @@ zero - and a day still in progress is labelled as such. The poll reads the
 in-memory rollup, never the ledger file, and the whole view is metadata
 only: prompts, responses, tokens and secrets are never stored.
 
+The model leaderboard is a **separate read-only endpoint**,
+`GET /owner/api/leaderboard?days=N` (default 7, clamped to 30), so the
+`/owner/api/state` poll keeps its 2s bar. It returns the ranked models
+(primary metric: input + output tokens, with requests, share of the window
+and the cost block) and the date x model matrix. If the console's leaderboard
+view is slow or empty, check this endpoint directly first: `available: false`
+with `unavailable_reason` says whether persistence is off
+(`durable_rollup_disabled`) or the sidecar schema is from a future build
+(`unrecognised_rollup_schema`). Cost cells follow the same rules as the usage
+table — a null amount means **no published price**, never zero — and a day
+with no rows shows a status (`gap`, `outside_coverage`, `no_rows`), never a
+zero row. Like the rest of the console this endpoint is metadata only and is
+reachable only from the trusted LAN.
+
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Anthropic uses the
 native Messages API with a separately stored API key; its catalogue is loaded
