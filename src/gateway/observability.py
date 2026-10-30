@@ -150,6 +150,9 @@ class RequestLedger:
         self._events: deque[RequestEvent] = deque(maxlen=capacity)
         self._lock = threading.Lock()
         self._evicted = 0
+        #: Bumped by every mutation below (record, amend, clear), so a
+        #: consumer can detect "the ring changed" without scanning it.
+        self._version = 0
         self._persistence = LedgerPersistence(persistence_path) if persistence_path else None
         self._totals = {"requests": 0, "errors": 0, "fallbacks": 0, "rate_limited": 0, "exhausted": 0}
         if self._persistence:
@@ -181,6 +184,7 @@ class RequestLedger:
                 self._evicted += 1
             self._events.append(event)
             self._count(event)
+            self._version += 1
         if self._persistence:
             self._persistence.submit(event.to_dict())
 
@@ -230,6 +234,7 @@ class RequestLedger:
                 self._totals["errors"] += int(bool(event.error_class)) - int(bool(before))
                 self._totals["rate_limited"] += int(event.error_class == "rate_limited") - int(before == "rate_limited")
                 self._totals["exhausted"] += int(event.error_class == "exhausted") - int(before == "exhausted")
+            self._version += 1
             row = event.to_dict()
         if self._persistence:
             self._persistence.submit(row)
@@ -266,12 +271,19 @@ class RequestLedger:
         with self._lock:
             return self._evicted
 
+    @property
+    def version(self) -> int:
+        """A monotonic change counter for the ring, totals and eviction state."""
+        with self._lock:
+            return self._version
+
     def clear(self) -> None:
         with self._lock:
             self._events.clear()
             self._evicted = 0
             for key in self._totals:
                 self._totals[key] = 0
+            self._version += 1
 
     def recent(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock:

@@ -136,6 +136,32 @@ interpreted. A rate with no requests behind it is `null`, never `0.0`. The
 console renders this as a fallback card and a day selector on the usage
 table; both state plainly that the data is metadata only.
 
+The whole `GET /owner/api/state` render is memoised behind
+`gateway.http.state_cache.StateCache`. The rendered body (status,
+headers and bytes) is stored under a key derived from everything the
+render reads: the config revision plus a stamp of the config file itself
+(inode, mtime, size — so a backup import that replaces content without
+bumping the revision is caught), each provider credential's `describe()`
+digest, the request ledger's version counter (bumped by every record,
+amend and clear), circuit **state** (open/closed/expiry, deliberately not
+the per-second probe countdown, so an open cooldown does not evict the
+entry every second), the limits table, and the `?days` window. Cache
+invalidation is therefore by tokenisation rather than by callbacks: a
+mutation changes the key, and the immediately following read takes the
+miss path and re-renders synchronously — no staleness window can lie
+about state the owner just changed. Wall-clock-only drift (usage windows
+ageing out, budget month rollover) is bounded separately: a body older
+than `refresh_after` (2s) is re-rendered on a background thread after it
+is served, and a body older than `hard_max` (300s) is never served at
+all — that read re-renders synchronously. The cache sits *outside* the
+handler's one-request-one-snapshot structure (R56): a miss still performs
+exactly one render from one snapshot of the ledger ring and price
+catalogue, so the fix that ended the 46.9s per-consumer re-pull stands
+untouched, and a hit performs zero. Acceptance tests live in
+`tests/test_state_cache.py` (byte-identity of hits, mutation visibility
+on the next read for every mutation class, background refresh, the
+hard-max fallback, and the mid-render race guard).
+
 `GET /owner/api/leaderboard` is a second, read-only owner route carrying the
 model leaderboard (`gateway.leaderboard.build_leaderboard`). The rollup
 already stores one row per (day, alias, provider, model); this endpoint

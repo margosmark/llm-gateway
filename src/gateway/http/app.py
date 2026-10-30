@@ -90,6 +90,7 @@ from gateway.fallback_reasons import fallback_reason_class
 from gateway.http import messages as messages_surface
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
+from gateway.http.state_cache import StateCache
 from gateway.identifiers import ValidationError, validate_alias_name, validate_identifier, validate_profile_id
 from gateway.logging import RequestLogger
 from gateway.ledger_export import DEFAULT_EXPORT_ROWS, MAX_EXPORT_ROWS, export_records, render_csv, render_json
@@ -394,6 +395,10 @@ class GatewayApp:
         #: Held in memory only; nothing about them is persisted.
         self._pending_device: dict[str, Any] = {}
         self._routes = HttpRouter()
+        #: The rendered console snapshot, keyed by a digest of every input
+        #: ``_render_state`` reads - see ``gateway.http.state_cache`` for
+        #: how each input is detected changing.
+        self._state_cache = StateCache(self, self._render_state)
         self._build_routes()
 
     # --- routing table ---------------------------------------------------
@@ -1002,6 +1007,23 @@ class GatewayApp:
         return json_response(payload)
 
     def handle_state(self, request: Request) -> Response:
+        """The console snapshot, served from the token-keyed cache.
+
+        A read whose inputs all match the cached render returns those exact
+        bytes; any change - a config write, a credential enrolment, a ledger
+        record or amendment, a circuit transition (including an expiry), a
+        limit observation - changes the token and this read re-renders
+        synchronously, so a mutation is visible on the immediately following
+        read. Wall-clock drift (usage windows ageing out, budget month
+        rollover) is bounded two ways: a body older than ``refresh_after``
+        is re-rendered in the background after it is served, and a body
+        older than ``hard_max`` is never served at all - that read
+        re-renders synchronously. Neither can put the render back on the
+        path of a steady reader. See ``gateway.http.state_cache``.
+        """
+        return self._state_cache.serve(request)
+
+    def _render_state(self, request: Request) -> Response:
         config = self.config.snapshot()
         may_mutate = self._can_mutate(request)
 
