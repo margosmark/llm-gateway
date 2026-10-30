@@ -484,6 +484,25 @@ rate overall and per alias, provider and model, the reasons behind it, and a
 daily series of requests, tokens, fallbacks and errors. Days are reported
 with their own status, so a day with no recorded rows is a gap rather than
 zero, and a rate with no requests behind it is unknown rather than `0.0`.
+
+`GET /owner/api/leaderboard` is the **private model leaderboard** the owner
+console reads: models ranked over `?days=N` (default 7, clamped to 30) by a
+stated primary metric — input + output tokens, with requests and the cost
+estimate alongside — each row's share of the window total, plus the full
+date x model matrix of requests, input/output/cached tokens, fallbacks and
+errors per (day, provider, model). It deliberately lives on a separate
+endpoint from `/owner/api/state` so the console poll keeps its sub-2s bar, it
+serves the in-memory rollup rather than opening the ledger file, and it adds
+no listener, no route reachable outside the trusted-LAN boundary and no auth
+change. Cost honesty carries through unchanged: a model with no published
+price reports `amount_usd: null` with `cost_reason: "no_published_price"`
+— shown as **"no published price", never `$0.00`** — no price is transferred
+between providers, `cost_incomplete` and the unpriced token coverage travel
+with every row, and a day without recorded data carries its own status
+(`gap`, `outside_coverage`, `no_rows`) with a null matrix row instead of
+zeros. The payload aggregates only: no request identifier, prompt, response,
+credential, or dimension the gateway does not have.
+
 Export the recent ledger from the owner console's read-only
 `/owner/api/ledger/export` endpoint; it returns CSV by default or JSON with
 `?format=json`, bounded to 1,000 rows (default 500). Only the six metadata
