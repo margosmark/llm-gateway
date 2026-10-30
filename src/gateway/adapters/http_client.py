@@ -55,8 +55,9 @@ import threading
 import time
 import urllib.parse
 import weakref
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 from gateway.adapters.base import AdapterError
 from gateway.config import ERROR_TRANSIENT, ERROR_UNKNOWN
@@ -336,6 +337,7 @@ class UpstreamClient:
         body: bytes | None,
         provider_id: str,
         stream: bool = False,
+        on_checkout: Callable[[http.client.HTTPConnection], None] | None = None,
     ) -> tuple[tuple[str, str, int], http.client.HTTPConnection, http.client.HTTPResponse]:
         key, target, host_header = self._connection_key(url)
         effective_timeout = self.timeout
@@ -350,6 +352,14 @@ class UpstreamClient:
             raise AdapterError(ERROR_UNKNOWN, f"the gateway is shutting down ({exc})", provider_id=provider_id) from None
         with self._active_lock:
             self._active.add(connection)
+        if on_checkout is not None:
+            # Publish the connection before any phase can block on it. A
+            # caller that watches this request (the probe's deadline and
+            # cancellation watchdog) can then interrupt the connect, the
+            # request write and the response head, not only the body read
+            # that follows - all of which are places where a peer that
+            # trickles bytes would otherwise keep every recv() succeeding.
+            on_checkout(connection)
         request_headers = dict(headers)
         request_headers.setdefault("Host", host_header)
         if self.user_agent:
@@ -423,6 +433,75 @@ class UpstreamClient:
             raise
         return key, connection, response
 
+    def _read_buffered_body(
+        self,
+        raw: http.client.HTTPResponse,
+        *,
+        max_body_bytes: int | None,
+        deadline: float | None,
+        cancel_event: threading.Event | None,
+        provider_id: str,
+    ) -> bytes:
+        """Buffer a response body that can neither out-wait the run nor
+        outgrow the byte cap.
+
+        The body is read one underlying receive at a time
+        (:meth:`http.client.HTTPResponse.read1`), so cancellation and the
+        absolute deadline are re-checked after **every** chunk that arrives.
+        Re-checking only between whole 64 KiB reads let a peer that trickled
+        bytes faster than the socket timeout delay the next check without
+        bound: the deadline held only while the upstream stayed silent.
+
+        Silence is judged by the read budget re-armed with whatever time is
+        left before the deadline, so a stalled peer is abandoned at the
+        smaller of the two while a peer that keeps sending is never
+        abandoned as it progresses. The watchdog that runs alongside this
+        read additionally ``shutdown()``s the socket at the deadline and on
+        a cancellation - that is what breaks a read blocked *inside*
+        ``http.client`` (a response head, or a chunked-encoding line) out of
+        its own internal loop, where no check of ours runs.
+
+        Raises :class:`TimeoutError` for a deadline or a cancellation (the
+        caller maps either to its transient failure) and
+        :class:`AdapterError` when the byte cap would be exceeded - the cap
+        is checked before the overflowing bytes are kept, so the allocation
+        stays at the cap.
+        """
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("probe cancelled")
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("probe deadline")
+            holder = getattr(getattr(raw, "fp", None), "raw", None)
+            sock = getattr(holder, "_sock", None)
+            if sock is not None:
+                wait_budget = self.timeout if remaining is None else min(self.timeout, remaining)
+                sock.settimeout(wait_budget)
+            want = 65_536 if max_body_bytes is None else min(65_536, max_body_bytes - total + 1)
+            chunk = raw.read1(want)
+            if not chunk:
+                break
+            total += len(chunk)
+            if max_body_bytes is not None and total > max_body_bytes:
+                raise AdapterError(
+                    ERROR_TRANSIENT,
+                    "the provider response exceeded the configured byte limit",
+                    provider_id=provider_id,
+                )
+            chunks.append(chunk)
+        # The watchdog ends an in-flight read by shutting the socket down,
+        # which surfaces here as a short body. Those bytes stopped because
+        # *we* stopped them, so the reason still has to be reported instead
+        # of being handed back as if the body were complete.
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("probe cancelled")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("probe deadline")
+        return b"".join(chunks)
+
     def _request_once(
         self,
         method: str,
@@ -437,9 +516,90 @@ class UpstreamClient:
         cancel_event: threading.Event | None = None,
     ) -> UpstreamResponse:
         self._probe_deadline = deadline
+        stop_watch = threading.Event()
+        # The connection and the response are published here as soon as they
+        # exist rather than read from the locals below: the watchdog starts
+        # before _open runs, and a watchdog that touched a not-yet-assigned
+        # local would die with NameError at exactly the wrong moment.
+        checked_out: list[http.client.HTTPConnection] = []
+        served: list[http.client.HTTPResponse] = []
+
+        def _response_socket() -> socket.socket | None:
+            """The socket behind the response, whichever end still holds it.
+
+            ``getresponse()`` hands the socket to the response for a
+            ``will_close`` response and drops the connection's own reference
+            to it, so during a body read ``connection.sock`` can already be
+            ``None`` while a read is still in flight on that socket.
+            """
+            if served:
+                holder = getattr(getattr(served[0], "fp", None), "raw", None)
+                found = getattr(holder, "_sock", None)
+                if found is not None:
+                    return found
+            if checked_out:
+                return checked_out[0].sock
+            return None
+
+        def _interrupt() -> None:
+            # A plain ``close()`` does not wake a ``recv()`` that another
+            # thread has already blocked in: on Linux the reader stayed
+            # blocked long after the connection was closed, while
+            # ``shutdown(SHUT_RDWR)`` woke the identical recv at once. The
+            # shutdown is what makes the absolute deadline and a
+            # cancellation able to interrupt a read that is under way - a
+            # head or a body that trickles in faster than the socket timeout
+            # never lets a read return to a check of ours otherwise.
+            #
+            # The connection is deliberately *not* closed here.
+            # ``HTTPConnection.close()`` also closes the response object it
+            # is serving, which would pull ``response.fp`` out from under the
+            # thread that is reading it (the reader died inside
+            # ``HTTPResponse.read1`` on exactly that race). The thread that
+            # owns the read always disposes of the connection itself - a
+            # failed read releases it as not reusable - and a connection
+            # shut down by mistake is discarded by the pool before it is
+            # ever handed out again, because a shutdown socket is readable
+            # with a pending EOF.
+            sock = _response_socket()
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    # Not connected (yet), already gone, or already shut
+                    # down: the watch keeps polling, so a connection that
+                    # appears later in the same request is still covered.
+                    pass
+
+        def _remember(checked: http.client.HTTPConnection) -> None:
+            checked_out[:] = [checked]
+
+        if cancel_event is not None or deadline is not None:
+            def interrupt_when_needed() -> None:
+                # The watch runs until the request itself finishes, not
+                # until the first interrupt: the connection may not exist
+                # yet when the first deadline or cancellation lands, and a
+                # phase that starts afterwards still has to be interruptible.
+                while not stop_watch.is_set():
+                    expired = deadline is not None and deadline - time.monotonic() <= 0
+                    cancelled = cancel_event is not None and cancel_event.is_set()
+                    if cancelled or expired:
+                        _interrupt()
+                    stop_watch.wait(0.05)
+            threading.Thread(target=interrupt_when_needed, daemon=True).start()
+
         try:
-            key, connection, raw = self._open(method, url, headers, body, provider_id, stream)
+            key, connection, raw = self._open(
+                method,
+                url,
+                headers,
+                body,
+                provider_id,
+                stream,
+                on_checkout=_remember,
+            )
         except TimeoutError:
+            stop_watch.set()
             # Defensive: _open maps its own phase timeouts to the wording
             # of the phase that stalled. This only sees a timeout that
             # escaped a phase neither mapping covered.
@@ -449,33 +609,27 @@ class UpstreamClient:
                 provider_id=provider_id,
             ) from None
         except OSError as exc:
+            stop_watch.set()
             raise AdapterError(
                 ERROR_TRANSIENT,
                 f"could not reach the provider ({exc.__class__.__name__})",
                 provider_id=provider_id,
             ) from None
         except http.client.HTTPException as exc:
+            stop_watch.set()
             raise AdapterError(
                 ERROR_TRANSIENT,
                 f"the provider sent an unparseable response ({exc.__class__.__name__})",
                 provider_id=provider_id,
             ) from None
         except ValueError:
+            stop_watch.set()
             raise AdapterError(ERROR_UNKNOWN, "the provider URL is invalid", provider_id=provider_id) from None
-
-        stop_watch = threading.Event()
-        if cancel_event is not None or deadline is not None:
-            def interrupt_when_needed() -> None:
-                while not stop_watch.is_set():
-                    if cancel_event is not None and cancel_event.is_set():
-                        connection.close()
-                        return
-                    remaining = None if deadline is None else deadline - time.monotonic()
-                    if remaining is not None and remaining <= 0:
-                        connection.close()
-                        return
-                    stop_watch.wait(min(0.05, remaining) if remaining is not None else 0.05)
-            threading.Thread(target=interrupt_when_needed, daemon=True).start()
+        except AdapterError:
+            stop_watch.set()
+            raise
+        checked_out[:] = [connection]
+        served[:] = [raw]
 
         headers_map = {name.lower(): value for name, value in raw.getheaders()}
         # A 2xx is assumed to be JSON unless it says otherwise. Anything else
@@ -486,70 +640,75 @@ class UpstreamClient:
             else headers_map.get("content-type", "")
         )
 
-        if 300 <= raw.status < 400:
-            # Deliberately refuse redirects; never replay credentials
-            # elsewhere. The body is read so the response matches what the
-            # client would have seen before, then the connection is dropped
-            # rather than reused: a redirect is not an answer to the request
-            # we made, so its body is not this request's body either.
-            payload = b""
-            try:
-                payload = raw.read()
-            except Exception:  # noqa: BLE001 - defensive: a truncated
-                # redirect body must not fail the request that never used it.
-                payload = b""
-            self._pool.release(key, connection, False)
-            return UpstreamResponse(raw.status, headers_map, payload, None, content_type)
-
-        if stream and 200 <= raw.status < 300:
-            return UpstreamResponse(
-                raw.status, headers_map, None, self._iter_response(key, connection, raw), content_type
-            )
-
-        # Everything not streamed above is buffered, and that includes a
-        # non-2xx answer to a streaming request: an error body is what the
-        # adapter turns into the error the caller sees, and a stream of an
-        # error body is not a stream. This is the behaviour the client had
-        # when every request opened its own connection, and the adapters
-        # read ``response.body`` on this path.
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                # The run was cancelled while the head of the response was
+                # arriving: an answer to a run that no longer exists must not
+                # be handed back as if nothing had happened.
+                raise TimeoutError("probe cancelled")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("probe deadline")
+
+            if 300 <= raw.status < 400:
+                # Deliberately refuse redirects; never replay credentials
+                # elsewhere. The body is read so the response matches what the
+                # client would have seen before, then the connection is dropped
+                # rather than reused: a redirect is not an answer to the request
+                # we made, so its body is not this request's body either.
+                #
+                # It is read with the same capped, deadline- and
+                # cancellation-aware read as every other buffered body. The
+                # body is discarded either way, so an unbounded read here was
+                # pure risk: it let a hostile provider choose how much this
+                # process allocates, and hold the run open by trickling, with
+                # none of the bounds the 2xx path had.
+                payload = b""
+                try:
+                    payload = self._read_buffered_body(
+                        raw,
+                        max_body_bytes=max_body_bytes,
+                        deadline=deadline,
+                        cancel_event=cancel_event,
+                        provider_id=provider_id,
+                    )
+                except Exception:  # noqa: BLE001 - defensive: a truncated,
+                    # capped or cancelled redirect body must not fail the
+                    # refusal of a request that never used it.
+                    payload = b""
+                stop_watch.set()
+                self._pool.release(key, connection, False)
+                return UpstreamResponse(raw.status, headers_map, payload, None, content_type)
+
+            if stream and 200 <= raw.status < 300:
+                # The watchdog deliberately stays armed here: a streamed
+                # response outlives this call, and cancelling or reaching
+                # the deadline must still be able to interrupt it.
+                return UpstreamResponse(
+                    raw.status, headers_map, None, self._iter_response(key, connection, raw), content_type
+                )
+
+            # Everything not streamed above is buffered, and that includes a
+            # non-2xx answer to a streaming request: an error body is what the
+            # adapter turns into the error the caller sees, and a stream of an
+            # error body is not a stream. This is the behaviour the client had
+            # when every request opened its own connection, and the adapters
+            # read ``response.body`` on this path.
             if max_body_bytes is None and deadline is None and cancel_event is None:
                 payload = raw.read()
             else:
-                # Read in bounded chunks and check cancellation/deadline between
-                # reads. Re-arm the socket with the remaining overall budget so
-                # trickling bytes cannot extend the request indefinitely.
-                chunks: list[bytes] = []
-                total = 0
-                while True:
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise TimeoutError("probe cancelled")
-                    remaining = None if deadline is None else deadline - time.monotonic()
-                    if remaining is not None and remaining <= 0:
-                        raise TimeoutError("probe deadline")
-                    sock = getattr(getattr(raw, "fp", None), "raw", None)
-                    sock = getattr(sock, "_sock", None)
-                    if sock is not None:
-                        wait_budget = self.timeout if remaining is None else min(self.timeout, remaining)
-                        if cancel_event is not None:
-                            wait_budget = min(wait_budget, 0.1)
-                        sock.settimeout(wait_budget)
-                    chunk = raw.read(min(65_536, max_body_bytes - total + 1) if max_body_bytes is not None else 65_536)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if max_body_bytes is not None and total > max_body_bytes:
-                        raise AdapterError(ERROR_TRANSIENT, "the provider response exceeded the configured byte limit", provider_id=provider_id)
-                    chunks.append(chunk)
-                payload = b"".join(chunks)
+                payload = self._read_buffered_body(
+                    raw,
+                    max_body_bytes=max_body_bytes,
+                    deadline=deadline,
+                    cancel_event=cancel_event,
+                    provider_id=provider_id,
+                )
         except AdapterError:
-            if 'stop_watch' in locals():
-                stop_watch.set()
+            stop_watch.set()
             self._pool.release(key, connection, False)
             raise
         except TimeoutError:
-            if 'stop_watch' in locals():
-                stop_watch.set()
+            stop_watch.set()
             self._pool.release(key, connection, False)
             raise AdapterError(
                 ERROR_TRANSIENT,
@@ -557,14 +716,14 @@ class UpstreamClient:
                 provider_id=provider_id,
             ) from None
         except (OSError, http.client.HTTPException):
+            stop_watch.set()
             self._pool.release(key, connection, False)
             raise AdapterError(
                 ERROR_TRANSIENT, "the provider connection was interrupted", provider_id=provider_id
             ) from None
         # The whole body has been read, so the connection is clean and may
         # serve the next request unless the peer asked us not to reuse it.
-        if 'stop_watch' in locals():
-            stop_watch.set()
+        stop_watch.set()
         with self._active_lock:
             self._active.discard(connection)
         self._pool.release(key, connection, not raw.will_close)
