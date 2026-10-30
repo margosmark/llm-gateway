@@ -122,6 +122,9 @@ td.actions { white-space: nowrap; text-align: right; }
 .capability-detail-row td { background: var(--panel-2); }
 .capability-preview, .capability-evidence { overflow-wrap: anywhere; }
 .capability-preview .notice { white-space: normal; }
+.capability-authorisation { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
+.capability-authorisation .capability-field { max-width: 340px; }
+.capability-authorisation input[type="number"] { max-width: 120px; }
 
 @media (max-width: 640px) {
   .capability-panel { min-width: 0; }
