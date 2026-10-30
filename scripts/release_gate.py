@@ -449,20 +449,16 @@ def main(argv: list[str]) -> int:
         )
 
         # The release step writes the running image digest into the
-        # persistent volume; /version must then report exactly that digest.
+        # persistent volume, bound to this container; /version must then
+        # report exactly that digest.
         wrote = run(
             [
                 "docker",
                 "exec",
                 container,
                 "python",
-                "-c",
-                (
-                    "import json,os;"
-                    "p=os.path.join(os.environ['GATEWAY_DATA_DIR'],'release.json');"
-                    f"open(p,'w').write(json.dumps({{'image_revision':{digest!r}}}));"
-                    "print(p)"
-                ),
+                "/app/scripts/write_release_identity.py",
+                digest,
             ]
         )
         time.sleep(1.0)

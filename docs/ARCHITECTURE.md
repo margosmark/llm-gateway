@@ -543,9 +543,12 @@ text, or the answer distribution.
 
 `GET /version` returns exactly four keys: `service`, `source_revision`,
 `source_tree`, and `image_revision`. The first two revisions are build inputs;
-the image revision is read from `release.json` in the data directory when a
-release step has written a digest-shaped value. The endpoint must never become
-a generic environment or configuration inspector.
+the image revision is read from `release.json` in the data directory only when
+the release step recorded that digest for the container that is currently
+running — the record carries the container id, and the running id is resolved
+read-only from the process mount table. Anything unbound (an earlier
+container's record, no binding, no record) is reported as `unknown`. The
+endpoint must never become a generic environment or configuration inspector.
 
 ## Alias groups
 
@@ -565,6 +568,20 @@ listener boundaries. See `DEVELOPMENT.md` and the open findings in
 `REVIEW.md`.
 
 
+## Capability discovery foundation (staged)
+
+The capability discovery API (`GET /owner/api/capabilities`, `POST /owner/api/capabilities/preview`, `/run`, and `/decision`) is opt-in and exact-provider/model scoped. Preview validates a closed MVP probe vocabulary and returns fixed request/output/deadline bounds, but reports unknown pricing and refuses paid execution with 422 until a reviewed provider transport contract is registered. No production adapters are enabled for any other pair. Synthetic results create sanitized proposals only in isolated tests.
+
+**One reviewed probe protocol is registered: `opencode_go` / `mimo-v2.6-flash`** (`gateway/capability_probe.py`, `PROBE_PROTOCOLS`); every other provider/model pair keeps the answer above and no request is sent. The run path (`POST /run`) is fail-closed at every gate and names the gate that refused it: reviewed pair, connected provider, a fresh published tariff (unknown or stale pricing fails closed), the owner's explicit route authorization and estimate acceptance (a `hard_cap_required` policy is refused because no provider-enforced ceiling is published), a spend ceiling that covers the worst case, the single-use confirmation issued by the preview, and a one-run concurrency gate. It then executes at most two one-shot, non-streamed, non-retried, never-failed-over requests, bounded by request bytes, image bytes, output tokens, a per-request timeout and a run deadline, cancellable through `POST /probe/cancel`, and never executes a returned tool call. Evidence is written by `DiscoveryStore.record_run` to a closed sanitized shape — capability, status, method, error class, bounded request count, a bounded gateway-authored summary, reported token counts, tariff estimate — as a run plus an **unselected** proposal. A run changes no configuration, routing, cooldown or ledger; the owner's field decision is what writes metadata. Synthetic isolated results remain a test seam labelled `synthetic_isolated_fake`.
+
+Decisions are field-level and require the proposal's base config revision and model fingerprint; approved image/function-tool values and provenance persist in config and catalogue refresh reapplies those values. Exact retries return the saved decision without another config mutation. Partial decisions leave unselected fields pending and rebase the proposal CAS to the resulting model state for the next explicit action. Stale compare-and-swap marks the proposal conflicted. Rejected and unselected fields do not change effective metadata. Any reachable trusted-LAN peer may make these explicit decisions under the product's access-by-reachability administrator policy; this is not individual authentication and Host/Origin checks are not identity. See `MODEL_CAPABILITY_DISCOVERY_SPEC.md` for staged limitations.
+
 ### Local alias budgets
 
 Alias budgets are optional monthly USD caps. `gateway.budget` derives spend from metadata-only successful request ledger events and `gateway.costs.calculate_cost`, using published catalogue prices only. Any unpriced/missing usage or incomplete ledger history makes the total Unknown and disables enforcement (never interpreted as zero). The API checks before routing and records actual token usage after completion; concurrent requests may overshoot. The UTC reset is the first instant of the next calendar month.
+
+## Capability discovery foundation (staged)
+
+This section is duplicated above; see [Capability discovery foundation
+(staged)](#capability-discovery-foundation-staged) for the current text,
+including the one registered probe protocol and the run gates.

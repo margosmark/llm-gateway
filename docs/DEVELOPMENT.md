@@ -150,3 +150,8 @@ A review report must distinguish:
 Do not convert an assumption into a product claim in the README. Update
 `REVIEW.md` when a confirmed fix closes a finding, and remove/replace the
 corresponding regression test only if a stronger test now covers it.
+
+
+## Capability discovery (staged)
+
+Run `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_capability_discovery.py' -v` for isolated synthetic store/preview tests. No provider transport is registered: the HTTP run action intentionally refuses with 422 while provider bounds and reliable per-model pricing remain unapproved. Do not enable a real adapter by copying the fake test seam.
