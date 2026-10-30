@@ -32,6 +32,7 @@ from pathlib import Path
 from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
     EXHAUSTED_MAX_SECONDS,
+    RATE_LIMITED_MAX_SECONDS,
     MAX_BACKOFF_SECONDS,
     MAX_ENTRIES,
     MAX_ENTRY_AGE_SECONDS,
@@ -215,6 +216,17 @@ class CircuitStoreTests(unittest.TestCase):
         self.assertLessEqual(
             self.store.remaining("opencode_go", "mimo-v2.6-flash"),
             MAX_BACKOFF_SECONDS,
+        )
+
+    def test_a_rate_limit_window_is_capped_without_a_provider_ask(self) -> None:
+        """A 429 with no Retry-After must not fence the route for hours."""
+        for _ in range(6):
+            self.store.record_failure(
+                "opencode_go", "mimo-v2.6-flash", "rate_limited", base_seconds=300
+            )
+        self.assertLessEqual(
+            self.store.remaining("opencode_go", "mimo-v2.6-flash"),
+            RATE_LIMITED_MAX_SECONDS,
         )
 
     # --- the bounded exhaustion policy -----------------------------------

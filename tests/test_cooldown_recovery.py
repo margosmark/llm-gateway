@@ -277,6 +277,7 @@ class OwnerRecoveryActionTests(unittest.TestCase):
         self.assertEqual(status, 200)
         policy = state["cooldown_policy"]
         self.assertGreater(policy["exhausted_max_seconds"], 0)
+        self.assertGreater(policy["rate_limited_max_seconds"], 0)
         self.assertGreaterEqual(
             policy["exhausted_max_seconds"],
             policy["exhausted_base_seconds"],

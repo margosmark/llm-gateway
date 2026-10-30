@@ -79,6 +79,16 @@ EXHAUSTED_BASE_SECONDS = 900
 #: ``GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS``.
 EXHAUSTED_MAX_SECONDS = 1800
 
+#: The longest hold a ``rate_limited`` (429) failure class may apply when
+#: the provider gave no ``Retry-After`` to honour. A 429 is a traffic
+#: signal, not a drained allowance: the generic exponential reached 9600s
+#: after six failures and fenced a model the provider was already serving
+#: again, which took the whole alias down while a second route cooled in
+#: the same way. The cap keeps a 429 bounded; an explicit upstream
+#: ``Retry-After`` longer than the cap still wins, because the provider's
+#: own ask is evidence and the local escalation is not.
+RATE_LIMITED_MAX_SECONDS = 600
+
 #: The longest window any circuit may hold a route, however many failures
 #: have happened.
 MAX_BACKOFF_SECONDS = 86400
@@ -213,6 +223,7 @@ class CircuitStore:
         path: Path | None = None,
         clock: Callable[[], float] = time.time,
         exhausted_max_seconds: int = EXHAUSTED_MAX_SECONDS,
+        rate_limited_max_seconds: int = RATE_LIMITED_MAX_SECONDS,
     ) -> None:
         self._path = path
         #: The clock, so a test can move time without sleeping.
@@ -221,6 +232,10 @@ class CircuitStore:
         #: so the operator may tune it, but it always wins over a larger
         #: alias cooldown for this failure class.
         self._exhausted_max_seconds = max(1, int(exhausted_max_seconds))
+        #: The cap on a rate-limit window with no upstream Retry-After to
+        #: honour. Like the exhaustion cap it is a local retry policy,
+        #: never evidence about the provider's own state.
+        self._rate_limited_max_seconds = max(1, int(rate_limited_max_seconds))
         self._entries: dict[str, CircuitEntry] = {}
         self._lock = threading.RLock()
         if path is not None:
@@ -230,6 +245,11 @@ class CircuitStore:
     def exhausted_max_seconds(self) -> int:
         """The configured cap on a confirmed-exhaustion window."""
         return self._exhausted_max_seconds
+
+    @property
+    def rate_limited_max_seconds(self) -> int:
+        """The configured cap on a rate-limit window with no Retry-After."""
+        return self._rate_limited_max_seconds
 
     def _now(self) -> float:
         return self._clock()
@@ -525,6 +545,11 @@ class CircuitStore:
 
             if error_class == ERROR_EXHAUSTED:
                 window = base
+            elif error_class == ERROR_RATE_LIMITED:
+                window = min(
+                    base * (2 ** (failures - 1)),
+                    max(self._rate_limited_max_seconds, retry_after or 0),
+                )
             else:
                 window = min(base * (2 ** (failures - 1)), MAX_BACKOFF_SECONDS)
             reason = self._reason_for(error_class, window, failures, retry_after, base)

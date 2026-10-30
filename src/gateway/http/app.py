@@ -1121,6 +1121,7 @@ class GatewayApp:
                 "cooldown_policy": {
                     "exhausted_base_seconds": EXHAUSTED_BASE_SECONDS,
                     "exhausted_max_seconds": self.router.circuits.exhausted_max_seconds,
+                    "rate_limited_max_seconds": self.router.circuits.rate_limited_max_seconds,
                     "probe_timeout_seconds": PROBE_TIMEOUT_SECONDS,
                     "transient_failure_threshold": TRANSIENT_FAILURE_THRESHOLD,
                 },

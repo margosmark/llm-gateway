@@ -17,7 +17,7 @@ from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.buildinfo import release_identity
 from gateway.backup import snapshot_interval_seconds
-from gateway.circuits import EXHAUSTED_MAX_SECONDS, CircuitStore
+from gateway.circuits import EXHAUSTED_MAX_SECONDS, RATE_LIMITED_MAX_SECONDS, CircuitStore
 from gateway.snapshots import SnapshotWorker
 from gateway.config import ConfigStore, ProviderState
 from gateway.core.capabilities import apply_image_evidence, image_evidence
@@ -113,6 +113,24 @@ def _is_private_or_loopback(host: str) -> bool:
     )
 
 
+def _cooldown_max_seconds(value: str) -> int:
+    """Validate a cooldown-window cap in seconds.
+
+    The cap bounds how long a local circuit may hold a route for one
+    failure class. It must be a positive whole number of seconds, so a
+    typo cannot silently disable the bound.
+    """
+    try:
+        seconds = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "cooldown cap must be a whole number of seconds"
+        ) from exc
+    if seconds < 1:
+        raise argparse.ArgumentTypeError("cooldown cap must be at least 1 second")
+    return seconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="personal-llm-gateway", description="Trusted-LAN OpenAI-compatible LLM gateway.")
     parser.add_argument("--host", default=os.environ.get("GATEWAY_BIND", "127.0.0.1"), help="Explicit private address to bind; wildcard binds are refused.")
@@ -130,6 +148,15 @@ def build_parser() -> argparse.ArgumentParser:
             f"(default: {EXHAUSTED_MAX_SECONDS}; configurable with GATEWAY_EXHAUSTED_COOLDOWN_MAX_SECONDS)."
         ),
     )
+    parser.add_argument(
+        "--rate-limited-cooldown-max-seconds",
+        type=_cooldown_max_seconds,
+        default=os.environ.get("GATEWAY_RATE_LIMITED_COOLDOWN_MAX_SECONDS", str(RATE_LIMITED_MAX_SECONDS)),
+        help=(
+            "Longest window a provider rate-limit may hold a route when no Retry-After was given "
+            f"(default: {RATE_LIMITED_MAX_SECONDS}; configurable with GATEWAY_RATE_LIMITED_COOLDOWN_MAX_SECONDS)."
+        ),
+    )
     parser.add_argument("--print-url", action="store_true", help="Print gateway URLs and exit.")
     return parser
 
@@ -139,6 +166,7 @@ def build_application(
     host: str,
     port: int,
     exhausted_max_seconds: int = EXHAUSTED_MAX_SECONDS,
+    rate_limited_max_seconds: int = RATE_LIMITED_MAX_SECONDS,
 ):
     data_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(data_dir, 0o700)
@@ -180,7 +208,8 @@ def build_application(
     # confirmed-exhaustion window is bounded, so a reopened subscription
     # window is never stranded behind a multi-hour local hold.
     circuits = CircuitStore(
-        data_dir / "circuits.json", exhausted_max_seconds=exhausted_max_seconds
+        data_dir / "circuits.json", exhausted_max_seconds=exhausted_max_seconds,
+        rate_limited_max_seconds=rate_limited_max_seconds,
     )
     router = Router(config, registry, ledger=ledger, circuits=circuits)
     profile_auth = ProfileAuth(config, credentials)
@@ -208,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     app, config, _, _ = build_application(
         Path(args.data_dir), args.host, args.port,
         exhausted_max_seconds=args.exhausted_cooldown_max_seconds,
+        rate_limited_max_seconds=args.rate_limited_cooldown_max_seconds,
     )
     authority = format_authority_host(args.host)
     if args.print_url:
