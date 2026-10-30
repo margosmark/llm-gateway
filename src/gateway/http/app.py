@@ -39,6 +39,7 @@ from gateway.costs import (
     stream_token_counters,
 )
 from gateway.ledger_persistence import ROLLUP_SCHEMA
+from gateway.leaderboard import build_leaderboard
 from gateway.statistics import aggregate_statistics
 from gateway.provider_health import provider_health
 from gateway.stores import atomic_write_json
@@ -421,6 +422,13 @@ class GatewayApp:
             r.add(["GET"], prefix + "/style.css", self.handle_static_css)
             r.add(["GET"], prefix + "/api/status", self.handle_public_status)
             r.add(["GET"], prefix + "/api/state", self.handle_state)
+            # The leaderboard is a separate read-only endpoint on purpose:
+            # its ranked rows and date x model matrix are a second O(rows)
+            # pass, and folding it into /owner/api/state would put the
+            # console poll's mandatory sub-2s bar (R56) back at risk. Same
+            # listener, same mounts, same Host/Origin/forwarded checks as
+            # every other owner route - no new exposure.
+            r.add(["GET"], prefix + "/api/leaderboard", self.handle_leaderboard)
             r.add(["GET"], prefix + "/api/ledger/export", self.handle_ledger_export)
             r.add(["GET"], prefix + "/api/backup/export", self.handle_backup_export)
             r.add(["POST"], prefix + "/api/backup/import", self.handle_backup_import)
@@ -970,9 +978,44 @@ class GatewayApp:
             }
         )
 
+    def handle_leaderboard(self, request: Request) -> Response:
+        """The private model leaderboard: ranked models + date x model matrix.
+
+        Deliberately a separate endpoint from ``/owner/api/state`` (see the
+        route table), so the console poll keeps its sub-2s bar. The rollup is
+        the in-memory one the ledger already maintains - this path never opens
+        the ledger file - and the published-price catalogue is read exactly
+        once here, then shared by every model priced below (the R56 rule: one
+        materialisation per request, not per consumer). The payload holds
+        aggregates only: no request identifier, prompt, response or
+        credential can reach it.
+        """
+        days, requested_days = analytics_days(request)
+        payload = build_leaderboard(
+            self.ledger.rollup() if self.ledger else None,
+            days=days,
+            prices=published_prices(),
+        )
+        if requested_days is not None:
+            payload["requested_days"] = requested_days
+        return json_response(payload)
+
     def handle_state(self, request: Request) -> Response:
         config = self.config.snapshot()
         may_mutate = self._can_mutate(request)
+
+        # One request, one snapshot. The bounded ledger ring and the
+        # published-price catalogue are each materialised exactly once here
+        # and shared by every consumer below (per-alias budget, the three
+        # statistics windows, provider health, usage costs, ledger
+        # annotations). Re-pulling either per alias or per window is what
+        # took this path from 0.3s to 46.9s in production (wave-2B rollback
+        # 2026-10-29): ~20 ring scans and, far worse, >100k catalogue file
+        # reads per console poll. No consumer below may re-pull the ledger.
+        ledger_snapshot = self.ledger.recent(limit=10_000) if self.ledger else []
+        ledger_history_complete = bool(self.ledger and self.ledger.evicted == 0)
+        ledger_evicted = self.ledger.evicted if self.ledger else 0
+        price_snapshot = published_prices()
 
         providers = []
         for provider_id in sorted(config.providers):
@@ -1020,7 +1063,7 @@ class GatewayApp:
                 route_limits.append((ref.label(), entry.context_limit if entry else None))
             alias_payload = alias.to_dict()
             alias_payload["context_limit"] = alias_context_limit(route_limits)
-            alias_payload["budget_status"] = budget_status(self.ledger.recent(limit=10_000) if self.ledger else [], alias.name, alias.budget, history_complete=bool(self.ledger and self.ledger.evicted == 0))
+            alias_payload["budget_status"] = budget_status(ledger_snapshot, alias.name, alias.budget, history_complete=ledger_history_complete, _prices=price_snapshot)
             aliases.append(alias_payload)
 
         profiles = []
@@ -1069,9 +1112,10 @@ class GatewayApp:
                         f"Alias '{alias.name}' confirms a cross-provider fallback but does not enable '{trigger}'; that skip/failure will be refused."
                     )
 
-        price_snapshot = published_prices()
-        recent_ledger = self.ledger.recent(limit=25) if self.ledger else []
-        usage_ledger = self.ledger.recent(limit=10_000) if self.ledger else []
+        # The 25-row console excerpt is the head of the same snapshot: the
+        # ring pull returns newest-first, so the first 25 rows are exactly
+        # what a separate recent(limit=25) pull would have produced.
+        recent_ledger = ledger_snapshot[:25]
         # Analytics come from the durable rollup the ledger keeps in memory;
         # this path never opens the ledger file, because it runs on every
         # console poll. The catalogue is loaded once above and reused here.
@@ -1100,10 +1144,10 @@ class GatewayApp:
                 "limits": self.limits.all(),
                 "ledger": annotate_events(recent_ledger, _prices=price_snapshot),
                 "totals": self.ledger.totals() if self.ledger else {},
-                "usage_costs": aggregate_usage(usage_ledger, window_hours=24, evicted_events=self.ledger.evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
+                "usage_costs": aggregate_usage(ledger_snapshot, window_hours=24, evicted_events=ledger_evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
                 "analytics": analytics,
-                "request_statistics": {window: aggregate_statistics(self.ledger.recent(limit=10_000), window) for window in ("hour", "day", "month")} if self.ledger else {},
-                "provider_health": provider_health(providers, self.router.circuits.details(), self.ledger.recent(limit=10_000) if self.ledger else []),
+                "request_statistics": {window: aggregate_statistics(ledger_snapshot, window, _prices=price_snapshot) for window in ("hour", "day", "month")} if self.ledger else {},
+                "provider_health": provider_health(providers, self.router.circuits.details(), ledger_snapshot),
                 "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
                 "cooldowns": self.router.circuits.snapshot(),
                 "cooldown_details": self.router.circuits.details(),

@@ -18,8 +18,15 @@ def _percentile(values: list[int], percentile: int) -> int | None:
     return ordered[index]
 
 
-def aggregate_statistics(events: list[dict[str, Any]], window: str = "day") -> dict[str, Any]:
-    """Aggregate outcome, latency, usage and local cost metadata in a window."""
+def aggregate_statistics(events: list[dict[str, Any]], window: str = "day", *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Aggregate outcome, latency, usage and local cost metadata in a window.
+
+    ``_prices`` threads a caller's already-materialised published-price
+    snapshot into every per-event cost lookup. Without it each
+    ``calculate_cost`` call re-reads the catalogue from disk — on a
+    10,000-row window that turns one console poll into tens of thousands
+    of file reads (the wave-2B owner-console outage).
+    """
     if window not in WINDOW_HOURS:
         raise ValueError("window must be one of: hour, day, month")
     cutoff = datetime.now(UTC) - timedelta(hours=WINDOW_HOURS[window])
@@ -68,7 +75,7 @@ def aggregate_statistics(events: list[dict[str, Any]], window: str = "day") -> d
             model = event.get("serving_model")
             provider = event.get("serving_provider")
             if isinstance(model, str) and isinstance(provider, str):
-                cost = calculate_cost(counters or None, model, provider)
+                cost = calculate_cost(counters or None, model, provider, _prices=_prices)
                 if cost["amount_usd"] is None:
                     row["cost_unknown"] = True
                 else:

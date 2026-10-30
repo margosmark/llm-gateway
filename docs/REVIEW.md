@@ -2126,3 +2126,26 @@ The owner API is intentionally exposed to trusted-LAN devices and validates the 
 **Fix.** Every release point now goes through `UpstreamClient._release()`, which drops the connection from `_active` before returning it to the pool, and `_open`'s failure paths discard before closing — no exit leaves an entry. Each request's watch tracks socket ownership: `_retire()` marks the request finished and stops its watch under the same lock `_interrupt()` re-checks before any `shutdown()`, and every exit — including the stream iterator's `finally`, which runs when the stream ends — retires *before* releasing, so a finished request can never touch a socket another request now holds. Watch threads are named `upstream-watch-*`. In `run_suite`, anything the transport raises that is not an `AdapterError` is failed closed: an inconclusive `transport` result carrying the run's honest stop reason (cancelled / deadline / prior_failure), so evidence is always recorded and nothing escapes as a 500. The fail-closed contract is unchanged: unknown price ⇒ no paid call; non-finite/negative ⇒ reject; timeouts/malformed/unexpected ⇒ inconclusive, never a false negative.
 
 **Regression evidence.** RED-then-green on the base: `tests/test_upstream_http_pool.py::test_failed_requests_do_not_leak_the_active_set` (RED: 7 entries after 7 failures), `::test_a_finished_stream_watch_never_interrupts_a_later_request` (RED: finished stream still in the active set; on base the stale deadline then killed the next request — now the unrelated request completes at 1.501 s), `::test_watch_threads_do_not_outlive_their_requests`; `tests/test_capability_probe.py::RunnerBoundsTests::test_an_unexpected_transport_exception_fails_closed_with_evidence` and `::test_an_unexpected_exception_during_a_cancellation_still_reports_it` (RED: `AttributeError` escaped the runner). Independent QA probes re-run against the candidate: failed-request leak 0 of 10, stream entries 0 after each of 5 streams, stale-watch victim survives (200 at 1.501 s), every D1–D7 transport and A1–A10 HTTP scenario at base-or-better timings, evidence rows recorded on the cancellation path. No paid provider calls, no production lifecycle, no live config mutation — synthetic loopback upstreams only.
+### R56 — `/owner/api/state` re-derived its ledger and price inputs per consumer — **closed**
+
+Wave-2B (tree `3e2d6c86`, PR #38) made `handle_state` call
+`ledger.recent(limit=10_000)` once per alias per consumer (budget per alias,
+three statistics windows, provider health) and, far worse, every per-event
+`calculate_cost` lookup inside `aggregate_statistics` and `budget_status`
+re-read and re-parsed the 42KB published-price catalogue from disk: over
+100,000 file reads per console poll. Measured 22.2s for a 10,000-row ring
+with 4 aliases locally, 46.9s in production, before the wave-2B rollback of
+2026-10-29; the console never rendered below its banner.
+
+`handle_state` now materialises the ring snapshot and the published-price
+catalogue exactly once per request and threads both into every consumer;
+`aggregate_statistics` and `budget_status` accept an optional `_prices`
+snapshot (default `None` preserves the per-lookup read for other callers).
+Same numbers, same fail-closed history-incomplete semantics
+(`ledger.evicted == 0`).
+
+Regression gate: `tests/test_owner_state_latency.py` seeds 10,000 priced
+ledger rows and 4 budgeted aliases, times `GET /owner/api/state` (asserts
+< 2s; fails on `3e2d6c86`, where the request exceeds even the 10s client
+timeout), and asserts every consumer's payload with hand-computed cost
+totals. Fixed path measured 0.47s on the same fixture.
