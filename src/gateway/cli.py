@@ -230,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "warning: the release identity is unknown, so this deployment cannot say what it "
             "is. Deploy with scripts/release.py, which stamps the source revision and the "
-            "image digest into the state volume.",
+            "image digest into the state volume, bound to the running container.",
             flush=True,
         )
     stop = threading.Event()

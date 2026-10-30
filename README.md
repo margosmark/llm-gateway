@@ -608,8 +608,13 @@ details or environment values.
 
 `image_revision` is written by the release step into the persistent volume,
 because an image's own digest is only knowable after the image exists. The
-release gate verifies that the running container reports exactly its own
-digest.
+record carries the id of the container it was written for, and the gateway
+reports the digest only while that container is the one running: a record
+left behind by an earlier cutover, a record with no container binding, or
+an environment whose own container id cannot be resolved all report
+`unknown` rather than a digest that cannot be proven to be the running
+image's identity. The release gate verifies that the running container
+reports exactly its own digest.
 
 ---
 
@@ -733,8 +738,10 @@ To check what is running:
 curl -s http://10.10.11.109:8765/version
 ```
 
-`/version` has exactly four keys, and `image_revision` must be the digest
-of the image that is actually running. The runbook has the rest:
+`/version` has exactly four keys, and `image_revision` is the digest of
+the image that is actually running only when the release step recorded it
+for the running container; otherwise it is `unknown`, never a stale
+digest. The runbook has the rest:
 [`RUNBOOK.md`](docs/RUNBOOK.md) covers verification, cutover and rollback.
 
 ---

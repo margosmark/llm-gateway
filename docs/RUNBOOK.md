@@ -235,8 +235,12 @@ curl -s -o /dev/null -w '%{http_code}\n' http://10.10.11.109:8765/health
 curl -s http://10.10.11.109:8765/v1/models
 ```
 
-`/version` must report exactly the four keys, and `image_revision` must be
-the digest of the image that is running.
+`/version` must report exactly the four keys. `image_revision` is the
+digest of the running image only when the release step recorded it for the
+running container; it reports `unknown` otherwise (a cutover that bypassed
+`scripts/release.py`, or a record left behind by an earlier container).
+`docker inspect --format '{{.Image}}'` on the container remains the
+authoritative image check.
 
 ### 3.1 The OpenCode integration
 
