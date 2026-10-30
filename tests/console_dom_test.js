@@ -364,6 +364,248 @@ function fixtureState() {
 const rendered = helpers.renderStatusForTest(fixtureState());
 const renderedText = collectText(rendered).join("\n");
 
+check("Operate now renders exactly one read-only health card per published alias before collapsed details", function () {
+  const state = fixtureState();
+  state.aliases = [
+    { name: "coding", enabled: true, primary: { provider: "p", model: "main" }, fallbacks: [{ provider: "q", model: "backup" }], fallback_triggers: ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"], fallback_authorized: true, fallback_confirmed_providers: ["q"] },
+    { name: "hidden", enabled: false, primary: { provider: "p", model: "private" }, fallbacks: [], fallback_triggers: [], fallback_authorized: false, fallback_confirmed_providers: [] }
+  ];
+  state.fallback_triggers = ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"];
+  state.providers = [{ provider_id: "p", state: "connected" }, { provider_id: "q", state: "connected" }];
+  const root = helpers.renderStatusForTest(state);
+  const cards = findAll(root, function (node) { return node.tag === "article" && node.className === "route-health-card"; });
+  assert.strictEqual(cards.length, 1, "only published alias cards should render");
+  const text = collectText(root).join("\n");
+  assert(text.indexOf("Operate now · Routing health") < text.indexOf("More status details"));
+  assert(text.includes("Primary"));
+  assert(text.includes("Fallback 1"));
+  assert(text.includes("Fallback 2"));
+  assert(text.includes("Exhausted: enabled"));
+  assert(text.includes("Probe contention: enabled"));
+  assert(text.includes("Healthy"));
+  assert.strictEqual(findAll(root, function (node) { return node.tag === "details"; }).length, 1);
+});
+
+check("a policy gap is explicit and an orphan cooldown cannot affect an alias", function () {
+  const state = fixtureState();
+  state.aliases = [{ name: "coding", enabled: true, primary: { provider: "p", model: "main" }, fallbacks: [{ provider: "q", model: "backup" }], fallback_triggers: ["exhausted"], fallback_authorized: true, fallback_confirmed_providers: ["q"] }];
+  state.fallback_triggers = ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"];
+  state.providers = [{ provider_id: "p", state: "connected" }, { provider_id: "q", state: "connected" }];
+  state.cooldown_details = { "other/model": { provider: "other", model: "model", scope: "route", state: "open", armed: true, remaining_seconds: 30 } };
+  const text = collectText(helpers.renderStatusForTest(state)).join("\n");
+  assert(text.includes("coding · Policy gap"));
+  assert(text.includes("Rate limited: disabled"));
+  assert(text.includes("No active cooldown on this alias’s routes."));
+  assert(!text.includes("other/model"));
+});
+
+check("an applicable exact-route cooldown appears only for a configured route", function () {
+  const state = fixtureState();
+  state.aliases = [{ name: "coding", enabled: true, primary: { provider: "p", model: "main" }, fallbacks: [{ provider: "q", model: "backup" }], fallback_triggers: ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"], fallback_authorized: true, fallback_confirmed_providers: ["q"] }];
+  state.fallback_triggers = ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"];
+  state.providers = [{ provider_id: "p", state: "connected" }, { provider_id: "q", state: "connected" }];
+  state.cooldown_details = { "q/backup": { provider: "q", model: "backup", scope: "route", state: "open", armed: true, remaining_seconds: 77 } };
+  const text = collectText(helpers.renderStatusForTest(state)).join("\n");
+  assert(text.includes("coding · Cooldown"));
+  assert(text.includes("q/backup · open · 77s remaining"));
+});
+
+// A fresh, fully-healthy alias: the base for the fail-closed staleness and
+// missing-payload checks below.
+function healthyAliasState() {
+  const state = fixtureState();
+  const ALL6 = ["exhausted", "rate_limited", "upstream_unavailable", "explicit_cooldown", "route_ineligible", "probe_contention"];
+  state.aliases = [{ name: "coding", enabled: true, primary: { provider: "p", model: "main" }, fallbacks: [{ provider: "q", model: "backup" }], fallback_triggers: ALL6, fallback_authorized: true, fallback_confirmed_providers: ["q"] }];
+  state.fallback_triggers = ALL6;
+  state.providers = [{ provider_id: "p", state: "connected" }, { provider_id: "q", state: "connected" }];
+  state.cooldown_details = {};
+  return state;
+}
+
+check("every routing-health card carries an as-of freshness line", function () {
+  const text = collectText(helpers.renderStatusForTest(healthyAliasState())).join("\n");
+  assert(/As of \d/.test(text), "expected an as-of timestamp on the card");
+  assert(text.includes("refetches when this tab regains focus"),
+    "the card must say what keeps it fresh");
+});
+
+check("stale-beyond-threshold data never claims Healthy", function () {
+  const stale = Date.now() - (helpers.STALE_AFTER_MS + 60000);
+  const text = collectText(helpers.renderStatusForTest(healthyAliasState(), undefined, stale)).join("\n");
+  assert(text.includes("coding · Stale"), "a stale snapshot must render Stale");
+  assert(!text.includes("coding · Healthy"));
+  assert(/old — showing the last known state/.test(text), "the stale card must carry the age");
+});
+
+check("unavailable refresh never presents stale cached health as Healthy", function () {
+  const text = collectText(helpers.renderStatusForTest(healthyAliasState(), undefined, Date.now(), true)).join("\n");
+  assert(text.includes("coding · Stale"));
+  assert(!text.includes("coding · Healthy"));
+  assert(text.includes("refresh unavailable"));
+});
+
+check("no successful state fetch is unavailable, not fresh or Healthy", function () {
+  const text = collectText(helpers.renderStatusForTest(healthyAliasState(), undefined, null)).join("\n");
+  assert(text.includes("coding · Stale"));
+  assert(!text.includes("coding · Healthy"));
+  assert(text.includes("routing health is unavailable"));
+});
+
+check("failed focus refresh preserves the editor and marks health unavailable", function () {
+  assert(source.includes("if (options.preserveDraft && state)"));
+  assert(source.includes("refreshUnavailable = true;"));
+  assert(source.includes("tickFreshness();\n        toast(\"Routing health refresh unavailable:"));
+});
+
+check("successful focus refresh updates health without redrawing the alias editor", function () {
+  const refresh = source.slice(source.indexOf("function refresh(options)"), source.indexOf("// The DOM helper is exported"));
+  assert(refresh.includes("existingHealth.replaceWith(updatedHealth)"));
+  assert(refresh.includes("if (options.preserveDraft)"));
+  assert(refresh.includes("draw();"), "non-draft refreshes still redraw the console");
+});
+
+check("focus refresh preserves new-alias drafts, previews, and open disclosures", function () {
+  assert(source.includes("refresh({ preserveDraft: true });"),
+    "refresh must preserve current UI even when a new alias has no editingAlias");
+  const refresh = source.slice(source.indexOf("function refresh(options)"), source.indexOf("// The DOM helper is exported"));
+  assert(refresh.includes("existingHealth.replaceWith(updatedHealth)"),
+    "refresh may replace only health content, not editor or disclosure DOM");
+  assert(refresh.includes("if (options.preserveDraft && state)"),
+    "failed refresh must leave current editor and preview intact");
+});
+
+check("freshness ticker runs independently of editing and mutations", function () {
+  assert(source.includes("global.setInterval(function () {\n      // Freshness is independent of editing and mutations"));
+  assert(source.includes("var stale = refreshUnavailable || ageMs == null || ageMs > STALE_AFTER_MS;"));
+});
+
+check("the console refetches when the tab regains focus and records its fetch time", function () {
+  assert(typeof helpers.STALE_AFTER_MS === "number" && helpers.STALE_AFTER_MS > 0);
+  assert(source.includes("lastFetchAt = Date.now();"), "a successful /api/state fetch must be timestamped");
+  assert(source.includes('global.addEventListener("focus", refetchIfIdle)'));
+  assert(source.includes('"visibilitychange"'));
+  assert(source.includes('visibilityState === "visible"'));
+  assert(source.includes("if (busy) return;"));
+  assert(source.includes("refresh({ preserveDraft: true });"),
+    "focus refresh updates state without replacing an in-progress draft");
+  assert(source.includes("existingHealth.replaceWith(updatedHealth)"),
+    "only routing health is refreshed while preserving the editor and disclosure DOM");
+  assert(source.includes("global.setInterval(function () {\n      // Freshness is independent of editing and mutations"),
+    "the independent ticker must continue during editing and mutations");
+});
+
+check("missing fallback_triggers renders Unknown, never healthy-from-empty", function () {
+  const state = healthyAliasState();
+  delete state.fallback_triggers;
+  const text = collectText(helpers.renderStatusForTest(state)).join("\n");
+  assert(text.includes("coding · Unknown"), "an absent policy list must be Unknown");
+  assert(!text.includes("coding · Healthy"));
+  assert(text.includes("Exhausted: unknown"), "chips must say unknown, not disabled, when the policy list is missing");
+});
+
+check("missing cooldown_details renders Unknown, never no-cooldown", function () {
+  const state = healthyAliasState();
+  delete state.cooldown_details;
+  const text = collectText(helpers.renderStatusForTest(state)).join("\n");
+  assert(text.includes("coding · Unknown"), "absent cooldown details must be Unknown");
+  assert(text.includes("Unknown — the console state carried no cooldown details"));
+  assert(!text.includes("No active cooldown"));
+});
+
+check("an unrecognized provider state is Unknown, never a fall-through to Healthy", function () {
+  const future = healthyAliasState();
+  future.providers[1].state = "state_enum_future_value";
+  const text = collectText(helpers.renderStatusForTest(future)).join("\n");
+  assert(text.includes("coding · Unknown"), "an allow-list must reject unknown provider states");
+  assert(!text.includes("coding · Healthy"));
+  const untested = healthyAliasState();
+  untested.providers[1].state = "configured_untested";
+  const untestedText = collectText(helpers.renderStatusForTest(untested)).join("\n");
+  assert(untestedText.includes("coding · Unknown"));
+  const hostile = healthyAliasState();
+  hostile.providers[0].state = "__proto__";
+  const hostileText = collectText(helpers.renderStatusForTest(hostile)).join("\n");
+  assert(hostileText.includes("coding · Unknown"), "a prototype-polluting state string must not pass the allow-list");
+});
+
+check("the alias save path previews changes before mutating", function () {
+  // The first click must not POST: the mutating call lives behind the
+  // confirmed "Save routing changes" button, after the preview.
+  assert(source.includes("onclick: openPreview"), "the save button must open the preview");
+  assert(source.includes('text: "Save routing changes"'));
+  assert(source.includes('text: "Cancel"'));
+  const confirmIdx = source.indexOf('text: "Save routing changes"');
+  const postCall = 'run(api(BASE + "/api/alias", { method: "POST", body: payload }))';
+  const postIdx = source.indexOf(postCall);
+  assert(postIdx > confirmIdx, "the mutating POST must live behind the confirmed button");
+  assert(source.split(postCall).length - 1 === 1, "exactly one mutating save call exists");
+  assert(source.includes("Changes not saved. Current configuration is unchanged."));
+  assert(source.includes('text: "Review errors"'));
+  assert(source.includes("class: \"save-preview\", hidden: true"),
+    "the preview starts hidden and holds nothing");
+});
+
+check("the save preview names the alias, primary/fallback order and the trigger/authorization impact", function () {
+  const lines = helpers.savePreviewLines({
+    name: "coding",
+    primary: { provider: "q", model: "new-main" },
+    fallbacks: [{ provider: "r", model: "b" }],
+    triggers: ["exhausted", "rate_limited"],
+    authorized: true,
+    confirmed: ["r"],
+    cooldown: 300,
+    phaseRouting: null
+  }, {
+    name: "coding",
+    primary: { provider: "p", model: "main" },
+    fallbacks: [{ provider: "q", model: "backup" }],
+    fallback_triggers: ["exhausted"],
+    fallback_authorized: false,
+    fallback_confirmed_providers: [],
+    cooldown_seconds: 60,
+    enabled: false,
+    phase_routing: null
+  }).join("\n");
+  assert(lines.includes("Alias: coding"), "the preview must name the alias");
+  assert(lines.includes("p → main") && lines.includes("q → new-main"),
+    "the primary change must be named old → new");
+  assert(lines.includes("Fallback order — was:") && lines.includes("Fallback order — now:"),
+    "the fallback order change must be shown");
+  assert(lines.includes("Trigger impact: enable rate_limited"));
+  assert(lines.includes("disabled → enabled"), "the authorization change must be named");
+  assert(lines.includes("Cooldown: 60s → 300s"));
+});
+
+check("an unchanged save preview says everything is unchanged", function () {
+  const saved = {
+    name: "coding", primary: { provider: "p", model: "main" },
+    fallbacks: [{ provider: "q", model: "backup" }],
+    fallback_triggers: ["exhausted"], fallback_authorized: true,
+    fallback_confirmed_providers: ["q"], cooldown_seconds: 60, enabled: true, phase_routing: null
+  };
+  const lines = helpers.savePreviewLines({
+    name: saved.name, primary: saved.primary, fallbacks: saved.fallbacks,
+    triggers: saved.fallback_triggers, authorized: saved.fallback_authorized,
+    confirmed: saved.fallback_confirmed_providers, cooldown: saved.cooldown_seconds,
+    phaseRouting: null
+  }, saved).join("\n");
+  assert(lines.includes("(unchanged)"), "an unchanged save must say so");
+  assert(lines.includes("no trigger changes"));
+  assert(lines.includes("Fallback order: "));
+  assert(lines.includes("published — stays published"));
+});
+
+check("a new-alias preview is labelled as new and never mutates", function () {
+  const lines = helpers.savePreviewLines({
+    name: "fresh", primary: { provider: "p", model: "main" }, fallbacks: [],
+    triggers: [], authorized: false, confirmed: [], cooldown: 300, phaseRouting: null
+  }, null).join("\n");
+  assert(lines.includes("Alias: fresh (new — nothing with this name is saved yet)"));
+  assert(lines.includes("Primary: p → main"));
+  assert(lines.includes("Triggers: none"));
+  assert(lines.includes("not published (publish separately)"));
+});
+
 check("the fallback analytics card renders the rate and the standing metadata line", function () {
   assert(renderedText.includes("Fallback analytics"));
   assert(renderedText.includes("Metadata only. Prompts, responses, tokens and secrets are never stored."));
