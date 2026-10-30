@@ -10,7 +10,9 @@ under test:
 * every mutation is visible on the **immediately following** read: a
   config write, a backup import that changes content *without* bumping
   the revision, a ledger record or amendment, a credential enrolment,
-  and a circuit transition **including an expiry**;
+  a circuit transition **including an expiry**, and a release file
+  rewritten under the running app (the identity's *result* is in the
+  key; the callable object was not);
 * an open circuit's ticking countdown does not evict the cache, while
   its expiry does - the key tracks circuit *state*, not per-second
   numbers;
@@ -210,6 +212,55 @@ class StateCacheTests(unittest.TestCase):
                          "a circuit expiry must re-render on the next read")
         self.assertNotIn(f"{FAKE_PROVIDER}/*", expired["cooldowns"])
         self.assertTrue(all(entry["state"] != "open" for entry in expired["cooldown_details"].values()))
+
+    def test_release_file_rewrite_is_visible_on_the_next_read(self) -> None:
+        """``release_identity()`` re-reads ``release.json`` on every call, so
+        the token must digest its **result** - the callable object is a
+        per-process constant. A release written after the app is up (the
+        ``scripts/release.py --build`` flow, or
+        ``scripts/write_release_identity.py`` against a running volume) must
+        show on the very next read, not after the background refresh."""
+        import tempfile
+        from pathlib import Path
+
+        from gateway.buildinfo import release_identity
+
+        scratch = Path(tempfile.mkdtemp())
+        release_path = scratch / "release.json"
+        mountinfo_path = scratch / "mountinfo"
+        container_id = "c" * 64
+        # The mount-table shape that binds a record to *this* container, so
+        # the recorded digest is reported rather than failing closed to
+        # "unknown" (see gateway.buildinfo).
+        mountinfo_path.write_text(
+            f"0 0 0:0 / /var/lib/docker/containers/{container_id}/resolv.conf rw - tmpfs / rw\n",
+            encoding="utf-8",
+        )
+
+        def write_release(image_revision: str) -> None:
+            release_path.write_text(json.dumps({
+                "image_revision": image_revision,
+                "container_id": container_id,
+            }), encoding="utf-8")
+
+        def identity() -> dict:
+            return release_identity(release_path=release_path, mountinfo_path=mountinfo_path)
+
+        write_release("sha256:" + "a" * 64)
+        self.harness.app._release_identity = identity
+
+        before = self.state()
+        self.assertEqual(before["release"]["image_revision"], "sha256:" + "a" * 64)
+        warm = self.render_calls
+        self.state()  # warm: served from the cache
+        self.assertEqual(self.render_calls, warm, "fixture premise: the second read must hit")
+
+        write_release("sha256:" + "b" * 64)
+        after = self.state()
+        self.assertEqual(self.render_calls, warm + 1,
+                         "a live release write must re-render, not serve the cached body")
+        self.assertEqual(after["release"]["image_revision"], "sha256:" + "b" * 64)
+        self.assertNotEqual(before["release"], after["release"])
 
     # --- background refresh ---------------------------------------------
 
