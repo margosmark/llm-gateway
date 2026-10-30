@@ -197,3 +197,43 @@ dl.kv dd { margin: 0; word-break: break-all; }
   dl.kv dt { margin-top: 8px; }
   .table-wrap { max-width: 100%; overflow-x: auto; }
 }
+
+/* --- leaderboard ---------------------------------------------------- */
+
+.lb-chart {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+  overflow-x: auto;
+  padding-top: 8px;
+}
+.lb-col {
+  flex: 1 1 0;
+  min-width: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.lb-area {
+  height: 150px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  border-bottom: 1px solid var(--line);
+}
+.lb-seg { width: 100%; min-height: 1px; }
+.lb-nodata {
+  width: 100%;
+  flex: 1 1 auto;
+  border: 1px dashed var(--line);
+  background: repeating-linear-gradient(45deg, transparent, transparent 4px, var(--line) 4px, var(--line) 5px);
+}
+.lb-zero { width: 100%; text-align: center; color: var(--muted); font-size: 11px; }
+.lb-day { margin-top: 4px; text-align: center; }
+.lb-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
+.lb-key { display: inline-flex; align-items: center; gap: 6px; }
+.lb-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; }
+.lb-absent td { color: var(--muted); font-style: italic; }
+.lb-methodology { padding-left: 18px; margin: 0; }
+.lb-methodology li { margin-bottom: 6px; }

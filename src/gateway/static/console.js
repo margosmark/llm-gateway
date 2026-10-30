@@ -23,6 +23,14 @@
   // sections does not silently reset the owner's choice.
   var usageDay = "live";
   var statisticsWindow = "day";
+  // The leaderboard lives on its own endpoint (GET <mount>/api/leaderboard)
+  // and is fetched only when its tab is open, so the state poll keeps its
+  // sub-2s bar (R56). "idle" means "no payload yet": the tab's first draw
+  // triggers the fetch, and a completed fetch redraws the tab.
+  var leaderboardWindow = 7;      // days requested from /api/leaderboard
+  var leaderboardPayload = null;  // last successful payload
+  var leaderboardPhase = "idle";  // idle | loading | ready | error
+  var leaderboardError = null;
 
   // --- tiny helpers -----------------------------------------------------
 
@@ -177,6 +185,7 @@
     { id: "providers", label: "Providers" },
     { id: "models", label: "Models & Routes" },
     { id: "profiles", label: "Profiles" },
+    { id: "leaderboard", label: "Leaderboard" },
     { id: "settings", label: "Settings" },
     { id: "backup", label: "Backup" }
   ];
@@ -224,6 +233,7 @@
       providers: renderProviders,
       models: renderModels,
       profiles: renderProfiles,
+      leaderboard: renderLeaderboard,
       settings: renderSettings,
       backup: renderBackup
     }[tab] || renderStatus;
@@ -841,6 +851,600 @@
     return list;
   }
 
+
+  // --- leaderboard ------------------------------------------------------
+  //
+  // The private, opencode.ai/data-style view of the same durable rollup the
+  // status page reads: models ranked by input + output tokens, a stacked
+  // daily usage chart, a date x model matrix, a leader-vs-challenger
+  // comparison, the fallback panel and a plain-language methodology. It is
+  // fetched from its own read-only route so the state poll keeps its
+  // sub-2s bar (R56). The three rules it never breaks:
+  //   - cost honesty: amount_usd null renders as "no published price",
+  //     never $0.00, and a price never crosses a provider boundary;
+  //   - absent is not zero: a day with no recorded rows renders as "no
+  //     data"; only a recorded day carries a measured 0;
+  //   - no invented dimensions: model, provider, alias, fallback reason and
+  //     cost are all this single-owner appliance actually has.
+
+  var LB_WINDOW_OPTIONS = [7, 14, 30];
+
+  // Stable colours for the stacked chart, indexed by rank position so one
+  // model keeps its colour across every day in the window.
+  var LB_COLORS = ["#4c8dff", "#3fb950", "#d29922", "#f85149", "#a371f7", "#56d4dd", "#e0912f", "#8b949e"];
+
+  function lbColor(index) {
+    return LB_COLORS[index % LB_COLORS.length];
+  }
+
+  function lbShareText(share) {
+    if (share === null || share === undefined) return "Unknown";
+    return (Number(share) * 100).toFixed(2) + "%";
+  }
+
+  // How a day with no recorded rows describes itself. Every variant leads
+  // with "no data" so an absent day can never be read as a measured zero,
+  // and none of them contains a digit that could pass for a count.
+  var LB_ABSENT_TEXT = {
+    gap: "no data — gap in the record, not zero",
+    outside_coverage: "no data — before recorded history",
+    no_rows: "no data — no rows recorded yet today",
+    unknown: "no data — record status unavailable"
+  };
+
+  function lbAbsentText(status) {
+    return LB_ABSENT_TEXT[status] || ("no data — " + status);
+  }
+
+  // Cost honesty, leaderboard edition. The headline depends on the reason,
+  // so "no published price" (a fact about the provider catalogue) never
+  // reads as "amount withheld" (a fact about incomplete data). Unknown
+  // coverage is always stated beside whatever subtotal exists.
+  var LB_COST_HEADLINE = {
+    no_published_price: "no published price",
+    no_usage_reported: "no usage to price",
+    missing_cached_tokens: "amount withheld",
+    missing_cached_price: "amount withheld",
+    invalid_usage: "amount withheld"
+  };
+
+  var LB_COST_DETAIL = {
+    no_published_price: "no published actual/list price for this provider and model — never inferred",
+    no_usage_reported: "the rollup recorded no priced usage for this model in the window",
+    missing_cached_tokens: "cached-token count not reported on some requests — amount withheld for those",
+    missing_cached_price: "price published, but not for cached reads — amount withheld",
+    invalid_usage: "recorded usage is not valid to price — amount withheld"
+  };
+
+  function lbCostCell(entry) {
+    var cost = entry.cost || {};
+    var parts = [];
+    if (cost.amount_usd === null || cost.amount_usd === undefined) {
+      var headline = LB_COST_HEADLINE[cost.cost_reason] || "no published price";
+      parts.push(el("div", { text: headline }));
+      parts.push(el("div", { class: "small muted", text: LB_COST_DETAIL[cost.cost_reason] || "no price recorded for this provider and model" }));
+      if (cost.unknown_cost_requests) {
+        parts.push(el("div", {
+          class: "small muted",
+          text: "0 of " + entry.requests + " requests priced; " + cost.unknown_cost_requests +
+            " unknown (" + tokens(cost.unknown_cost_input_tokens) + " in / " +
+            tokens(cost.unknown_cost_output_tokens) + " out)"
+        }));
+      }
+    } else {
+      parts.push(el("div", { text: "$" + Number(cost.amount_usd).toFixed(6) }));
+      if (cost.cost_incomplete) {
+        parts.push(el("div", {
+          class: "small muted",
+          text: (cost.unknown_cost_requests
+            ? "known subtotal; " + cost.unknown_cost_requests + " of " + entry.requests +
+              " requests unpriced (" + tokens(cost.unknown_cost_input_tokens) + " in / " +
+              tokens(cost.unknown_cost_output_tokens) + " out tokens)"
+            : "known subtotal; coverage incomplete")
+        }));
+      }
+    }
+    if (cost.cached_tokens_unreported) {
+      parts.push(el("div", { class: "small muted", text: "cached count missing on " + cost.cached_tokens_unreported + " request(s)" }));
+    }
+    if (cost.source) {
+      parts.push(el("div", {
+        class: "small muted",
+        text: "price source " + cost.source + " · observed " + (cost.observed_at || "date unknown")
+      }));
+    }
+    return el("td", {}, parts);
+  }
+
+  // The window-totals line under the ranking. Null counts are rendered as
+  // absent, never as zero; a known subtotal is always accompanied by its
+  // unpriced coverage and the number of models with no published price.
+  function lbTotalsText(totals) {
+    if (!totals || totals.requests === null || totals.requests === undefined) {
+      return "No recorded rows in this window: totals are absent, not zero.";
+    }
+    var parts = [
+      "Window totals: " + totals.requests + " requests · " +
+        tokens(totals.total_tokens) + " tokens (" + tokens(totals.input_tokens) +
+        " in / " + tokens(totals.output_tokens) + " out · " + tokens(totals.cached_tokens) +
+        " cached reported) · " + totals.models + " models · " + totals.fallbacks +
+        " fallbacks · " + totals.errors + " errors."
+    ];
+    if (totals.known_amount_usd === null || totals.known_amount_usd === undefined) {
+      parts.push("Known cost: nothing in this window has a published price" +
+        (totals.models_without_price
+          ? " (" + totals.models_without_price + " of " + totals.models + " models unpriced)"
+          : "") + ".");
+    } else {
+      parts.push("Known cost: $" + Number(totals.known_amount_usd).toFixed(6) +
+        (totals.cost_incomplete
+          ? " — incomplete: " + totals.unknown_cost_requests + " request(s) unpriced (" +
+            tokens(totals.unknown_cost_input_tokens) + " in / " +
+            tokens(totals.unknown_cost_output_tokens) + " out tokens)."
+          : "."));
+    }
+    if (totals.models_without_price) {
+      parts.push(totals.models_without_price + " model(s) have no published price and are never estimated.");
+    }
+    return parts.join(" ");
+  }
+
+  // The ranked table: one row per (provider, model) — the same model id on
+  // two providers is two rows, because a price never transfers.
+  function renderLeaderboardRanking(payload) {
+    var metric = payload.primary_metric || {};
+    var card = el("div", { class: "card" }, [
+      el("h2", { text: "Model leaderboard" }),
+      el("p", {
+        class: "small muted",
+        text: "Ranked by " + (metric.label || "input + output tokens") + " over " +
+          payload.days + " UTC days (" + payload.window.from + " to " + payload.window.to +
+          ", " + payload.timezone + "). " + (metric.definition || "")
+      })
+    ]);
+    if (!payload.ranked.length) {
+      card.appendChild(emptyState(
+        "No models recorded in this window",
+        "The rollup holds no rows for these days. That is absent data, not zero usage."
+      ));
+      return card;
+    }
+    var table = el("table", {}, [el("thead", {}, [el("tr", {}, [
+      el("th", { text: "Rank" }), el("th", { text: "Model" }), el("th", { text: "Provider" }),
+      el("th", { text: "Share" }), el("th", { text: "Tokens in / out / cached" }),
+      el("th", { text: "Requests" }), el("th", { text: "Fallbacks" }), el("th", { text: "Errors" }),
+      el("th", { text: "Cost" })
+    ])])]);
+    var tbody = el("tbody");
+    payload.ranked.forEach(function (entry) {
+      tbody.appendChild(el("tr", {}, [
+        el("td", { text: "#" + entry.rank }),
+        el("td", {}, [
+          el("div", { text: entry.model }),
+          entry.rank === 1 ? el("div", { class: "small muted", text: "leader" }) : null
+        ]),
+        el("td", { class: "small", text: providerLabel(entry.provider) }),
+        rateCell(entry.share),
+        el("td", { class: "small", text: tokens(entry.input_tokens) + " / " +
+          tokens(entry.output_tokens) + " / " + tokens(entry.cached_tokens) }),
+        el("td", { text: String(entry.requests) }),
+        el("td", { text: String(entry.fallbacks) }),
+        el("td", { text: String(entry.errors) }),
+        lbCostCell(entry)
+      ]));
+    });
+    table.appendChild(tbody);
+    card.appendChild(el("div", { class: "table-wrap" }, [table]));
+    card.appendChild(el("p", { class: "small muted", text: lbTotalsText(payload.totals) }));
+    return card;
+  }
+
+  // The stacked daily usage chart. Columns are UTC days, segments are
+  // models, heights are proportional to input + output tokens. A day with
+  // no recorded data is a hatched column labelled "no data" — never an
+  // empty column that would read as a measured zero.
+  function renderLeaderboardChart(payload) {
+    var metric = payload.primary_metric || {};
+    var models = payload.matrix.models;
+    var cells = payload.matrix.cells;
+    var card = el("div", { class: "card" }, [
+      el("h2", { text: "Daily usage by model" }),
+      el("p", {
+        class: "small muted",
+        text: "Stacked " + (metric.label || "input + output tokens") +
+          " per UTC day, proportional within this window. A hatched column means the day carries no recorded data — it is not a zero-usage day."
+      })
+    ]);
+    if (!models.length) {
+      card.appendChild(el("p", { class: "muted", text: "No models recorded in this window." }));
+      return card;
+    }
+    var dayTotals = cells.map(function (cell) {
+      if (!cell.values) return null;
+      return cell.values.reduce(function (sum, value) {
+        return sum + (value ? value.input_tokens + value.output_tokens : 0);
+      }, 0);
+    });
+    var maxTotal = 0;
+    dayTotals.forEach(function (total) { if (total && total > maxTotal) maxTotal = total; });
+    var chart = el("div", {
+      class: "lb-chart", role: "img",
+      "aria-label": "Stacked daily " + (metric.label || "input + output tokens") + " by model"
+    });
+    cells.forEach(function (cell, dayIndex) {
+      var known = cell.status === "ok" || cell.status === "open";
+      var column = el("div", { class: "lb-col" });
+      var area = el("div", { class: "lb-area" });
+      if (!known) {
+        area.appendChild(el("div", { class: "lb-nodata", title: lbAbsentText(cell.status) }));
+      } else if (!dayTotals[dayIndex]) {
+        // A recorded day where every model had no requests: a measured
+        // zero, drawn as a flat marker, never as a hatched column.
+        area.appendChild(el("div", { class: "lb-zero", text: "0" }));
+      } else {
+        cell.values.forEach(function (value, modelIndex) {
+          if (!value) return;
+          var modelTokens = value.input_tokens + value.output_tokens;
+          if (!modelTokens) return;
+          var entry = payload.ranked[modelIndex];
+          area.appendChild(el("div", {
+            class: "lb-seg",
+            style: "height:" + ((modelTokens / maxTotal) * 100).toFixed(2) + "%;background:" + lbColor(modelIndex),
+            title: providerLabel(entry.provider) + " → " + entry.model + ": " + modelTokens +
+              " tokens (" + value.requests + " requests)"
+          }));
+        });
+      }
+      column.appendChild(area);
+      column.appendChild(el("div", { class: "lb-day small", text: cell.day.slice(5) }));
+      column.appendChild(el("div", { class: "lb-day small muted", text: known ? (cell.status === "open" ? "in progress" : "") : "no data" }));
+      chart.appendChild(column);
+    });
+    card.appendChild(chart);
+    var legend = el("div", { class: "lb-legend small" });
+    models.forEach(function (model, index) {
+      legend.appendChild(el("span", { class: "lb-key" }, [
+        el("span", { class: "lb-swatch", style: "background:" + lbColor(index) }),
+        el("span", { text: "#" + model.rank + " " + providerLabel(model.provider) + " → " + model.model })
+      ]));
+    });
+    card.appendChild(legend);
+    return card;
+  }
+
+  // The date x model matrix: the leaderboard's core artifact. A covered
+  // day renders its measured values (0 included); a day with no recorded
+  // rows renders one explicit "no data" span — the two claims can never be
+  // confused.
+  function renderLeaderboardMatrix(payload) {
+    var models = payload.matrix.models;
+    var card = el("div", { class: "card" }, [
+      el("h2", { text: "Date × model matrix" }),
+      el("p", {
+        class: "small muted",
+        text: (payload.primary_metric.label || "input + output tokens") +
+          " per UTC day, with request counts. 0 = measured zero on a recorded day; \"no data\" = the day carries no recorded rows — a different claim, drawn differently."
+      })
+    ]);
+    if (!models.length) {
+      card.appendChild(el("p", { class: "muted", text: "No models recorded in this window." }));
+      return card;
+    }
+    var header = [el("th", { text: "Day (UTC)" }), el("th", { text: "Record" })];
+    models.forEach(function (model) {
+      header.push(el("th", {
+        text: "#" + model.rank + " " + model.model,
+        title: providerLabel(model.provider)
+      }));
+    });
+    header.push(el("th", { text: "Day total" }));
+    var table = el("table", {}, [el("thead", {}, [el("tr", {}, header)])]);
+    var body = el("tbody");
+    payload.matrix.cells.forEach(function (cell) {
+      var known = cell.status === "ok" || cell.status === "open";
+      if (!known) {
+        body.appendChild(el("tr", { class: "lb-absent" }, [
+          el("td", { class: "small", text: cell.day }),
+          el("td", {
+            class: "small", colspan: String(models.length + 2),
+            text: lbAbsentText(cell.status) + " · nothing recorded for this day, not zero"
+          })
+        ]));
+        return;
+      }
+      var rowCells = [
+        el("td", { class: "small", text: cell.day }),
+        el("td", { class: "small", text: cell.status === "open" ? "in progress" : "recorded" })
+      ];
+      var dayTotal = 0;
+      cell.values.forEach(function (value) {
+        if (!value) {
+          rowCells.push(el("td", { class: "small muted", text: "—" }));
+          return;
+        }
+        var modelTokens = value.input_tokens + value.output_tokens;
+        dayTotal += modelTokens;
+        rowCells.push(el("td", {}, [
+          el("div", { text: tokens(modelTokens) }),
+          el("div", { class: "small muted", text: value.requests + " req" })
+        ]));
+      });
+      rowCells.push(el("td", { text: tokens(dayTotal) }));
+      body.appendChild(el("tr", {}, rowCells));
+    });
+    table.appendChild(body);
+    card.appendChild(el("div", { class: "table-wrap" }, [table]));
+    return card;
+  }
+
+  // Leader vs challenger: the top two rows side by side. Both cost cells
+  // keep the full honesty treatment — an unpriced challenger never looks
+  // free.
+  function renderLeaderboardCompare(payload) {
+    var card = el("div", { class: "card" }, [el("h2", { text: "Leader vs challenger" })]);
+    if (payload.ranked.length < 2) {
+      card.appendChild(el("p", { class: "small muted", text: "At least two ranked models are needed for a comparison; this window has " + payload.ranked.length + "." }));
+      return card;
+    }
+    var leader = payload.ranked[0];
+    var challenger = payload.ranked[1];
+    var table = el("table", {}, [el("thead", {}, [el("tr", {}, [
+      el("th", { text: "Metric" }),
+      el("th", { text: "#1 " + leader.model + " (" + providerLabel(leader.provider) + ")" }),
+      el("th", { text: "#2 " + challenger.model + " (" + providerLabel(challenger.provider) + ")" })
+    ])])]);
+    var tbody = el("tbody");
+    function compareRow(label, a, b) {
+      tbody.appendChild(el("tr", {}, [
+        el("td", { text: label }), el("td", { text: a }), el("td", { text: b })
+      ]));
+    }
+    compareRow("Share of window tokens", lbShareText(leader.share), lbShareText(challenger.share));
+    compareRow("Tokens (in / out)",
+      tokens(leader.input_tokens) + " / " + tokens(leader.output_tokens),
+      tokens(challenger.input_tokens) + " / " + tokens(challenger.output_tokens));
+    compareRow("Requests", String(leader.requests), String(challenger.requests));
+    compareRow("Fallbacks", String(leader.fallbacks), String(challenger.fallbacks));
+    compareRow("Errors", String(leader.errors), String(challenger.errors));
+    tbody.appendChild(el("tr", {}, [
+      el("td", { text: "Cost" }), lbCostCell(leader), lbCostCell(challenger)
+    ]));
+    table.appendChild(tbody);
+    card.appendChild(el("div", { class: "table-wrap" }, [table]));
+    return card;
+  }
+
+  // The fallback panel, read from the same durable rollup the status page's
+  // analytics card uses (no second fetch, no recomputation): the overall
+  // rate, why fallbacks happened, and where they happened per alias.
+  function renderLeaderboardFallback() {
+    var card = el("div", { class: "card" }, [el("h2", { text: "Fallback rate" }),
+      el("p", { class: "small muted", text: "From the same durable rollup as the ranking above. Metadata only; no prompts, responses, tokens or secrets are stored. The full breakdown lives on the Status page." })
+    ]);
+    var analytics = state && state.analytics;
+    if (!analytics || !analytics.available) {
+      card.appendChild(el("p", {
+        class: "small muted",
+        text: (analytics && analytics.unavailable_reason === "durable_rollup_disabled")
+          ? "Durable fallback analytics are unavailable: request-ledger persistence is off, so there is no daily rollup to read."
+          : "Durable fallback analytics are unavailable: " + ((analytics && analytics.unavailable_reason) || "the state payload has no analytics") + ". Missing data is reported, never filled in."
+      }));
+      return card;
+    }
+    var fallback = analytics.fallback || {};
+    var overall = fallback.overall || { requests: 0, fallbacks: 0, fallback_rate: null, fallback_reasons: [] };
+    card.appendChild(el("p", {
+      class: "small muted",
+      text: "Rollup window " + ((analytics.window && analytics.window.from) || "unknown") +
+        " to " + ((analytics.window && analytics.window.to) || "unknown") +
+        " (" + (analytics.days || 0) + " days, UTC)."
+    }));
+    card.appendChild(el("div", { class: "row" }, [
+      statBox("Requests", overall.requests || 0),
+      statBox("Fallbacks", overall.fallbacks || 0),
+      statBox("Fallback rate", percentText(overall.fallback_rate))
+    ]));
+    var reasons = overall.fallback_reasons || [];
+    if (!reasons.length) {
+      card.appendChild(el("p", { class: "small muted", text: "No fallbacks were recorded in this window." }));
+      return card;
+    }
+    card.appendChild(el("h3", { text: "By reason" }));
+    var reasonTable = el("table", {}, [el("thead", {}, [el("tr", {}, [
+      el("th", { text: "Reason" }), el("th", { text: "Fallbacks" }), el("th", { text: "Share of fallbacks" })
+    ])])]);
+    var reasonBody = el("tbody");
+    reasons.forEach(function (entry) {
+      reasonBody.appendChild(el("tr", {}, [
+        el("td", { text: fallbackReasonLabel(entry.reason) }),
+        el("td", { text: String(entry.count) }),
+        el("td", { text: entry.share == null ? "Unknown" : (Number(entry.share) * 100).toFixed(1) + "%" })
+      ]));
+    });
+    reasonTable.appendChild(reasonBody);
+    card.appendChild(reasonTable);
+    var aliasKeys = Object.keys(fallback.alias || {}).sort();
+    if (aliasKeys.length) {
+      card.appendChild(el("h3", { text: "By alias" }));
+      var aliasTable = el("table", {}, [el("thead", {}, [el("tr", {}, [
+        el("th", { text: "Alias" }), el("th", { text: "Requests" }),
+        el("th", { text: "Fallbacks" }), el("th", { text: "Fallback rate" })
+      ])])]);
+      var aliasBody = el("tbody");
+      aliasKeys.forEach(function (key) {
+        var row = fallback.alias[key];
+        aliasBody.appendChild(el("tr", {}, [
+          el("td", { text: key }),
+          el("td", { text: String(row.requests) }),
+          el("td", { text: String(row.fallbacks) }),
+          rateCell(row.fallback_rate)
+        ]));
+      });
+      aliasTable.appendChild(aliasBody);
+      card.appendChild(aliasTable);
+    }
+    return card;
+  }
+
+  // The methodology panel: the window, the UTC convention, which token
+  // kinds are counted, where the prices come from, and how absent data and
+  // unpriced models are treated. It cites the real price-source URLs the
+  // payload carries — observed counters plus published sources, which is a
+  // stronger claim than opencode.ai/data's list-price estimates.
+  function renderLeaderboardMethodology(payload) {
+    var card = el("div", { class: "card" }, [el("h2", { text: "Methodology" })]);
+    var metric = payload.primary_metric || {};
+    var coverage = payload.coverage || {};
+    var bullets = [
+      "Window: the last " + payload.days + " UTC days, " + payload.window.from +
+        " to " + payload.window.to + ". Days are UTC boundaries; the final day is " +
+        (payload.matrix.days.length && payload.matrix.days[payload.matrix.days.length - 1].status === "open"
+          ? "in progress and will keep changing."
+          : "complete."),
+      "Source: the durable daily rollup (" + (payload.schema || "daily-rollup/v1") +
+        ", 30-day retention, rebuilt from the metadata request ledger on every start), " +
+        "aggregated from (day, alias, provider, model) rows onto (day, provider, model). " +
+        "Rollup generated at " + (payload.generated_at || "unknown") + ".",
+      "Ranking metric: " + (metric.label || "input + output tokens") + ". " + (metric.definition || ""),
+      "Tokens counted: input, output and cached exactly as the provider reported them. " +
+        "The gateway does not tokenize; it reports observed counters. Cached tokens are a " +
+        "subset of input tokens and are never counted a second time. No separate reasoning-" +
+        "token counter exists in the ledger, and none is invented here.",
+      "Cost: dollars are computed at read time from published catalogue prices, each with a " +
+        "real source URL and observation date (cited below), applied to the observed token " +
+        "counters. That is stronger than list-price estimation, but it is still an estimate " +
+        "of gateway spend — not a provider bill.",
+      "A model with no published price renders as \"no published price\" and is excluded from " +
+        "known subtotals — never as $0.00. A price is never transferred across providers: the " +
+        "same model id on two providers is two rows with two independent prices.",
+      "Absent data: every day carries a record status. A day outside recorded coverage, or " +
+        "with no rows, renders as \"no data\"; only a recorded day where a model genuinely had " +
+        "no requests carries a measured 0. The two are drawn differently on purpose.",
+      "Fallbacks are counted from the router's recorded fallback events, with reasons folded " +
+        "to a closed vocabulary (cooldown, route_ineligible, upstream_failure, other, unknown). " +
+        "A configured phase route is a choice, not a fallback, and is never counted as one.",
+      "Dimensions: model, provider, alias, fallback reason and cost. This is a single-owner " +
+        "private appliance — there are no user, session or geo dimensions to show."
+    ];
+    if (coverage.first_row_ts) {
+      bullets.splice(1, 0, "Recorded history begins " + coverage.first_row_ts +
+        (coverage.incomplete
+          ? "; coverage is incomplete — some ledger rows could not be represented."
+          : "; every retained row in the window is represented."));
+    }
+    var gaps = payload.gaps || [];
+    if (gaps.length) {
+      bullets.push("Gaps in this window: " + gaps.join(", ") +
+        " — drawn as no data, never as zero usage.");
+    }
+    var list = el("ul", { class: "lb-methodology small" });
+    bullets.forEach(function (text) {
+      list.appendChild(el("li", { text: text }));
+    });
+    card.appendChild(list);
+    var sources = {};
+    (payload.ranked || []).forEach(function (entry) {
+      var cost = entry.cost || {};
+      if (cost.source) sources[cost.source + "|" + (cost.observed_at || "")] = cost;
+    });
+    var sourceKeys = Object.keys(sources).sort();
+    card.appendChild(el("h3", { text: "Price sources cited in this window" }));
+    if (!sourceKeys.length) {
+      card.appendChild(el("p", {
+        class: "small muted",
+        text: "No model in this window has a published price, so no price source is cited — and none is invented."
+      }));
+    } else {
+      sourceKeys.forEach(function (key) {
+        card.appendChild(el("p", { class: "small", text: sources[key].source + " · observed " + (sources[key].observed_at || "date unknown") }));
+      });
+    }
+    return card;
+  }
+
+  function loadLeaderboard() {
+    if (leaderboardPhase === "loading") return;
+    leaderboardPhase = "loading";
+    leaderboardError = null;
+    api(BASE + "/api/leaderboard?days=" + encodeURIComponent(leaderboardWindow))
+      .then(function (payload) {
+        leaderboardPayload = payload;
+        leaderboardPhase = "ready";
+        if (tab === "leaderboard") draw();
+      })
+      .catch(function (error) {
+        leaderboardPhase = "error";
+        leaderboardError = error.message || String(error);
+        if (tab === "leaderboard") draw();
+      });
+  }
+
+  function renderLeaderboard() {
+    var frag = document.createDocumentFragment();
+    var header = el("div", { class: "card" }, [el("h2", { text: "Model leaderboard" })]);
+    var selector = el("select", {
+      "aria-label": "Leaderboard window (UTC days)",
+      onchange: function () {
+        leaderboardWindow = Number(selector.value);
+        leaderboardPayload = null;
+        leaderboardPhase = "idle";
+        draw();
+      }
+    });
+    LB_WINDOW_OPTIONS.forEach(function (days) {
+      selector.appendChild(el("option", {
+        value: String(days),
+        selected: leaderboardWindow === days,
+        text: "Last " + days + " days (UTC)"
+      }));
+    });
+    header.appendChild(el("div", { class: "row" }, [
+      el("span", { class: "small muted", text: "Window" }),
+      el("div", { class: "narrow" }, [selector]),
+      el("button", {
+        type: "button",
+        onclick: function () { leaderboardPayload = null; leaderboardPhase = "idle"; draw(); }
+      }, ["Refresh"])
+    ]));
+    header.appendChild(el("p", {
+      class: "small muted",
+      text: "Private owner view, served from this console's own /api/leaderboard route. " +
+        "Aggregates only — no request identifiers, prompts, responses or credentials."
+    }));
+    frag.appendChild(el("section", {}, [header]));
+
+    if (leaderboardPhase === "idle") loadLeaderboard();
+    if (!leaderboardPayload || leaderboardPhase === "idle" || leaderboardPhase === "loading") {
+      frag.appendChild(el("section", {}, [el("p", { class: "muted", text: "Loading leaderboard…" })]));
+      return frag;
+    }
+    if (leaderboardPhase === "error") {
+      frag.appendChild(el("section", {}, [el("div", { class: "card" }, [
+        el("h2", { text: "Leaderboard unavailable" }),
+        el("p", { class: "small", text: "The leaderboard endpoint did not answer: " + leaderboardError }),
+        el("button", {
+          type: "button",
+          onclick: function () { leaderboardPhase = "idle"; draw(); }
+        }, ["Retry"])
+      ])]));
+      return frag;
+    }
+    var payload = leaderboardPayload;
+    if (!payload.available) {
+      frag.appendChild(el("section", {}, [emptyState(
+        "Leaderboard unavailable: " + (payload.unavailable_reason || "unknown reason"),
+        "The durable rollup is not readable right now, so nothing is ranked. Missing data is reported, never filled in. The Status page's live totals still reflect this process."
+      )]));
+      return frag;
+    }
+    frag.appendChild(el("section", {}, [renderLeaderboardRanking(payload)]));
+    frag.appendChild(el("section", {}, [renderLeaderboardChart(payload)]));
+    frag.appendChild(el("section", {}, [renderLeaderboardMatrix(payload)]));
+    frag.appendChild(el("section", {}, [renderLeaderboardCompare(payload)]));
+    frag.appendChild(el("section", {}, [renderLeaderboardFallback()]));
+    frag.appendChild(el("section", {}, [renderLeaderboardMethodology(payload)]));
+    return frag;
+  }
 
   // --- providers --------------------------------------------------------
 
@@ -1843,6 +2447,23 @@
           return renderSettings();
         } finally {
           state = previous;
+        }
+      },
+      renderLeaderboardForTest: function (payload, view) {
+        // A test hands the tab a payload directly; the phase is forced to
+        // "ready" so rendering never triggers a fetch in Node.
+        var previousState = state;
+        var previousPayload = leaderboardPayload;
+        var previousPhase = leaderboardPhase;
+        state = view === undefined ? previousState : view;
+        leaderboardPayload = payload;
+        leaderboardPhase = "ready";
+        try {
+          return renderLeaderboard();
+        } finally {
+          state = previousState;
+          leaderboardPayload = previousPayload;
+          leaderboardPhase = previousPhase;
         }
       }
     };

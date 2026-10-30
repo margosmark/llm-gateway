@@ -157,6 +157,19 @@ are different claims. The route sits on the same mounts and passes the same
 Host/Origin/forwarded-header checks as every other owner route: no new
 listener, no public exposure, no auth change.
 
+The owner console's **Leaderboard** tab consumes this route. It is plain
+JavaScript in `static/console.js` (no framework, no build step, no CDN
+dependency) and fetches `/api/leaderboard` only when the tab is opened, so
+the `/owner/api/state` poll keeps its sub-2s bar. It renders the ranked
+table, a stacked daily usage chart (CSS-only, palette-indexed by rank), the
+date x model matrix, a leader-vs-challenger comparison, a compact
+fallback-rate panel fed from the state payload's analytics block, and a
+methodology panel. Two rendering invariants are regression-tested in
+`tests/console_dom_test.js`: a `null` `amount_usd` renders as "no
+published price" and never as `$0.00`, and a day whose matrix row is
+`null` renders as a hatched "no data" column in the chart and a single
+status span in the matrix — never as a zero bar or a 0-value row.
+
 The owner console can export recent ledger rows as CSV or JSON through a
 read-only endpoint; exports are bounded to 1,000 rows, allow-list only the
 six ledger-table fields, and pass values through the same redaction rules
