@@ -751,6 +751,44 @@ class RunnerBoundsTests(unittest.TestCase):
         self.assertEqual(outcome.request_count, 2)
         self.assertIsNone(outcome.blocked_reason)
 
+    def test_an_unexpected_transport_exception_fails_closed_with_evidence(self):
+        """Whatever escapes the transport is inconclusive evidence, not a 500.
+
+        A cancellation or deadline landing inside an active read can
+        surface from inside the HTTP stack as an error no clause names -
+        QA re-gate F3 caught an ``AttributeError`` escaping the runner to
+        the owner API as an unclassified 500, with the confirmation
+        consumed and no run recorded. The runner fails closed instead: the
+        probe is inconclusive, the stop reason is honest, and there is
+        evidence to record.
+        """
+        transport = _failing_transport(
+            AttributeError("'NoneType' object has no attribute 'close'")
+        )
+        outcome = run_suite(PROTOCOL, ALL_PROBES, transport)
+        self.assertEqual(outcome.request_count, 1)
+        self.assertEqual(outcome.blocked_reason, "prior_failure")
+        by_capability = {row["capability"]: row for row in outcome.results}
+        self.assertEqual(by_capability["text_generation"]["status"], "inconclusive")
+        self.assertEqual(by_capability["text_generation"]["error_class"], "transport")
+        self.assertEqual(by_capability["image_input"]["status"], "not_tested")
+        self.assertEqual(by_capability["function_tools"]["status"], "not_tested")
+
+    def test_an_unexpected_exception_during_a_cancellation_still_reports_it(self):
+        """An escape after a cancel is reported as the cancellation it was."""
+        cancel = threading.Event()
+
+        class CancelThenEscape(_ScriptedTransport):
+            def __call__(self, payload, **kwargs):
+                cancel.set()
+                raise AttributeError("response raced the cancellation")
+
+        outcome = run_suite(PROTOCOL, ALL_PROBES, CancelThenEscape([]), cancel_event=cancel)
+        self.assertTrue(outcome.cancelled)
+        self.assertEqual(outcome.blocked_reason, "cancelled")
+        by_capability = {row["capability"]: row for row in outcome.results}
+        self.assertEqual(by_capability["text_generation"]["status"], "inconclusive")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 import unittest
 from typing import ClassVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,10 +49,16 @@ class _Handler(BaseHTTPRequestHandler):
     error_status = 0
     error_body = b""
     sse_body = b""
+    stall_seconds = 0.0
 
     def do_GET(self):
         type(self).requests += 1
         type(self).connections.add(self.client_address[1])
+        if type(self).stall_seconds:
+            # Accept the request, then withhold the answer: the client sits
+            # in its response-head read until its own budget or watchdog
+            # ends it.
+            time.sleep(type(self).stall_seconds)
         if type(self).redirect:
             self.send_response(302)
             self.send_header("Location", "/secret-target")
@@ -139,6 +146,7 @@ class UpstreamConnectionPoolTests(unittest.TestCase):
         _Handler.error_status = 0
         _Handler.error_body = b""
         _Handler.sse_body = b""
+        _Handler.stall_seconds = 0.0
 
     # --- reuse ---------------------------------------------------------
 
@@ -371,6 +379,132 @@ class UpstreamConnectionPoolTests(unittest.TestCase):
                 )
             self.assertNotIn("synthetic-secret", str(caught.exception))
             self.assertEqual(len(client._pool), 0, "a failed connection is never pooled")
+        finally:
+            client.close()
+
+    # --- bookkeeping ----------------------------------------------------
+
+    def test_failed_requests_do_not_leak_the_active_set(self):
+        """Every failure path drops its connection from the active set.
+
+        ``_active`` exists so ``close()`` can reach sockets still in
+        flight; a connection left in it by a *failed* request is never
+        removed again, so a long-lived adapter client would accumulate one
+        dead entry per failure (QA re-gate: 10 refused requests left 10
+        entries; base had no such set).
+        """
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        refused_port = probe.getsockname()[1]
+        probe.close()
+        client = UpstreamClient(timeout=2.0, connect_timeout=2.0)
+        try:
+            # A connection that is refused outright: the failure happens
+            # inside _open, before any response exists.
+            for _ in range(5):
+                with self.assertRaises(AdapterError):
+                    client.request(
+                        "GET", f"http://127.0.0.1:{refused_port}/", {}, provider_id="p"
+                    )
+            # A connection that is accepted and then answered too late: the
+            # failure happens in the response phase, after the socket was
+            # published to the active set.
+            _Handler.stall_seconds = 4.0
+            for _ in range(2):
+                with self.assertRaises(AdapterError):
+                    client.request(
+                        "GET",
+                        self.url,
+                        {},
+                        provider_id="p",
+                        max_body_bytes=1024,
+                        deadline=time.monotonic() + 1.0,
+                    )
+            self.assertEqual(
+                len(client._active),
+                0,
+                "a failed request left its connection in the active set",
+            )
+        finally:
+            client.close()
+
+    def test_a_finished_stream_watch_never_interrupts_a_later_request(self):
+        """A completed stream's deadline watch must die with the stream.
+
+        A streamed response is consumed after the call that opened it
+        returns, so its deadline/cancellation watch deliberately outlives
+        that call - but only until the stream ends. Left running, the
+        watch fires its (absolute) deadline long after the stream
+        completed and ``shutdown()``s the socket it remembers, which by
+        then belongs to an unrelated request that re-acquired the same
+        pooled connection: an innocent request dies of another request's
+        deadline.
+        """
+        _Handler.sse_body = b'data: {"ok":true}\n\ndata: [DONE]\n\n'
+        client = UpstreamClient(timeout=5.0)
+        try:
+            response = client.request(
+                "GET", self.url, {}, stream=True, deadline=time.monotonic() + 1.0
+            )
+            self.assertIsNotNone(response.stream)
+            self.assertEqual(b"".join(response.stream or []), _Handler.sse_body)
+            self.assertEqual(len(client._active), 0, "a finished stream must leave the active set")
+            # The next request is unrelated: no deadline, no cancellation.
+            # It is in flight across the moment the first request's stale
+            # deadline fires, and must not be touched.
+            _Handler.sse_body = b""
+            _Handler.stall_seconds = 2.5
+            time.sleep(0.3)
+            started = time.monotonic()
+            later = client.request("GET", self.url, {})
+            elapsed = time.monotonic() - started
+            self.assertEqual(later.body, b'{"ok":true}')
+            self.assertGreaterEqual(
+                elapsed,
+                2.0,
+                f"the second request ended after {elapsed:.2f}s: its socket was interrupted",
+            )
+            remaining = [
+                thread
+                for thread in threading.enumerate()
+                if thread.name.startswith("upstream-watch")
+            ]
+            self.assertEqual(remaining, [], "a finished stream left its watch thread running")
+        finally:
+            client.close()
+
+    def test_watch_threads_do_not_outlive_their_requests(self):
+        """A deadline watch stops when its request ends - buffered or streamed.
+
+        The watch polls for as long as its request is alive; a request
+        that returns without stopping it leaks a polling thread forever
+        (one per streamed request).
+        """
+
+        def watches() -> list[threading.Thread]:
+            return [
+                thread
+                for thread in threading.enumerate()
+                if thread.name.startswith("upstream-watch")
+            ]
+
+        _Handler.sse_body = b'data: {"ok":true}\n\ndata: [DONE]\n\n'
+        client = UpstreamClient(timeout=5.0)
+        try:
+            before = len(watches())
+            client.request("GET", self.url, {}, deadline=time.monotonic() + 30.0)
+            streamed = client.request(
+                "GET", self.url, {}, stream=True, deadline=time.monotonic() + 30.0
+            )
+            b"".join(streamed.stream or [])
+            give_up = time.monotonic() + 2.0
+            while len(watches()) > before and time.monotonic() < give_up:
+                time.sleep(0.05)
+            self.assertEqual(
+                len(watches()),
+                before,
+                "a finished request left its watchdog thread polling",
+            )
         finally:
             client.close()
 

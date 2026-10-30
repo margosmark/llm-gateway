@@ -315,6 +315,24 @@ class UpstreamClient:
     def closed(self) -> bool:
         return self._pool.closed
 
+    def _discard(self, connection: http.client.HTTPConnection) -> None:
+        """Drop a connection from the active set."""
+        with self._active_lock:
+            self._active.discard(connection)
+
+    def _release(self, key: tuple[str, str, int], connection: http.client.HTTPConnection, reusable: bool) -> None:
+        """Return a checked-out connection to the pool - and leave no trace.
+
+        Every release point goes through here, so a connection can never
+        outlive its request in ``_active``. That set exists so
+        :meth:`close` can reach sockets still in flight; an entry left
+        behind by a *failed* request would never be removed again, and a
+        long-lived adapter client would accumulate one dead entry per
+        failure.
+        """
+        self._discard(connection)
+        self._pool.release(key, connection, reusable)
+
     def _connection_key(self, url: str) -> tuple[tuple[str, str, int], str, str]:
         parsed = urllib.parse.urlsplit(url)
         scheme = parsed.scheme.lower()
@@ -426,9 +444,13 @@ class UpstreamClient:
                 # had one.
                 sock.settimeout(self.timeout)
         except AdapterError:
+            # The connection was published to the active set the moment it
+            # was checked out; a failure here must not leave it there.
+            self._discard(connection)
             connection.close()
             raise
         except (OSError, http.client.HTTPException):
+            self._discard(connection)
             connection.close()
             raise
         return key, connection, response
@@ -517,6 +539,15 @@ class UpstreamClient:
     ) -> UpstreamResponse:
         self._probe_deadline = deadline
         stop_watch = threading.Event()
+        # The watchdog may outlive the call that started it - a streamed
+        # response is consumed after this function returns - so it tracks
+        # whether this request still *owns* the socket it may interrupt.
+        # "Finished" is set before the connection is released, under the
+        # same lock the watchdog checks, so a watch that outlives its
+        # request can never shutdown() a socket that a later request has
+        # since taken from the pool.
+        watch_lock = threading.Lock()
+        finished = False
         # The connection and the response are published here as soon as they
         # exist rather than read from the locals below: the watchdog starts
         # before _open runs, and a watchdog that touched a not-yet-assigned
@@ -541,6 +572,19 @@ class UpstreamClient:
                 return checked_out[0].sock
             return None
 
+        def _retire() -> None:
+            """End this request's ownership of its socket, then stop the watch.
+
+            Called by every exit that finishes a request - including the
+            stream's end, which happens after this function returned. It
+            must run *before* the connection is released, so the watchdog
+            can never interrupt a socket this request no longer holds.
+            """
+            nonlocal finished
+            with watch_lock:
+                finished = True
+                stop_watch.set()
+
         def _interrupt() -> None:
             # A plain ``close()`` does not wake a ``recv()`` that another
             # thread has already blocked in: on Linux the reader stayed
@@ -561,15 +605,24 @@ class UpstreamClient:
             # shut down by mistake is discarded by the pool before it is
             # ever handed out again, because a shutdown socket is readable
             # with a pending EOF.
-            sock = _response_socket()
-            if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    # Not connected (yet), already gone, or already shut
-                    # down: the watch keeps polling, so a connection that
-                    # appears later in the same request is still covered.
-                    pass
+            #
+            # Ownership is re-checked under the watch's own lock, against
+            # the same flag :meth:`_retire` sets before releasing: a watch
+            # whose request already finished must not touch the socket
+            # again, because by then it may belong to an unrelated request
+            # that re-acquired this connection from the pool.
+            with watch_lock:
+                if finished:
+                    return
+                sock = _response_socket()
+                if sock is not None:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        # Not connected (yet), already gone, or already shut
+                        # down: the watch keeps polling, so a connection that
+                        # appears later in the same request is still covered.
+                        pass
 
         def _remember(checked: http.client.HTTPConnection) -> None:
             checked_out[:] = [checked]
@@ -586,7 +639,11 @@ class UpstreamClient:
                     if cancelled or expired:
                         _interrupt()
                     stop_watch.wait(0.05)
-            threading.Thread(target=interrupt_when_needed, daemon=True).start()
+            threading.Thread(
+                target=interrupt_when_needed,
+                name=f"upstream-watch-{provider_id or 'client'}",
+                daemon=True,
+            ).start()
 
         try:
             key, connection, raw = self._open(
@@ -631,16 +688,19 @@ class UpstreamClient:
         checked_out[:] = [connection]
         served[:] = [raw]
 
-        headers_map = {name.lower(): value for name, value in raw.getheaders()}
-        # A 2xx is assumed to be JSON unless it says otherwise. Anything else
-        # is not assumed to carry a body of any particular kind at all.
-        content_type = (
-            headers_map.get("content-type", "application/json")
-            if 200 <= raw.status < 300
-            else headers_map.get("content-type", "")
-        )
-
         try:
+            headers_map = {name.lower(): value for name, value in raw.getheaders()}
+            # A 2xx is assumed to be JSON unless it says otherwise. Anything
+            # else is not assumed to carry a body of any particular kind at
+            # all. All of it sits inside the try so that *any* failure -
+            # including one no clause below anticipated - retires the watch
+            # and releases the connection before it can propagate.
+            content_type = (
+                headers_map.get("content-type", "application/json")
+                if 200 <= raw.status < 300
+                else headers_map.get("content-type", "")
+            )
+
             if cancel_event is not None and cancel_event.is_set():
                 # The run was cancelled while the head of the response was
                 # arriving: an answer to a run that no longer exists must not
@@ -675,16 +735,24 @@ class UpstreamClient:
                     # capped or cancelled redirect body must not fail the
                     # refusal of a request that never used it.
                     payload = b""
-                stop_watch.set()
-                self._pool.release(key, connection, False)
+                _retire()
+                self._release(key, connection, False)
                 return UpstreamResponse(raw.status, headers_map, payload, None, content_type)
 
             if stream and 200 <= raw.status < 300:
                 # The watchdog deliberately stays armed here: a streamed
                 # response outlives this call, and cancelling or reaching
-                # the deadline must still be able to interrupt it.
+                # the deadline must still be able to interrupt it. Its
+                # retirement is the stream's own end, handed down as the
+                # finish callback - left running, the watch would fire its
+                # deadline long after the stream completed, against a socket
+                # that by then serves some other request.
                 return UpstreamResponse(
-                    raw.status, headers_map, None, self._iter_response(key, connection, raw), content_type
+                    raw.status,
+                    headers_map,
+                    None,
+                    self._iter_response(key, connection, raw, on_finish=_retire),
+                    content_type,
                 )
 
             # Everything not streamed above is buffered, and that includes a
@@ -704,29 +772,42 @@ class UpstreamClient:
                     provider_id=provider_id,
                 )
         except AdapterError:
-            stop_watch.set()
-            self._pool.release(key, connection, False)
+            _retire()
+            self._release(key, connection, False)
             raise
         except TimeoutError:
-            stop_watch.set()
-            self._pool.release(key, connection, False)
+            _retire()
+            self._release(key, connection, False)
             raise AdapterError(
                 ERROR_TRANSIENT,
                 "the provider did not send the full response within the configured timeout",
                 provider_id=provider_id,
             ) from None
         except (OSError, http.client.HTTPException):
-            stop_watch.set()
-            self._pool.release(key, connection, False)
+            _retire()
+            self._release(key, connection, False)
             raise AdapterError(
                 ERROR_TRANSIENT, "the provider connection was interrupted", provider_id=provider_id
             ) from None
+        except Exception as exc:
+            # A read raced by a watchdog shutdown can surface from inside
+            # ``http.client`` as an error no clause above names - a bare
+            # AttributeError from a half-closed response, for one. Anything
+            # like that is a transport failure by definition: it is reported
+            # as one, with the class preserved for the evidence trail,
+            # instead of escaping to the caller as an unhandled error that
+            # would take an owner-facing run down with it.
+            _retire()
+            self._release(key, connection, False)
+            raise AdapterError(
+                ERROR_TRANSIENT,
+                f"the provider connection was interrupted ({exc.__class__.__name__})",
+                provider_id=provider_id,
+            ) from exc
         # The whole body has been read, so the connection is clean and may
         # serve the next request unless the peer asked us not to reuse it.
-        stop_watch.set()
-        with self._active_lock:
-            self._active.discard(connection)
-        self._pool.release(key, connection, not raw.will_close)
+        _retire()
+        self._release(key, connection, not raw.will_close)
 
         return UpstreamResponse(raw.status, headers_map, payload, None, content_type)
 
@@ -791,7 +872,11 @@ class UpstreamClient:
             return
 
     def _iter_response(
-        self, key: tuple[str, str, int], connection: http.client.HTTPConnection, response: http.client.HTTPResponse
+        self,
+        key: tuple[str, str, int],
+        connection: http.client.HTTPConnection,
+        response: http.client.HTTPResponse,
+        on_finish: Callable[[], None] | None = None,
     ) -> Iterator[bytes]:
         """Stream SSE frames, returning the connection when the stream ends.
 
@@ -799,13 +884,22 @@ class UpstreamClient:
         of the stream on its own. A stall, an interrupted read, or a caller
         that stops consuming all leave bytes in flight, and a connection
         with bytes in flight is never handed to another request.
+
+        *on_finish* runs first on every exit - normal end, interruption, or
+        the caller abandoning the iterator - because it is what retires the
+        request's deadline/cancellation watch. Retiring before releasing
+        keeps the order the watchdog depends on: by the time this connection
+        can be handed to another request, the watch that may ``shutdown()``
+        its socket has already been stopped.
         """
         reusable = False
         try:
             yield from self._iter_sse(response)
             reusable = not response.will_close
         finally:
-            self._pool.release(key, connection, reusable)
+            if on_finish is not None:
+                on_finish()
+            self._release(key, connection, reusable)
 
 
 def parse_json_body(body: bytes | None) -> Any:
