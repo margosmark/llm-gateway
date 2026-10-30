@@ -136,6 +136,27 @@ interpreted. A rate with no requests behind it is `null`, never `0.0`. The
 console renders this as a fallback card and a day selector on the usage
 table; both state plainly that the data is metadata only.
 
+`GET /owner/api/leaderboard` is a second, read-only owner route carrying the
+model leaderboard (`gateway.leaderboard.build_leaderboard`). The rollup
+already stores one row per (day, alias, provider, model); this endpoint
+projects those rows onto **(day, provider, model)** — aliases summed — and
+ranks models over the same `?days=N` window by the stated primary metric,
+input + output tokens (cached tokens are a subset of input and are never
+counted twice), with each entry's `share` of the window total, its requests,
+fallbacks, errors and its cost block. It exists as a separate route instead
+of a block inside `/owner/api/state` so the console poll keeps its
+sub-2s bar (R56); both handlers materialise the in-memory rollup and the
+published-price catalogue exactly once per request, and neither opens the
+ledger file. Cost runs through `gateway.costs.aggregate_rollup_rows` per
+provider slice, so an unpriced model keeps `amount_usd: null` with its
+`cost_reason` and unknown token coverage, and a price can never cross a
+provider boundary. Every day in the window carries a status
+(`ok`/`open`/`no_rows`/`gap`/`outside_coverage`/`unknown`), and a matrix row
+for a day with no recorded data is `null` — a measured zero and "no data"
+are different claims. The route sits on the same mounts and passes the same
+Host/Origin/forwarded-header checks as every other owner route: no new
+listener, no public exposure, no auth change.
+
 The owner console can export recent ledger rows as CSV or JSON through a
 read-only endpoint; exports are bounded to 1,000 rows, allow-list only the
 six ledger-table fields, and pass values through the same redaction rules
