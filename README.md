@@ -503,6 +503,20 @@ with every row, and a day without recorded data carries its own status
 zeros. The payload aggregates only: no request identifier, prompt, response,
 credential, or dimension the gateway does not have.
 
+The console's **Leaderboard** tab renders that payload: the ranked table
+with share %, requests and the honest cost cell, a stacked daily usage
+chart, the date x model matrix, a leader-vs-challenger comparison, a
+fallback-rate panel (overall rate, reasons and the per-alias split, from
+the same rollup the Status page's analytics card reads) and a
+methodology panel stating the window, the UTC convention, which token
+kinds are counted and where every price comes from — citing the real
+price-source URLs and observation dates the payload carries. The tab
+fetches `/api/leaderboard` only when it is opened, so the `/owner/api/state`
+poll is untouched. Absent days are hatched in the chart and spanned in the
+matrix as **"no data"**; a measured zero renders as `0` — the two are drawn
+differently on purpose — and an unpriced model always reads **"no published
+price"**, never `$0.00`.
+
 Export the recent ledger from the owner console's read-only
 `/owner/api/ledger/export` endpoint; it returns CSV by default or JSON with
 `?format=json`, bounded to 1,000 rows (default 500). Only the six metadata

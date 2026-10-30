@@ -589,6 +589,338 @@ check("the fallback warning keeps its generic sentence and adds the classes", fu
   assert(source.includes('role: "primary"'));
 });
 
+// --- the leaderboard tab against a fixture payload -----------------------
+//
+// The leaderboard must render what GET /owner/api/leaderboard actually
+// reports, and its three honesty rules are regression-tested here:
+//   1. amount_usd null renders as "no published price", never $0.00;
+//   2. a day with no recorded rows renders as "no data" in the chart and
+//      the matrix — never as a zero bar or a 0-value row;
+//   3. null window totals render as absent, not zero.
+// The fixture mirrors the shape gateway.leaderboard.build_leaderboard
+// emits, including the real gpt-6.1-terra case (507 requests, no price).
+
+const LB_PRICE_SOURCE = "https://opencode.ai/docs/go/";
+
+function lbCost(overrides) {
+  return Object.assign({
+    amount_usd: null, cost_reason: "no_published_price", cost_incomplete: true,
+    source: null, observed_at: null,
+    known_cost_requests: 0, unknown_cost_requests: 0,
+    unknown_cost_input_tokens: 0, unknown_cost_output_tokens: 0,
+    cached_tokens_unreported: 0
+  }, overrides || {});
+}
+
+function lbValues(requests, input, output, cached, fallbacks, errors) {
+  return {
+    requests: requests, input_tokens: input, output_tokens: output,
+    cached_tokens: cached, fallbacks: fallbacks, errors: errors
+  };
+}
+
+function fixtureLeaderboard() {
+  return {
+    available: true, unavailable_reason: null,
+    source: "durable", schema: "daily-rollup/v1", generated_at: "2026-10-30T04:00:00Z",
+    coverage: { first_row_ts: "2026-10-27T01:00:00Z", incomplete: false },
+    days: 7, window: { from: "2026-10-24", to: "2026-10-30" }, timezone: "UTC",
+    primary_metric: {
+      key: "total_tokens", label: "input + output tokens",
+      definition: "input_tokens + output_tokens summed over the window; cached tokens are a subset of input tokens and are never counted a second time. Rank ties break on requests, then provider, then model."
+    },
+    gaps: ["2026-10-26"],
+    totals: {
+      requests: 712, input_tokens: 30600000, output_tokens: 1500000, cached_tokens: 50000,
+      fallbacks: 11, errors: 2, total_tokens: 32100000, models: 2, models_without_price: 1,
+      known_amount_usd: 0.0042, cost_incomplete: true, unknown_cost_requests: 607,
+      unknown_cost_input_tokens: 30300000, unknown_cost_output_tokens: 1400000
+    },
+    ranked: [
+      {
+        rank: 1, provider: "chatgpt_codex", model: "gpt-6.1-terra",
+        requests: 607, input_tokens: 30300000, output_tokens: 1400000, cached_tokens: 0,
+        total_tokens: 31700000, share: 0.987539, fallbacks: 2, errors: 0,
+        cost: lbCost({
+          cost_reason: "no_published_price", unknown_cost_requests: 607,
+          unknown_cost_input_tokens: 30300000, unknown_cost_output_tokens: 1400000
+        })
+      },
+      {
+        rank: 2, provider: "opencode_go", model: "mimo-v2.6-flash",
+        requests: 105, input_tokens: 300000, output_tokens: 100000, cached_tokens: 50000,
+        total_tokens: 400000, share: 0.012461, fallbacks: 9, errors: 2,
+        cost: lbCost({
+          amount_usd: 0.0042, cost_reason: null, known_cost_requests: 105,
+          unknown_cost_requests: 0, cost_incomplete: false,
+          source: LB_PRICE_SOURCE, observed_at: "2026-10-29"
+        })
+      }
+    ],
+    matrix: {
+      models: [
+        { rank: 1, provider: "chatgpt_codex", model: "gpt-6.1-terra" },
+        { rank: 2, provider: "opencode_go", model: "mimo-v2.6-flash" }
+      ],
+      days: [
+        { day: "2026-10-24", status: "outside_coverage" },
+        { day: "2026-10-25", status: "outside_coverage" },
+        { day: "2026-10-26", status: "gap" },
+        { day: "2026-10-27", status: "ok" },
+        { day: "2026-10-28", status: "ok" },
+        { day: "2026-10-29", status: "ok" },
+        { day: "2026-10-30", status: "open" }
+      ],
+      cells: [
+        { day: "2026-10-24", status: "outside_coverage", values: [null, null] },
+        { day: "2026-10-25", status: "outside_coverage", values: [null, null] },
+        { day: "2026-10-26", status: "gap", values: [null, null] },
+        // 10-27: a recorded day where neither model had requests — a
+        // measured zero, the one place a 0 is allowed to appear.
+        { day: "2026-10-27", status: "ok", values: [lbValues(0, 0, 0, 0, 0, 0), lbValues(0, 0, 0, 0, 0, 0)] },
+        { day: "2026-10-28", status: "ok", values: [lbValues(0, 0, 0, 0, 0, 0), lbValues(40, 120000, 40000, 30000, 3, 0)] },
+        { day: "2026-10-29", status: "ok", values: [lbValues(100, 5000000, 200000, 0, 0, 0), lbValues(55, 150000, 50000, 20000, 5, 2)] },
+        { day: "2026-10-30", status: "open", values: [lbValues(507, 25300000, 1200000, 0, 2, 0), lbValues(10, 30000, 10000, 0, 1, 0)] }
+      ]
+    }
+  };
+}
+
+const lbRendered = helpers.renderLeaderboardForTest(fixtureLeaderboard(), fixtureState());
+const lbText = collectText(lbRendered).join("\n");
+
+function lbFindTable(root, headerText) {
+  return findAll(root, function (node) {
+    return node.tag === "table" && collectText(node).some(function (piece) {
+      return piece.indexOf(headerText) !== -1;
+    });
+  })[0];
+}
+
+check("the leaderboard tab is wired to its own endpoint, not the state route", function () {
+  assert(source.includes('{ id: "leaderboard", label: "Leaderboard" }'));
+  assert(source.includes("leaderboard: renderLeaderboard"));
+  assert(source.includes('"/api/leaderboard?days="'));
+  assert(!source.includes("/api/session"));
+});
+
+check("the ranking renders ranks, shares and provider labels", function () {
+  const table = lbFindTable(lbRendered, "Tokens in / out / cached");
+  assert(table, "expected the ranked table");
+  const headers = findAll(table, function (n) { return n.tag === "th"; }).map(function (th) { return th.textContent; });
+  assert.deepStrictEqual(headers, [
+    "Rank", "Model", "Provider", "Share", "Tokens in / out / cached",
+    "Requests", "Fallbacks", "Errors", "Cost"
+  ]);
+  assert(lbText.includes("#1"));
+  assert(lbText.includes("gpt-6.1-terra"));
+  assert(lbText.includes("ChatGPT / Codex"), "the provider id must be labelled");
+  assert(lbText.includes("98.8%"), "the leader's share must render as a percent");
+  assert(lbText.includes("leader"), "rank 1 is marked as the leader");
+});
+
+check("an unpriced model renders \"no published price\", never $0.00", function () {
+  assert(lbText.includes("no published price"), "the unpriced model must say so");
+  assert(lbText.includes("no published actual/list price for this provider and model — never inferred"));
+  assert(lbText.includes("0 of 607 requests priced; 607 unknown (30.30M in / 1.40M out)"),
+    "the unknown coverage must be stated beside the missing price");
+  // $0.00 with no following digits would be a fabricated zero; $0.004200
+  // is a real subtotal and must still render. The scan covers every
+  // rendered figure (div/td); the methodology's prose sentence that states
+  // the rule is a li, not a figure, and is allowed to name it.
+  const bareZeros = findAll(lbRendered, function (n) {
+    return (n.tag === "div" || n.tag === "td") &&
+      typeof n.textContent === "string" && /^\$0\.00(?![0-9])/.test(n.textContent);
+  });
+  assert.strictEqual(bareZeros.length, 0, "no rendered figure may be a bare $0.00");
+  assert(lbText.includes("$0.004200"), "the priced model must show its known subtotal");
+  assert(lbText.includes("price source " + LB_PRICE_SOURCE + " · observed 2026-10-29"),
+    "the real price source URL and observation date must be cited");
+});
+
+check("window totals state the known subtotal with its unpriced coverage", function () {
+  assert(lbText.includes("Window totals: 712 requests · 32.10M tokens"));
+  assert(lbText.includes("Known cost: $0.004200 — incomplete: 607 request(s) unpriced (30.30M in / 1.40M out tokens)."));
+  assert(lbText.includes("1 model(s) have no published price and are never estimated."));
+});
+
+check("the matrix renders a no-data day as a span, never as 0-value cells", function () {
+  const table = lbFindTable(lbRendered, "Day (UTC)");
+  assert(table, "expected the matrix table");
+  const rows = findAll(table, function (n) { return n.tag === "tr"; });
+  const bodyRows = rows.filter(function (row) {
+    return row.children.some(function (child) { return child.tag === "td"; });
+  });
+  assert.strictEqual(bodyRows.length, 7, "one row per day");
+  const gapRow = bodyRows.filter(function (row) {
+    return collectText(row).join(" | ").includes("2026-10-26");
+  })[0];
+  const gapCells = gapRow.children.filter(function (c) { return c.tag === "td"; });
+  assert.strictEqual(gapCells.length, 2, "a no-data day has day + one span, never per-model cells");
+  assert.strictEqual(gapCells[1].attributes.colspan, "4", "the span covers the record column, both models and the total");
+  assert(gapCells[1].textContent.includes("no data — gap in the record, not zero"));
+  const outsideRow = bodyRows.filter(function (row) {
+    return collectText(row).join(" | ").includes("2026-10-25");
+  })[0];
+  assert(collectText(outsideRow).join(" | ").includes("no data — before recorded history"));
+});
+
+check("the matrix renders a recorded zero day as measured zeros", function () {
+  const table = lbFindTable(lbRendered, "Day (UTC)");
+  const zeroRow = findAll(table, function (n) { return n.tag === "tr"; }).filter(function (row) {
+    return collectText(row).join(" | ").includes("2026-10-27");
+  })[0];
+  const cells = zeroRow.children.filter(function (c) { return c.tag === "td"; });
+  assert.strictEqual(cells.length, 5, "day + record + two models + day total");
+  assert.strictEqual(cells[1].textContent, "recorded");
+  // Each model cell holds a 0 value div and a 0-request div.
+  [2, 3].forEach(function (index) {
+    const figures = cells[index].children.filter(function (c) { return c.tag === "div"; });
+    assert.deepStrictEqual(figures.map(function (f) { return f.textContent; }), ["0", "0 req"]);
+  });
+  assert.strictEqual(cells[4].textContent, "0", "the day total is a measured 0");
+  // And a day with traffic on only one model still shows the other as 0.
+  const partialRow = findAll(table, function (n) { return n.tag === "tr"; }).filter(function (row) {
+    return collectText(row).join(" | ").includes("2026-10-28");
+  })[0];
+  const partialCells = partialRow.children.filter(function (c) { return c.tag === "td"; });
+  const bCellFigures = partialCells[2].children.filter(function (c) { return c.tag === "div"; });
+  assert.deepStrictEqual(bCellFigures.map(function (f) { return f.textContent; }), ["0", "0 req"]);
+  assert.strictEqual(partialCells[4].textContent, "160K", "120000+40000 = 160K day total");
+});
+
+check("the chart hatches no-data columns and flat-marks a measured zero", function () {
+  const charts = findAll(lbRendered, function (n) { return n.className === "lb-chart"; });
+  assert.strictEqual(charts.length, 1, "exactly one stacked chart");
+  const columns = charts[0].children;
+  assert.strictEqual(columns.length, 7, "one column per day");
+  // 10-24 / 10-25 / 10-26: hatched, zero segments.
+  [0, 1, 2].forEach(function (index) {
+    const area = columns[index].children[0];
+    const hatched = area.children.filter(function (c) { return c.className === "lb-nodata"; });
+    assert.strictEqual(hatched.length, 1, "column " + index + " must be hatched");
+    assert(hatched[0].attributes.title.includes("no data"));
+    assert.strictEqual(area.children.filter(function (c) { return c.className === "lb-seg"; }).length, 0);
+  });
+  // 10-27: a flat measured-zero marker, not hatched, not a bar.
+  const zeroArea = columns[3].children[0];
+  const zero = zeroArea.children.filter(function (c) { return c.className === "lb-zero"; });
+  assert.strictEqual(zero.length, 1, "a recorded zero day gets the zero marker");
+  assert.strictEqual(zero[0].textContent, "0");
+  assert.strictEqual(zeroArea.children.filter(function (c) { return c.className === "lb-nodata"; }).length, 0);
+  // 10-30 (open): stacked segments, one per model with traffic.
+  const openArea = columns[6].children[0];
+  const segments = openArea.children.filter(function (c) { return c.className === "lb-seg"; });
+  assert.strictEqual(segments.length, 2, "both models have traffic on the open day");
+  segments.forEach(function (segment) { assert(segment.attributes.title.includes("tokens")); });
+  // The column labels name no-data days under the axis.
+  assert(columns[2].children[2].textContent, "no data");
+  assert.strictEqual(columns[2].children[2].textContent, "no data");
+});
+
+check("the chart legend names both models with their rank and provider", function () {
+  const legend = findAll(lbRendered, function (n) { return typeof n.className === "string" && n.className.indexOf("lb-legend") === 0; })[0];
+  assert(legend, "expected a legend");
+  const keys = findAll(legend, function (n) { return n.className === "lb-key"; });
+  assert.strictEqual(keys.length, 2);
+  const text = collectText(legend).join(" | ");
+  assert(text.includes("#1 ChatGPT / Codex → gpt-6.1-terra"));
+  assert(text.includes("#2 OpenCode Go → mimo-v2.6-flash"));
+});
+
+check("leader vs challenger compares the top two with honest costs", function () {
+  assert(lbText.includes("Leader vs challenger"));
+  const table = lbFindTable(lbRendered, "Share of window tokens");
+  assert(table, "expected the comparison table");
+  assert(lbText.includes("#1 gpt-6.1-terra (ChatGPT / Codex)"));
+  assert(lbText.includes("#2 mimo-v2.6-flash (OpenCode Go)"));
+  assert(lbText.includes("98.75%"), "the leader's share at two decimals");
+  assert(lbText.includes("1.25%"), "the challenger's share at two decimals");
+  assert(lbText.includes("no published price"), "the unpriced leader keeps its honesty label in the comparison");
+});
+
+check("the fallback panel renders the rate, reasons and per-alias rows", function () {
+  assert(lbText.includes("Fallback rate"));
+  assert(lbText.includes("37.5%"), "the overall fallback rate must reach the leaderboard");
+  assert(lbText.includes("Local cooldown held the route"));
+  assert(lbText.includes("Primary route not eligible"));
+  assert(lbText.includes("By alias"));
+  assert(lbText.includes("Metadata only; no prompts, responses, tokens or secrets are stored."));
+});
+
+check("an analytics-less state degrades the fallback panel without inventing data", function () {
+  const view = fixtureState();
+  view.analytics = { available: false, unavailable_reason: "durable_rollup_disabled" };
+  const text = collectText(helpers.renderLeaderboardForTest(fixtureLeaderboard(), view)).join("\n");
+  assert(text.includes("request-ledger persistence is off"));
+  assert(!text.includes("37.5%"));
+});
+
+check("the methodology states the window, UTC, token kinds and price origin", function () {
+  assert(lbText.includes("Methodology"));
+  assert(lbText.includes("Days are UTC boundaries"));
+  assert(lbText.includes("Recorded history begins 2026-10-27T01:00:00Z"));
+  assert(lbText.includes("The gateway does not tokenize; it reports observed counters."));
+  assert(lbText.includes("stronger than list-price estimation"));
+  assert(lbText.includes("never as $0.00"), "the methodology must state the cost-honesty rule");
+  assert(lbText.includes("A price is never transferred across providers"));
+  assert(lbText.includes("no user, session or geo dimensions"));
+  assert(lbText.includes("Gaps in this window: 2026-10-26"));
+  assert(lbText.includes("Price sources cited in this window"));
+  assert(lbText.includes(LB_PRICE_SOURCE + " · observed 2026-10-29"));
+});
+
+check("a payload with no priced model cites no price source instead of inventing one", function () {
+  const payload = fixtureLeaderboard();
+  payload.ranked.forEach(function (entry) { entry.cost.source = null; entry.cost.observed_at = null; });
+  const text = collectText(helpers.renderLeaderboardForTest(payload, fixtureState())).join("\n");
+  assert(text.includes("No model in this window has a published price, so no price source is cited — and none is invented."));
+});
+
+check("null window totals render as absent, never as zero", function () {
+  const payload = fixtureLeaderboard();
+  payload.totals = {
+    requests: null, input_tokens: null, output_tokens: null, cached_tokens: null,
+    fallbacks: null, errors: null, total_tokens: null, models: 0, models_without_price: 0,
+    known_amount_usd: null, cost_incomplete: null, unknown_cost_requests: null,
+    unknown_cost_input_tokens: null, unknown_cost_output_tokens: null
+  };
+  const text = collectText(helpers.renderLeaderboardForTest(payload, fixtureState())).join("\n");
+  assert(text.includes("No recorded rows in this window: totals are absent, not zero."));
+  assert(!text.includes("Window totals:"), "absent totals must not be rendered as a totals line");
+});
+
+check("an empty window states absence instead of ranking nothing", function () {
+  const payload = fixtureLeaderboard();
+  payload.ranked = [];
+  payload.matrix = { models: [], days: fixtureLeaderboard().matrix.days, cells: [] };
+  const root = helpers.renderLeaderboardForTest(payload, fixtureState());
+  const text = collectText(root).join("\n");
+  assert(text.includes("No models recorded in this window"));
+  assert(text.includes("That is absent data, not zero usage."));
+  // The fallback panel is state-driven, so its tables may still render;
+  // what must be absent are the payload-driven ranking and matrix tables.
+  assert.strictEqual(lbFindTable(root, "Tokens in / out / cached"), undefined);
+  assert.strictEqual(lbFindTable(root, "Day (UTC)"), undefined);
+});
+
+check("an unavailable payload renders an empty state and no tables", function () {
+  const root = helpers.renderLeaderboardForTest({
+    available: false, unavailable_reason: "durable_rollup_disabled",
+    ranked: [], matrix: { models: [], days: [], cells: [] }, totals: {}
+  }, fixtureState());
+  const text = collectText(root).join("\n");
+  assert(text.includes("Leaderboard unavailable: durable_rollup_disabled"));
+  assert(text.includes("Missing data is reported, never filled in."));
+  assert.strictEqual(findAll(root, function (n) { return n.tag === "table"; }).length, 0);
+  assert(!text.includes("$0"));
+});
+
+check("the leaderboard payload is metadata only", function () {
+  assert(!lbText.includes("req_"));
+  assert(!/\bsk-[A-Za-z0-9_\-]{16,}/.test(lbText));
+});
+
 if (failures.length) {
   console.error("\n" + failures.length + " check(s) failed");
   process.exit(1);

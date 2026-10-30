@@ -115,6 +115,7 @@ For related aliases, assign the same optional tag in Models & Routes, then use P
 | Create, edit, or publish an alias | Owner console → Models & Routes (use **Edit** on an existing alias; its name remains fixed while its route policy is changed) |
 | Manage profile metadata | Owner console → Profiles (does not restrict LAN invocation) |
 | Read status and limits | Owner console → Status |
+| Read the model leaderboard (rankings, date x model matrix, fallback rate) | Owner console → Leaderboard |
 | Make the aliases appear in OpenCode's `/models` | Install `integrations/opencode/` once (see §3.1) |
 | Preview a Chat Completions request without sending it | `POST /owner/api/preview` (JSON body, published alias in `model`) |
 
@@ -195,6 +196,19 @@ table — a null amount means **no published price**, never zero — and a day
 with no rows shows a status (`gap`, `outside_coverage`, `no_rows`), never a
 zero row. Like the rest of the console this endpoint is metadata only and is
 reachable only from the trusted LAN.
+
+The **Leaderboard** tab renders it: open the tab and the console fetches
+`/owner/api/leaderboard?days=N` (window selector: 7, 14 or 30 days) without
+touching the state poll. The tab shows the ranked models with share % and the
+honest cost cell (an unpriced model reads **"no published price"** with its
+reason and unpriced coverage, never `$0.00`), the stacked daily usage chart,
+the date x model matrix, a leader-vs-challenger comparison, the fallback-rate
+panel and the methodology panel (which cites each model's price source URL
+and observation date). A day with no recorded data is hatched in the chart
+and shown as a single "no data" span in the matrix; a measured zero renders
+as `0`. If the tab shows *Leaderboard unavailable: durable_rollup_disabled*,
+ledger persistence is off — enable it (§ rollup) and reload; the endpoint
+itself can be checked directly with `curl http://127.0.0.1:8765/owner/api/leaderboard`.
 
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
 page load or configuration save never calls a provider. Anthropic uses the
