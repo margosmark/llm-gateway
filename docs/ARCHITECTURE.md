@@ -138,14 +138,22 @@ table; both state plainly that the data is metadata only.
 
 The whole `GET /owner/api/state` render is memoised behind
 `gateway.http.state_cache.StateCache`. The rendered body (status,
-headers and bytes) is stored under a key derived from everything the
-render reads: the config revision plus a stamp of the config file itself
+headers and bytes) is stored under a key derived from every input the
+render reads that can change while the process is up: the config
+revision plus a stamp of the config file itself
 (inode, mtime, size — so a backup import that replaces content without
 bumping the revision is caught), each provider credential's `describe()`
 digest, the request ledger's version counter (bumped by every record,
 amend and clear), circuit **state** (open/closed/expiry, deliberately not
 the per-second probe countdown, so an open cooldown does not evict the
-entry every second), the limits table, and the `?days` window. Cache
+entry every second), the limits table, the `?days` window, and the
+release identity — the **result** of `release_identity()`, which re-reads
+`release.json` on every call, so a release written after the container
+started (`scripts/release.py --build`, `scripts/write_release_identity.py`
+against a running volume) shows on the very next read instead of waiting
+for the background refresh. Process constants the render also reads
+(`ledger.durability()`, the cooldown-policy literals) cannot change after
+start-up and are not part of the key. Cache
 invalidation is therefore by tokenisation rather than by callbacks: a
 mutation changes the key, and the immediately following read takes the
 miss path and re-renders synchronously — no staleness window can lie

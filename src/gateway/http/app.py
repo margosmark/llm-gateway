@@ -396,8 +396,9 @@ class GatewayApp:
         self._pending_device: dict[str, Any] = {}
         self._routes = HttpRouter()
         #: The rendered console snapshot, keyed by a digest of every input
-        #: ``_render_state`` reads - see ``gateway.http.state_cache`` for
-        #: how each input is detected changing.
+        #: ``_render_state`` reads that can change while the process is up -
+        #: see ``gateway.http.state_cache`` for how each input is detected
+        #: changing.
         self._state_cache = StateCache(self, self._render_state)
         self._build_routes()
 
