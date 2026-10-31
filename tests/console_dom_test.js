@@ -161,11 +161,42 @@ check("capability discovery is per exact model and opt-in", function () {
 });
 
 check("capability preview refuses unknown prices honestly and never runs unavailable probes", function () {
-  assert(source.includes('unavailable.reason + " Price: Unknown. No provider request has been sent."'));
+  // The refusal line must never hardcode "Price: Unknown": the price block
+  // carries whatever the catalogue holds (card t_784e39d5 finding 2).
+  assert(source.includes('text: unavailable.reason + " Price: " + probePriceText(unavailable.price) + ". No provider request has been sent."'));
+  assert(!source.includes('" Price: Unknown. No provider request has been sent."'));
+  assert(source.includes('text: preview.reason + " Price: " + probePriceText(preview.price) + ". No provider request has been sent."'));
   assert(source.includes('"Unavailable; Unknown is not false. No probe was executed."'));
   assert(source.includes('if (preview.available)'));
   assert(source.includes('Price estimates are not guaranteed billing caps.'));
-  assert(source.includes('Price estimates are not guaranteed billing caps.'));
+});
+
+check("probePriceText renders a published tariff honestly and only says no published price when there is none", function () {
+  const priceFn = source.slice(source.indexOf("function probePriceText"), source.indexOf("function renderCapabilityPanel"));
+  assert(priceFn.includes('if (!price || price.status === "unknown" || price.status === undefined) return "no published price"'));
+  assert(priceFn.includes('"worst-case estimate "'));
+  assert(priceFn.includes('"stale published price"'));
+  assert(priceFn.includes("input_per_m"), "known per-million rates must render");
+  assert(priceFn.includes("cached_read_per_m"), "the cached-read rate must render when published");
+  assert(priceFn.includes("price.source"), "the tariff source must render");
+  assert(priceFn.includes("price.as_of"), "the observation date must render");
+  // Behaviour, not just strings: the helper is exercised on real payloads.
+  const realPrice = { status: "known", amount: null, currency: "USD", input_per_m: 0.3, output_per_m: 1.2, cached_read_per_m: 0.06, source: "https://opencode.ai/data/minimax/minimax-m2-7", as_of: "2026-10-25" };
+  const rendered = helpers.probePriceTextForTest(realPrice);
+  assert(rendered.indexOf("https://opencode.ai/data/minimax/minimax-m2-7") !== -1, "a priced model must show its source");
+  assert(rendered.indexOf("0.3") !== -1 && rendered.indexOf("1.2") !== -1, "a priced model must show its rates");
+  assert(rendered.indexOf("no published price") === -1, "a priced model must never read as unpriced");
+  assert(helpers.probePriceTextForTest({ status: "unknown" }) === "no published price");
+  assert(helpers.probePriceTextForTest(null) === "no published price");
+  const stale = helpers.probePriceTextForTest({ status: "stale", input_per_m: 0.14, output_per_m: 0.28, source: "x", as_of: "2026-01-01" });
+  assert(stale.indexOf("stale") !== -1 && stale.indexOf("2026-01-01") !== -1, "a stale tariff must say stale with its date");
+});
+
+check("the capability panel surfaces probe-registry coverage before any preview", function () {
+  assert(source.includes('var registryLine = el("p", { class: "small muted" });'));
+  assert(source.includes('"Probe registry: " + registry.registered_count + " pair(s) registered for paid probing"'));
+  assert(source.includes('registry.this_pair_registered ? "registered." : "not registered."'));
+  assert(source.includes("an opt-in allowlist, so an unregistered pair refuses before any request"));
 });
 
 // A synchronous thenable so the panel's fetch chains settle inside a check.

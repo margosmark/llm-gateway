@@ -236,8 +236,58 @@ class ProbeHttpTests(unittest.TestCase):
         )
         payload = payload or {}
         self.assertEqual(status, 422)
-        self.assertEqual(payload["error"]["type"], "probe_unavailable")
+        self.assertEqual(payload["error"]["type"], "no_probe_protocol")
         self.assertEqual(_UpstreamHandler.requests, [])
+
+    def test_priced_but_unregistered_model_reports_the_registry_blocker_and_real_price(self):
+        """End-to-end regression for Mark's minimax-m2.7 report (card t_784e39d5).
+
+        The deployed console said "no trustworthy price ... Price: Unknown"
+        for a model the catalogue prices. Here the harness stages a real
+        catalogue model that carries a fresh tariff but has no protocol
+        entry: the preview must refuse with the registry as the sole blocker,
+        render the real published tariff, and send nothing upstream.
+        """
+        with self.h.config.mutate() as config:
+            provider = config.providers[PROVIDER]
+            provider.models["minimax-m2.7"] = ModelEntry(
+                model_id="minimax-m2.7",
+                enabled=True,
+                dialect="openai_chat",
+                source="discovered",
+                supports_function_tools=False,
+                supports_image_input=False,
+            )
+        status, payload, _ = self._preview(model="minimax-m2.7", owner=OWNER)
+        self.assertEqual(status, 422, payload)
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["code"], "no_probe_protocol")
+        self.assertNotIn("trustworthy price", payload["reason"])
+        # The real catalogue tariff, not "Unknown". The status is whatever
+        # freshness the live snapshot warrants (the dated snapshot ages), but
+        # a priced model must never collapse to "unknown": the rates and
+        # provenance are always rendered, and the refusal never blames price.
+        price = payload["price"]
+        self.assertIn(price["status"], {"known", "stale"})
+        self.assertEqual(price["input_per_m"], 0.3)
+        self.assertEqual(price["output_per_m"], 1.2)
+        self.assertEqual(price["source"], "https://opencode.ai/data/minimax/minimax-m2-7")
+        self.assertEqual(price["as_of"], "2026-10-25")
+        self.assertIsNone(price["amount"], "no run estimate exists without a protocol")
+        self.assertNotIn("confirmation", payload)
+        self.assertEqual(_UpstreamHandler.requests, [], "a refused preview sends nothing")
+
+    def test_registry_coverage_is_reported_on_the_evidence_read(self):
+        status, payload, _ = self.h.request(
+            "GET",
+            f"/owner/api/capabilities?provider_id={PROVIDER}&model_id={MODEL}",
+        )
+        self.assertEqual(status, 200, payload)
+        registry = payload["probe_registry"]
+        self.assertEqual(registry["registered_count"], 1)
+        self.assertEqual(registry["registered_pairs"], [["opencode_go", "mimo-v2.6-flash"]])
+        self.assertGreaterEqual(registry["staged_model_count"], 1)
+        self.assertTrue(registry["this_pair_registered"])
 
     def test_preview_is_unavailable_until_the_owner_selects_the_route(self):
         for owner in (None, {}, {"authorize_billing_route": False}):
@@ -327,7 +377,7 @@ class ProbeHttpTests(unittest.TestCase):
             self.h.app.probe_price_lookup = lambda provider_id, model_id: None
             status, payload, _ = self._preview()
             self.assertEqual(status, 422)
-            self.assertEqual(payload["code"], "price_unavailable")
+            self.assertEqual(payload["code"], "no_trusted_price")
             self.assertIsNone(payload["estimate"]["total_usd"])
             self.h.app.probe_price_lookup = (
                 lambda provider_id, model_id: {
@@ -339,7 +389,7 @@ class ProbeHttpTests(unittest.TestCase):
             )
             status, payload, _ = self._preview()
             self.assertEqual(status, 422)
-            self.assertEqual(payload["code"], "price_unavailable")
+            self.assertEqual(payload["code"], "no_trusted_price")
             self.assertIn("stale", payload["reason"])
         finally:
             self.h.app.probe_price_lookup = original
