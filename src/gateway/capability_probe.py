@@ -420,6 +420,23 @@ def request_estimate(
 
 # --- preview ---------------------------------------------------------------
 
+def _ceiling_usd(value: Any) -> float | None:
+    """The owner's spend ceiling as a finite float, or ``None`` when unusable.
+
+    ``NaN`` and ``±inf`` fail every ordering comparison, so a gate written as
+    ``ceiling <= 0`` lets them through; an integer too large to represent as a
+    float raises on conversion and would behave like ``+inf``. None of those is
+    a ceiling a run may be authorised against.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        ceiling = float(value)
+    except OverflowError:
+        return None
+    return ceiling if math.isfinite(ceiling) else None
+
+
 def _owner_gate(owner: Any) -> tuple[str, str] | None:
     """Validate the owner's explicit selection. Returns the first refusal."""
     if not isinstance(owner, dict):
@@ -445,8 +462,8 @@ def _owner_gate(owner: Any) -> tuple[str, str] | None:
             "The owner must accept the estimate-based spend policy (spend_policy=estimate_accepted) before a "
             "probe can run; unknown pricing fails closed.",
         )
-    ceiling = owner.get("max_spend_estimate_usd")
-    if not isinstance(ceiling, (int, float)) or isinstance(ceiling, bool) or ceiling <= 0:
+    ceiling = _ceiling_usd(owner.get("max_spend_estimate_usd"))
+    if ceiling is None or ceiling <= 0:
         return (
             "spend_ceiling_required",
             "The owner must set a maximum estimated spend for this run before any request is sent.",
@@ -476,8 +493,9 @@ def build_preview(
 
     Always returns the complete preview shape — including when unavailable —
     so the console can show the owner exactly why a run is blocked. Unknown
-    or stale pricing, a missing route authorization, a hard-cap policy and a
-    ceiling below the estimate all fail closed, in that order.
+    or stale pricing, a missing route authorization, a hard-cap policy, an
+    unusable ceiling and a ceiling below the estimate all fail closed, in that
+    order.
     """
     base = _blocked_preview(provider_id, model_id, probes, revision)  # validates target + selection
     protocol = protocol_for(provider_id, model_id)
@@ -568,13 +586,17 @@ def build_preview(
     refusal = _owner_gate(owner)
     if refusal is not None:
         return _unavailable(result, refusal[0], refusal[1])
-    ceiling = float(owner["max_spend_estimate_usd"])
-    if ceiling < total:
+    ceiling = _ceiling_usd(owner.get("max_spend_estimate_usd"))
+    if ceiling is None or ceiling < total:
+        # Defence in depth: the gate above already refused an unusable ceiling;
+        # if this comparison is ever reached with one (NaN, ±inf or an integer
+        # too large to represent), it counts as exceeded, never as open-ended.
+        shown = "an unusable value" if ceiling is None else f"{ceiling:.8f} USD"
         return _unavailable(
             result,
             "spend_ceiling_exceeded",
             f"The worst-case estimate ({total:.8f} USD) exceeds the owner's maximum estimated spend "
-            f"({ceiling:.8f} USD) for this run.",
+            f"({shown}) for this run.",
         )
 
     result["available"] = True
