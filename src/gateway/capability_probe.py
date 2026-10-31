@@ -490,7 +490,16 @@ def _tariff_price_block(price: Any, status: str) -> dict[str, Any]:
     if isinstance(price, dict):
         for key in ("input_per_m", "output_per_m", "cached_read_per_m"):
             value = price.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+            # Mirror price_status(): only a finite, non-negative rate is a
+            # price. A non-finite one would serialise as the non-RFC-8259
+            # tokens NaN/Infinity, which the console's JSON.parse rejects, so
+            # omit the key rather than print a lie (or unparseable JSON).
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and float(value) >= 0
+            ):
                 block[key] = float(value)
     return block
 
