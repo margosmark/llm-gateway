@@ -2006,6 +2006,13 @@
 
   function renderModels() {
     var frag = document.createDocumentFragment();
+    // Exactly one discovery panel may be open at a time, tracked per render.
+    // Each panel's own text is derived from its target at render time, but two
+    // open panels put two different targets' "Authorise a paid probe run"
+    // paragraphs on the page at once — the reader sees the older one first —
+    // and the owner must never read a paid-run confirmation that describes a
+    // different provider/model than the row whose panel would be billed.
+    var openCapabilityPanel = null; // { row, button } of the open panel
 
     var modelsCard = el("div", { class: "card" }, [
       el("h2", { text: "Provider models" }),
@@ -2050,7 +2057,16 @@
                 if (existing && existing.classList.contains("capability-detail-row")) {
                   existing.remove();
                   button.setAttribute("aria-expanded", "false");
+                  openCapabilityPanel = null;
                   return;
+                }
+                // Close any other open panel first: two open panels show two
+                // different targets' paid-run confirmations at once, and the
+                // owner can read the stale one while operating the new one.
+                if (openCapabilityPanel) {
+                  openCapabilityPanel.row.remove();
+                  openCapabilityPanel.button.setAttribute("aria-expanded", "false");
+                  openCapabilityPanel = null;
                 }
                 var detailRow = document.createElement("tr");
                 detailRow.className = "capability-detail-row";
@@ -2062,6 +2078,7 @@
                 detailRow.appendChild(detailCell);
                 row.parentNode.insertBefore(detailRow, row.nextSibling);
                 button.setAttribute("aria-expanded", "true");
+                openCapabilityPanel = { row: detailRow, button: button };
               }
             }),
             el("button", {
@@ -3046,6 +3063,18 @@
         state = view;
         try {
           return renderModels();
+        } finally {
+          state = previous;
+        }
+      },
+      withStateForTest: function (view, body) {
+        // The capability row's click handler renders its panel at click time
+        // (reading state.can_mutate there), so a behavioural click-through
+        // test needs the fixture state live while it drives the clicks.
+        var previous = state;
+        state = view;
+        try {
+          return body();
         } finally {
           state = previous;
         }
