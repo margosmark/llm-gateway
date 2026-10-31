@@ -51,6 +51,7 @@ from gateway.capability_probe import (
     plan_requests,
     price_status,
     probe_png,
+    registry_coverage,
     run_suite,
 )
 
@@ -62,6 +63,16 @@ FRESH_PRICE = {
     "output_per_m": 0.28,
     "source": "https://opencode.example/data/xiaomi/mimo-v2-6-flash",
     "observed_at": "2026-10-28",
+}
+
+# A priced model that is deliberately NOT in PROBE_PROTOCOLS — the exact
+# shape of Mark's minimax-m2.7 report (card t_784e39d5 finding 2).
+MINIMAX_PRICE = {
+    "input_per_m": 0.3,
+    "output_per_m": 1.2,
+    "cached_read_per_m": 0.06,
+    "source": "https://opencode.ai/data/minimax/minimax-m2-7",
+    "observed_at": "2026-10-25",
 }
 
 STALE_PRICE = dict(FRESH_PRICE, observed_at="2026-01-01")
@@ -94,8 +105,55 @@ class PreviewGateTests(unittest.TestCase):
     def test_unregistered_target_stays_blocked(self):
         result = build_preview("provider-a", "model-x", ["text_generation"], 7, now=NOW)
         self.assertFalse(result["available"])
-        self.assertEqual(result["code"], "probe_unavailable")
+        self.assertEqual(result["code"], "no_probe_protocol")
         self.assertTrue(result["reason"])
+
+    def test_unregistered_target_reports_the_registry_blocker_and_still_renders_its_price(self):
+        """The protocol gate refuses, but a published tariff is never misreported as Unknown.
+
+        Regression for card t_784e39d5 finding 2: minimax-m2.7 has a sourced,
+        observed catalogue price; only the protocol entry is missing, so the
+        refusal must name the registry as the blocker and show the real price.
+        """
+        result = build_preview(
+            "opencode_go", "minimax-m2.7", ["text_generation"], 7,
+            now=NOW, price_lookup=lambda _p, _m: MINIMAX_PRICE,
+        )
+        self.assertFalse(result["available"])
+        self.assertEqual(result["code"], "no_probe_protocol")
+        self.assertIn("probe protocol", result["reason"])
+        # The old refusal claimed "no ... trustworthy price" — that specific
+        # misreport must never come back for a priced model.
+        self.assertNotIn("trustworthy price", result["reason"])
+        self.assertNotIn("Price: Unknown", result["reason"])
+        # The price block carries the real tariff, honestly labelled: known
+        # rates with provenance, but no run estimate (no protocol supplied
+        # the request bounds, so no dollar amount is invented).
+        price = result["price"]
+        self.assertEqual(price["status"], "known")
+        self.assertEqual(price["input_per_m"], 0.3)
+        self.assertEqual(price["output_per_m"], 1.2)
+        self.assertEqual(price["cached_read_per_m"], 0.06)
+        self.assertEqual(price["source"], "https://opencode.ai/data/minimax/minimax-m2-7")
+        self.assertEqual(price["as_of"], "2026-10-25")
+        self.assertIsNone(price["amount"])
+
+    def test_unregistered_target_without_any_price_says_no_published_price(self):
+        result = build_preview(
+            "opencode_go", "unpriced-model", ["text_generation"], 7,
+            now=NOW, price_lookup=lambda _p, _m: None,
+        )
+        self.assertFalse(result["available"])
+        self.assertEqual(result["code"], "no_probe_protocol")
+        self.assertEqual(result["price"]["status"], "unknown")
+        self.assertIsNone(result["price"]["amount"])
+
+    def test_registry_coverage_reports_the_allowlist_size(self):
+        summary = registry_coverage(50)
+        self.assertEqual(summary["registered_count"], len(PROBE_PROTOCOLS))
+        self.assertEqual(summary["registered_pairs"], [list(pair) for pair in sorted(PROBE_PROTOCOLS)])
+        self.assertEqual(summary["staged_model_count"], 50)
+        self.assertIn(["opencode_go", "mimo-v2.6-flash"], summary["registered_pairs"])
 
     def test_registered_target_without_owner_input_is_blocked_with_a_reason(self):
         result = preview(None)
@@ -109,15 +167,19 @@ class PreviewGateTests(unittest.TestCase):
     def test_unknown_price_fails_closed_before_authorization_is_considered(self):
         result = preview(owner(), price=None)
         self.assertFalse(result["available"])
-        self.assertEqual(result["code"], "price_unavailable")
+        self.assertEqual(result["code"], "no_trusted_price")
         self.assertEqual(result["price"]["status"], "unknown")
         self.assertIsNone(result["estimate"]["total_usd"])
 
-    def test_stale_price_fails_closed(self):
+    def test_stale_price_fails_closed_and_says_it_is_stale(self):
         result = preview(owner(), price=STALE_PRICE)
         self.assertFalse(result["available"])
-        self.assertEqual(result["code"], "price_unavailable")
+        self.assertEqual(result["code"], "no_trusted_price")
         self.assertIn("stale", result["reason"])
+        # The stale tariff is still shown honestly — status "stale", not
+        # "unknown" — so the console can say "stale" instead of "no price".
+        self.assertEqual(result["price"]["status"], "stale")
+        self.assertEqual(result["price"]["source"], STALE_PRICE["source"])
 
     def test_price_for_another_provider_is_never_inherited(self):
         """Pricing evidence is per provider+slug, never deduped by model."""
@@ -194,7 +256,7 @@ class PreviewGateTests(unittest.TestCase):
                 self.assertEqual(price_status(price, NOW), "unknown")
                 result = preview(owner(), price=price)
                 self.assertFalse(result["available"])
-                self.assertEqual(result["code"], "price_unavailable")
+                self.assertEqual(result["code"], "no_trusted_price")
 
     def test_response_for_different_or_missing_model_is_inconclusive(self):
         protocol = PROBE_PROTOCOLS[("opencode_go", "mimo-v2.6-flash")]

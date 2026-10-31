@@ -47,7 +47,6 @@ from gateway.capability_discovery import (
     APPROVABLE_METADATA_FIELDS,
     EVIDENCE_CLASSIFICATIONS,
     DiscoveryStore,
-    preview_for,
     proposal_expired,
 )
 from gateway.capability_probe import (
@@ -63,6 +62,7 @@ from gateway.capability_probe import (
     preview_binding,
     protocol_for,
     price_status,
+    registry_coverage,
     run_suite,
 )
 from gateway.config import (
@@ -1236,7 +1236,17 @@ class GatewayApp:
     def handle_capability_read(self, request: Request) -> Response:
         provider_id = request.query_one("provider_id") or ""
         model_id = request.query_one("model_id") or ""
-        return json_response(self.discovery.read(provider_id, model_id))
+        payload = self.discovery.read(provider_id, model_id)
+        # Probe-registry coverage rides along so the console can tell the
+        # owner *before* any preview that probing is an opt-in allowlist
+        # (currently 1 registered pair), not a broken feature.
+        config = self.config.snapshot()
+        staged = sum(len(provider.models) for provider in config.providers.values())
+        payload["probe_registry"] = {
+            **registry_coverage(staged),
+            "this_pair_registered": protocol_for(provider_id, model_id) is not None,
+        }
+        return json_response(payload)
 
     def _probe_readiness(self, provider_id: str, config: GatewayConfig) -> tuple[str, str] | None:
         """Why this provider cannot host a paid probe right now, or ``None``.
@@ -1348,7 +1358,7 @@ class GatewayApp:
                 return json_response({"error": {"message": "Exact provider/model is not staged", "type": "unknown_model"}}, 404)
             protocol = protocol_for(provider_id, model_id)
             if protocol is None:
-                return json_response({"error": {"message": "No provider probe protocol is approved; no upstream request was sent", "type": "probe_unavailable"}}, 422)
+                return json_response({"error": {"message": "No reviewed probe protocol is registered for this exact provider/model pair; no upstream request was sent", "type": "no_probe_protocol"}}, 422)
             readiness = self._probe_readiness(provider_id, config)
             if readiness is not None:
                 code, reason = readiness
