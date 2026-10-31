@@ -1,8 +1,8 @@
-"""Opt-in capability discovery primitives. Real provider transports are deliberately unregistered.
+"""Opt-in capability discovery evidence store. Real provider transports are deliberately unregistered.
 
-The current MVP exposes preview/read APIs but rejects execution until an adapter
-has an approved bounded request and pricing contract. The fake protocol exists
-only for deterministic isolated tests.
+Evidence is persisted here after an approved bounded probe run; the preview
+and execution contract itself lives in :mod:`gateway.capability_probe`
+(the routes only ever used that module's ``build_preview``).
 """
 from __future__ import annotations
 
@@ -62,30 +62,6 @@ def proposal_expired(proposal: dict[str, Any]) -> bool:
     is never silently treated as "not expired".
     """
     return datetime.fromisoformat(proposal["expires_at"].replace("Z", "+00:00")) <= _now()
-
-
-def preview_for(provider_id: str, model_id: str, probes: list[Any], revision: int) -> dict[str, Any]:
-    if not provider_id or len(provider_id) > 64 or not model_id or len(model_id) > 256:
-        raise ValueError("invalid target")
-    if not probes or len(probes) > 3 or any(not isinstance(p, str) or p not in PROBES for p in probes) or len(set(probes)) != len(probes):
-        raise ValueError("invalid probe selection")
-    return {
-        "available": False,
-        "provider_id": provider_id,
-        "model_id": model_id,
-        "probes": probes,
-        "suite_version": "mvp-1",
-        "maximum_requests": len(probes),
-        "max_output_tokens": 128,
-        "timeout_seconds": 15,
-        "concurrency": 1,
-        "retries": 0,
-        "streaming": False,
-        "price": {"status": "unknown", "amount": None, "currency": "USD", "source": None},
-        "reason": "No approved provider probe protocol and trustworthy price are registered; paid probe is blocked.",
-        "base_revision": revision,
-        "estimate_is_not_a_bill_guarantee": True,
-    }
 
 
 def _bounded_count(value: Any) -> int:
