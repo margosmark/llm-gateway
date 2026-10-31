@@ -206,7 +206,9 @@ not a hard cap (OpenCode Go exposes no request-level max-charge control). The
 authorisation is **not persisted** — it lives in the open console page only, so
 every preview and every run re-authorises explicitly; withdrawing it, or
 closing the page, ends the grant immediately. Cancelling at this step sends
-nothing to the provider.
+nothing to the provider. Exactly one model row's discovery panel can be open at
+a time: opening another row's panel closes the previous one, so the paid-run
+confirmation on screen always names the provider/model that row would bill.
 
 The run itself is at most **two one-shot requests** — one for text, one shared
 by image and function tools — non-streamed, non-retried, never failed over,
