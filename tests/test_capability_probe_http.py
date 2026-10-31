@@ -281,6 +281,46 @@ class ProbeHttpTests(unittest.TestCase):
         self.assertIn("no provider-enforced", payload["reason"])
         self.assertFalse(payload["estimate"]["hard_ceiling_available"])
 
+    def test_a_raw_nan_ceiling_is_refused_on_preview_and_run(self):
+        """SEC-1: `NaN` in the JSON body is not a spend ceiling.
+
+        Python's decoder accepts the non-standard literal, so the raw body is
+        sent byte-for-byte (a dict body would be re-encoded and never carry
+        `NaN`). Preview must refuse without issuing a confirmation, and the run
+        route — which recomputes the preview before it consumes the
+        confirmation — must refuse before anything reaches the upstream.
+        """
+        def raw_body(**overlaps: Any) -> bytes:
+            fields = {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": ["text_generation"],
+                "owner": dict(OWNER, max_spend_estimate_usd=0.05),
+            }
+            fields.update(overlaps)
+            text = json.dumps(fields).replace('"max_spend_estimate_usd": 0.05', '"max_spend_estimate_usd": NaN')
+            return text.encode("utf-8")
+
+        status, preview_out, _ = self.h.request("POST", "/owner/api/capabilities/preview", raw_body())
+        payload = preview_out if isinstance(preview_out, dict) else {}
+        self.assertEqual(status, 422, preview_out)
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["code"], "spend_ceiling_required")
+        self.assertNotIn("confirmation", payload)
+        self.assertFalse(payload["estimate"]["hard_ceiling_available"])
+        self.assertEqual(_UpstreamHandler.requests, [], "preview must send nothing upstream")
+
+        confirmation, revision = self._confirmation(probes=["text_generation"])
+        status, run_out, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            raw_body(confirmation=confirmation, base_revision=revision),
+        )
+        error = run_out.get("error", {}) if isinstance(run_out, dict) else {}
+        self.assertEqual(status, 422, run_out)
+        self.assertEqual(error.get("type"), "spend_ceiling_required")
+        self.assertEqual(_UpstreamHandler.requests, [], "a NaN ceiling must never execute a run")
+
     def test_unknown_or_stale_pricing_fails_closed(self):
         original = self.h.app.probe_price_lookup
         try:

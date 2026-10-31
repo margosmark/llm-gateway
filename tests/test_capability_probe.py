@@ -156,6 +156,52 @@ class PreviewGateTests(unittest.TestCase):
         self.assertTrue(result["estimate_is_not_a_bill_guarantee"])
         self.assertFalse(result["estimate"]["hard_ceiling_available"])
 
+    def test_invalid_owner_ceilings_fail_closed(self):
+        """SEC-1: NaN and ±inf used to pass the gate and open the run.
+
+        Every unusable ceiling — non-finite, non-positive, non-numeric or
+        absent — is refused before a confirmation exists, and none of them may
+        move the estimate itself: the tariff stays the only authority.
+        """
+        baseline = preview(owner())["estimate"]["total_usd"]
+        invalid = (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            0,
+            -0.01,
+            True,
+            False,
+            "0.5",
+            None,
+            10**400,  # not representable as a float: behaves like +inf
+        )
+        for ceiling in invalid:
+            with self.subTest(ceiling=ceiling):
+                fields = owner()
+                if ceiling is None:
+                    fields.pop("max_spend_estimate_usd")
+                else:
+                    fields["max_spend_estimate_usd"] = ceiling
+                result = preview(fields)
+                self.assertFalse(result["available"])
+                self.assertEqual(result["code"], "spend_ceiling_required")
+                self.assertNotIn("confirmation", result)
+                self.assertFalse(result["estimate"]["hard_ceiling_available"])
+                self.assertEqual(result["estimate"]["total_usd"], baseline)
+
+    def test_build_preview_itself_treats_an_unusable_ceiling_as_exceeded(self):
+        """Defence in depth: with the owner gate neutralised, a non-finite
+        ceiling still cannot read as 'open-ended' (SEC-1)."""
+        for ceiling in (float("nan"), float("inf"), 10**400):
+            with self.subTest(ceiling=ceiling), patch(
+                "gateway.capability_probe._owner_gate", return_value=None
+            ):
+                result = preview(owner(max_spend=ceiling))
+                self.assertFalse(result["available"])
+                self.assertEqual(result["code"], "spend_ceiling_exceeded")
+                self.assertNotIn("confirmation", result)
+
     def test_estimate_is_arithmetically_derived_from_the_published_tariff(self):
         result = preview(owner())
         estimate = result["estimate"]
