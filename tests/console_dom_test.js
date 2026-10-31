@@ -17,16 +17,43 @@ const consoleJs = path.join(__dirname, "..", "src", "gateway", "static", "consol
 const helpers = require(consoleJs);
 const el = helpers.el;
 
-// A minimal DOM node, enough to observe attribute behaviour.
+// A minimal DOM node, enough to observe attribute behaviour. It also models
+// the little tree structure the capability row click handler walks: parent
+// links, siblings, classList, insertBefore and remove.
 function makeNode(tag) {
   const node = {
     tag: tag,
     attributes: {},
     listeners: {},
     children: [],
+    parentNode: null,
     _text: "",
     appendChild(child) {
       this.children.push(child);
+      if (child && typeof child === "object") child.parentNode = this;
+      return child;
+    },
+    insertBefore(newChild, refChild) {
+      if (refChild === null || refChild === undefined) return this.appendChild(newChild);
+      const at = this.children.indexOf(refChild);
+      if (at === -1) return this.appendChild(newChild);
+      this.children.splice(at, 0, newChild);
+      if (newChild && typeof newChild === "object") newChild.parentNode = this;
+      return newChild;
+    },
+    remove() {
+      if (!this.parentNode) return;
+      const at = this.parentNode.children.indexOf(this);
+      if (at !== -1) this.parentNode.children.splice(at, 1);
+      this.parentNode = null;
+    },
+    closest(selector) {
+      let node = this;
+      while (node) {
+        if (node.tag === selector) return node;
+        node = node.parentNode;
+      }
+      return null;
     },
     setAttribute(key, value) {
       this.attributes[key] = String(value);
@@ -46,6 +73,32 @@ function makeNode(tag) {
     set(value) {
       node._text = String(value);
       node.children = [];
+    },
+  });
+  // The row handler toggles panels by sibling position; the stub returns the
+  // next *element* (text nodes carry no tag) like a browser's nextElementSibling.
+  Object.defineProperty(node, "nextElementSibling", {
+    get() {
+      if (!this.parentNode) return undefined;
+      const at = this.parentNode.children.indexOf(this);
+      for (let i = at + 1; i < this.parentNode.children.length; i += 1) {
+        const sib = this.parentNode.children[i];
+        if (sib && sib.tag) return sib;
+      }
+      return undefined;
+    },
+  });
+  Object.defineProperty(node, "nextSibling", {
+    get() {
+      if (!this.parentNode) return undefined;
+      const at = this.parentNode.children.indexOf(this);
+      return at === -1 ? undefined : this.parentNode.children[at + 1];
+    },
+  });
+  Object.defineProperty(node, "classList", {
+    get() {
+      const classes = String(this.className || "").split(/\s+/).filter(Boolean);
+      return { contains: (name) => classes.indexOf(name) !== -1 };
     },
   });
   return node;
@@ -312,6 +365,86 @@ check("the capability panel's authorisation is explicit, honest and never persis
   assert(!panel.includes("localStorage"));
   assert(!panel.includes("sessionStorage"));
   assert(!panel.includes("document.cookie"));
+});
+
+// The QA repro's shape: two different providers, each with one model, so
+// opening both discovery panels back to back (no reload) is exactly the
+// sequence that used to leave two paid-run confirmations on the page.
+function twoProviderFixture() {
+  return {
+    initialized: true,
+    revision: 4,
+    surface: "owner",
+    can_mutate: true,
+    providers: [
+      {
+        provider_id: "chatgpt_codex", kind: "chatgpt_codex", state: "connected",
+        models: [{ model_id: "codex-auto-review", dialect: "openai_chat", enabled: true, source: "discovered", context_limit: 400000, retention_class: "unknown" }]
+      },
+      {
+        provider_id: "opencode_go", kind: "opencode_go", state: "connected",
+        models: [{ model_id: "mimo-v2.6-flash", dialect: "openai_chat", enabled: true, source: "discovered", context_limit: 200000, retention_class: "provider_retains_30_days" }]
+      }
+    ],
+    aliases: [],
+    fallback_triggers: ["exhausted", "rate_limited"],
+    limits: [],
+    ledger: []
+  };
+}
+
+check("only one capability panel may be open, so a paid-run confirmation always names the row that was opened", function () {
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = function () { return 0; };  // toast cleanup must not outlive the check
+  const jsonResponse = (payload) => syncResolve({
+    ok: true,
+    headers: { get: () => "application/json" },
+    json: () => syncResolve(payload),
+    text: () => syncResolve(JSON.stringify(payload)),
+  });
+  global.fetch = function () { return jsonResponse({ runs: [], proposals: [], approvals: [] }); };
+  try {
+    const view = twoProviderFixture();
+    helpers.withStateForTest(view, function () {
+      const fragment = helpers.renderModelsForTest(view);
+      const discoverButtons = () => findAll(fragment, (node) => node.tag === "button" && node.textContent === "Discover capabilities");
+      const detailRows = () => findAll(fragment, (node) => node.className === "capability-detail-row");
+      const authHosts = () => findAll(fragment, (node) => node.className === "capability-authorisation");
+      assert.strictEqual(discoverButtons().length, 2, "fixture renders one discover button per model");
+
+      // Row A (chatgpt_codex / codex-auto-review) opens its panel.
+      const click = (index) => discoverButtons()[index].listeners.click({ currentTarget: discoverButtons()[index] });
+      click(0);
+      assert.strictEqual(detailRows().length, 1, "first click opens exactly one panel");
+      assert.strictEqual(authHosts().length, 1);
+      let confirmation = collectText(authHosts()[0]).join(" ");
+      assert(confirmation.includes("chatgpt_codex / codex-auto-review"), "the first panel names its own row");
+
+      // Row B (opencode_go / mimo-v2.6-flash) opened without a reload.
+      click(1);
+      assert.strictEqual(detailRows().length, 1, "opening a second panel closes the first — never two paid-run confirmations at once");
+      assert.strictEqual(authHosts().length, 1, "exactly one authorisation block remains on the page");
+      confirmation = collectText(authHosts()[0]).join(" ");
+      assert(confirmation.includes("opencode_go / mimo-v2.6-flash"), "the confirmation names the row that was just opened");
+      assert(!confirmation.includes("codex-auto-review"), "the stale panel's confirmation is gone, not merely further down the page");
+      assert.strictEqual(discoverButtons()[0].attributes["aria-expanded"], "false", "the closed row's toggle is reset");
+      assert.strictEqual(discoverButtons()[1].attributes["aria-expanded"], "true", "the open row's toggle is set");
+
+      // Toggle behaviour is unchanged: clicking the open row's button closes it.
+      click(1);
+      assert.strictEqual(detailRows().length, 0, "clicking the open row's button closes its panel");
+
+      // Reopening row A names row A again — no state leaks between panels.
+      click(0);
+      assert.strictEqual(detailRows().length, 1);
+      confirmation = collectText(authHosts()[0]).join(" ");
+      assert(confirmation.includes("chatgpt_codex / codex-auto-review"), "reopening row A names row A again");
+    });
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+  }
 });
 
 check("metadata decisions require selected fields, an explicit confirmation, and CAS; no fields preselected", function () {
