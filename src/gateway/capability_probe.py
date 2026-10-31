@@ -582,9 +582,9 @@ def build_preview(
     target/selection, protocol, plan bounds, tariff freshness, owner
     selection, ceiling. The tariff lookup runs before the protocol gate
     because it is a local catalogue read — zero requests, zero cost — and
-    an unusable ceiling (NaN, ±inf, a bool or an unrepresentable
-    integer) also fails closed, below the protocol/tariff text.
-    the price must be honest in every refusal.
+    the price must be honest in every refusal. An unusable ceiling (NaN,
+    ±inf, a bool or an unrepresentable integer) also fails closed, below
+    the protocol/tariff text.
     """
     _validate_target(provider_id, model_id)
     selected = _validate_probes(probes)
@@ -1021,6 +1021,26 @@ def _usage_tokens(usage: Any) -> dict[str, int | None]:
     }
 
 
+def _usable_cost(cost: Any) -> float | None:
+    """Return ``cost`` as a usable non-negative finite float, else ``None``.
+
+    A provider's ``usage.cost`` arrives from JSON, where an overflowing
+    literal (``1e400``) parses to ``inf`` and a bare ``NaN`` token is
+    accepted by ``json.loads``: neither is a usable cost, and neither may
+    reach a persisted evidence claim or a response body. An integer too
+    large to represent as a float is likewise unusable.
+    """
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    try:
+        value = float(cost)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
 def cost_accounting_ok(usage: Any) -> bool:
     """Whether the response carries cost accounting the policy requires.
 
@@ -1028,12 +1048,13 @@ def cost_accounting_ok(usage: Any) -> bool:
     has no evidence that the request was accounted for, so the scope's rule
     applies: stop before the next request and leave the unrun capabilities
     ``not_tested``. The billing-source *vocabulary* is not documented, so
-    only its structure is checked — never a guessed meaning.
+    only its structure is checked — never a guessed meaning. A non-finite
+    cost (``NaN`` or ±inf) is not cost accounting: it is unusable, so the
+    same inconclusive rule applies rather than a claim.
     """
     if not isinstance(usage, dict):
         return False
-    cost = usage.get("cost")
-    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+    if _usable_cost(usage.get("cost")) is None:
         return False
     if "opencode" in usage:
         inner = usage.get("opencode")
@@ -1045,10 +1066,7 @@ def cost_accounting_ok(usage: Any) -> bool:
 def _reported_cost(usage: Any) -> float | None:
     if not isinstance(usage, dict):
         return None
-    cost = usage.get("cost")
-    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
-        return float(cost)
-    return None
+    return _usable_cost(usage.get("cost"))
 
 
 def evidence_error_class(error: AdapterError) -> str:

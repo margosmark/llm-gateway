@@ -781,6 +781,55 @@ class RunnerBoundsTests(unittest.TestCase):
         self.assertEqual(by_capability["image_input"]["status"], "not_tested")
         self.assertEqual(by_capability["function_tools"]["status"], "not_tested")
 
+    def test_non_finite_cost_accounting_is_inconclusive_not_a_claim(self):
+        """R66 F-2: `NaN` and ±inf `usage.cost` are unusable accounting.
+
+        ``NaN < 0`` is ``False``, so the old check passed a NaN cost through
+        to ``observed_supported`` evidence; ``inf >= 0`` kept an overflowing
+        cost accounted. Both take the missing-cost path instead: one request,
+        inconclusive result, no unrun claim, and no reported cost.
+        """
+        for bad_cost in (float("nan"), float("inf"), float("-inf"), 1e400):
+            with self.subTest(cost=bad_cost):
+                transport = _scripted([chat_response(text="a" * 32, cost=bad_cost)])
+                outcome = run_suite(PROTOCOL, ALL_PROBES, transport, price=FRESH_PRICE)
+                self.assertEqual(len(transport.payloads), 1, "the second request must never be sent")
+                self.assertEqual(outcome.blocked_reason, "cost_accounting")
+                self.assertIsNone(outcome.reported_cost_usd)
+                by_capability = {row["capability"]: row for row in outcome.results}
+                self.assertEqual(by_capability["text_generation"]["status"], "inconclusive")
+                self.assertEqual(by_capability["image_input"]["status"], "not_tested")
+                self.assertEqual(by_capability["function_tools"]["status"], "not_tested")
+
+    def test_cost_accounting_and_reported_cost_draw_the_finite_line(self):
+        """R66 F-1/F-2: `math.isfinite` at the value boundary, nowhere else.
+
+        Every previously accepted cost stays accepted byte-for-byte and
+        every previously rejected one stays rejected; the new rejections
+        are exactly NaN, ±inf, and an integer too large for a float (which
+        used to be "accounted" and crashed ``_reported_cost`` with
+        OverflowError).
+        """
+        from gateway.capability_probe import _reported_cost, cost_accounting_ok
+
+        for cost in (0, 0.0, 1, 1.5, 0.000002, 10**9):
+            with self.subTest(accepted=cost):
+                self.assertTrue(cost_accounting_ok({"cost": cost}), cost)
+                self.assertEqual(_reported_cost({"cost": cost}), float(cost))
+        rejected = (-1, -0.5, True, False, "1", None, float("nan"), float("inf"),
+                    float("-inf"), 1e400, 10**400)
+        for cost in rejected:
+            with self.subTest(rejected=cost):
+                self.assertFalse(cost_accounting_ok({"cost": cost}), cost)
+                self.assertIsNone(_reported_cost({"cost": cost}), cost)
+        for usage in (None, {}, {"prompt_tokens": 10, "completion_tokens": 5}):
+            with self.subTest(usage=usage):
+                self.assertFalse(cost_accounting_ok(usage))
+                self.assertIsNone(_reported_cost(usage))
+        # a bad inner billing source still refuses a finite cost
+        self.assertFalse(cost_accounting_ok({"cost": 1.0, "opencode": {"billing_source": 5}}))
+        self.assertTrue(cost_accounting_ok({"cost": 1.0, "opencode": {"billing_source": "plan"}}))
+
     def test_cancellation_stops_before_the_second_request(self):
         cancel = threading.Event()
 

@@ -491,6 +491,78 @@ class ProbeHttpTests(unittest.TestCase):
         finally:
             costs._CATALOG_PATH = original
 
+    def test_an_overflowing_provider_cost_never_reaches_the_run_body(self):
+        """R66 F-1: a provider's overflowing `usage.cost` must stay strict JSON.
+
+        The upstream payload carries the overflowing literal ``1e400``,
+        which Python decodes as ``inf``; the old ``_reported_cost`` accepted
+        it (``inf >= 0``) and ``json_response`` (``allow_nan=True``) emitted
+        the non-RFC-8259 token ``Infinity`` — so the console's
+        ``JSON.parse`` threw *after a paid run had executed and persisted*,
+        the owner saw a generic failure, and a re-run meant duplicate
+        spend. The raw 200 body must parse strictly, must carry no
+        accounted cost, and must not claim usable cost accounting.
+        """
+        _UpstreamHandler.usage = {"prompt_tokens": 120, "completion_tokens": 40, "cost": 1e400}
+        probes = ["text_generation"]
+        confirmation, revision = self._confirmation(probes=probes)
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": probes,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        body = raw.decode("utf-8")
+        self.assertNotIn("Infinity", body)
+        parsed = _strict_json_loads(body)  # raises on Infinity/NaN/-Infinity
+        self.assertIsNone(parsed["reported_cost_usd"], "an unusable cost is not accounted cost")
+        statuses = sorted({row["status"] for row in parsed["results"]})
+        self.assertEqual(statuses, ["inconclusive"], statuses)
+        self.assertEqual(parsed["blocked_reason"], "cost_accounting")
+
+    def test_a_nan_provider_cost_yields_inconclusive_results(self):
+        """R66 F-2: a `NaN` provider `usage.cost` is not cost accounting.
+
+        ``NaN < 0`` is ``False``, so the old ``cost_accounting_ok`` returned
+        ``True`` and the run recorded ``observed_supported`` evidence — a
+        claim the scope's rule says must be inconclusive. The upstream sends
+        the bare ``NaN`` token (valid to Python's decoder, not to RFC 8259);
+        the run body must stay strict JSON and the result inconclusive.
+        """
+        _UpstreamHandler.usage = {"prompt_tokens": 120, "completion_tokens": 40, "cost": float("nan")}
+        probes = ["text_generation"]
+        confirmation, revision = self._confirmation(probes=probes)
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": probes,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        parsed = _strict_json_loads(raw.decode("utf-8"))
+        statuses = sorted({row["status"] for row in parsed["results"]})
+        self.assertEqual(statuses, ["inconclusive"], statuses)
+        self.assertNotIn("observed_supported", statuses)
+        self.assertIsNone(parsed["reported_cost_usd"])
+        self.assertEqual(parsed["blocked_reason"], "cost_accounting")
+
     # --- confirmation --------------------------------------------------
 
     def test_a_run_needs_the_confirmation_issued_by_its_own_preview(self):
