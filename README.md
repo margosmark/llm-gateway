@@ -175,8 +175,14 @@ The owner API supports exact-model preview and explicitly selected, provenance-r
 
 **One reviewed probe protocol is enabled, and only one**: `opencode_go` /
 `mimo-v2.6-flash`. Every other provider/model pair keeps the old answer —
-preview available with HTTP 422 and `probe_unavailable`, and no request is
-sent.
+preview available with HTTP 422 and `no_probe_protocol`, and no request is
+sent. That refusal is policy, not a malfunction: the probe registry is an
+opt-in allowlist, the console shows its coverage (`N pair(s) registered …`)
+before any preview, and the refusal renders the model's real published
+tariff when the catalogue has one — a priced model never reads as
+"Price: Unknown". Two distinct refusal reasons are reported:
+`no_probe_protocol` (no reviewed protocol entry for the pair) and
+`no_trusted_price` (the catalogue tariff is missing or stale).
 
 A probe is a paid inference request, so the run path fails closed at each
 gate and names the gate that refused it:
@@ -200,7 +206,9 @@ not a hard cap (OpenCode Go exposes no request-level max-charge control). The
 authorisation is **not persisted** — it lives in the open console page only, so
 every preview and every run re-authorises explicitly; withdrawing it, or
 closing the page, ends the grant immediately. Cancelling at this step sends
-nothing to the provider.
+nothing to the provider. Exactly one model row's discovery panel can be open at
+a time: opening another row's panel closes the previous one, so the paid-run
+confirmation on screen always names the provider/model that row would bill.
 
 The run itself is at most **two one-shot requests** — one for text, one shared
 by image and function tools — non-streamed, non-retried, never failed over,

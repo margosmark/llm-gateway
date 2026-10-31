@@ -33,6 +33,22 @@ SYNTHETIC_KEY = "synthetic-probe-key-0123456789"
 LEAKY_TEXT = "LEAKY-PROVIDER-TEXT-MUST-NOT-PERSIST"
 
 
+def _strict_json_loads(body: str) -> Any:
+    """``json.loads`` that rejects the non-RFC-8259 tokens.
+
+    ``json.loads`` accepts ``NaN``/``Infinity``/``-Infinity`` by default
+    (``allow_nan``), so a body carrying one would parse here while the
+    console's ``JSON.parse`` throws. ``parse_constant`` fires on exactly those
+    three constants; raising turns a silent pass into a failure, mirroring
+    what the browser does with the same bytes.
+    """
+
+    def _reject(token: str) -> Any:
+        raise AssertionError(f"non-RFC-8259 token {token!r} in body: {body}")
+
+    return json.loads(body, parse_constant=_reject)
+
+
 def _usage() -> dict[str, Any]:
     return {"prompt_tokens": 120, "completion_tokens": 40, "cost": 0.000002}
 
@@ -236,8 +252,58 @@ class ProbeHttpTests(unittest.TestCase):
         )
         payload = payload or {}
         self.assertEqual(status, 422)
-        self.assertEqual(payload["error"]["type"], "probe_unavailable")
+        self.assertEqual(payload["error"]["type"], "no_probe_protocol")
         self.assertEqual(_UpstreamHandler.requests, [])
+
+    def test_priced_but_unregistered_model_reports_the_registry_blocker_and_real_price(self):
+        """End-to-end regression for Mark's minimax-m2.7 report (card t_784e39d5).
+
+        The deployed console said "no trustworthy price ... Price: Unknown"
+        for a model the catalogue prices. Here the harness stages a real
+        catalogue model that carries a fresh tariff but has no protocol
+        entry: the preview must refuse with the registry as the sole blocker,
+        render the real published tariff, and send nothing upstream.
+        """
+        with self.h.config.mutate() as config:
+            provider = config.providers[PROVIDER]
+            provider.models["minimax-m2.7"] = ModelEntry(
+                model_id="minimax-m2.7",
+                enabled=True,
+                dialect="openai_chat",
+                source="discovered",
+                supports_function_tools=False,
+                supports_image_input=False,
+            )
+        status, payload, _ = self._preview(model="minimax-m2.7", owner=OWNER)
+        self.assertEqual(status, 422, payload)
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["code"], "no_probe_protocol")
+        self.assertNotIn("trustworthy price", payload["reason"])
+        # The real catalogue tariff, not "Unknown". The status is whatever
+        # freshness the live snapshot warrants (the dated snapshot ages), but
+        # a priced model must never collapse to "unknown": the rates and
+        # provenance are always rendered, and the refusal never blames price.
+        price = payload["price"]
+        self.assertIn(price["status"], {"known", "stale"})
+        self.assertEqual(price["input_per_m"], 0.3)
+        self.assertEqual(price["output_per_m"], 1.2)
+        self.assertEqual(price["source"], "https://opencode.ai/data/minimax/minimax-m2-7")
+        self.assertEqual(price["as_of"], "2026-10-25")
+        self.assertIsNone(price["amount"], "no run estimate exists without a protocol")
+        self.assertNotIn("confirmation", payload)
+        self.assertEqual(_UpstreamHandler.requests, [], "a refused preview sends nothing")
+
+    def test_registry_coverage_is_reported_on_the_evidence_read(self):
+        status, payload, _ = self.h.request(
+            "GET",
+            f"/owner/api/capabilities?provider_id={PROVIDER}&model_id={MODEL}",
+        )
+        self.assertEqual(status, 200, payload)
+        registry = payload["probe_registry"]
+        self.assertEqual(registry["registered_count"], 1)
+        self.assertEqual(registry["registered_pairs"], [["opencode_go", "mimo-v2.6-flash"]])
+        self.assertGreaterEqual(registry["staged_model_count"], 1)
+        self.assertTrue(registry["this_pair_registered"])
 
     def test_preview_is_unavailable_until_the_owner_selects_the_route(self):
         for owner in (None, {}, {"authorize_billing_route": False}):
@@ -327,7 +393,7 @@ class ProbeHttpTests(unittest.TestCase):
             self.h.app.probe_price_lookup = lambda provider_id, model_id: None
             status, payload, _ = self._preview()
             self.assertEqual(status, 422)
-            self.assertEqual(payload["code"], "price_unavailable")
+            self.assertEqual(payload["code"], "no_trusted_price")
             self.assertIsNone(payload["estimate"]["total_usd"])
             self.h.app.probe_price_lookup = (
                 lambda provider_id, model_id: {
@@ -339,10 +405,91 @@ class ProbeHttpTests(unittest.TestCase):
             )
             status, payload, _ = self._preview()
             self.assertEqual(status, 422)
-            self.assertEqual(payload["code"], "price_unavailable")
+            self.assertEqual(payload["code"], "no_trusted_price")
             self.assertIn("stale", payload["reason"])
         finally:
             self.h.app.probe_price_lookup = original
+
+    def test_non_finite_catalogue_rates_never_leak_invalid_json_onto_the_wire(self):
+        """A non-finite catalogue rate must not make the refusal body unparseable.
+
+        A catalogue carrying an overflowing JSON number (``1e400`` -> ``inf``
+        in Python) or a bare ``NaN`` token passes ``isinstance(v, (int,
+        float))`` in the tariff block. Serialised with ``allow_nan=True`` (the
+        ``json_response`` default) those emit the non-RFC-8259 tokens
+        ``Infinity``/``-Infinity``/``NaN``, so the console's ``JSON.parse``
+        throws instead of showing the honest ``no_trusted_price`` refusal. The
+        poison goes through the DATA layer (``gateway.costs._CATALOG_PATH``),
+        so the real ``catalog_price_for`` -> ``price_for`` -> ``published_prices``
+        path runs, never the ``probe_price_lookup`` seam. The RAW body must be
+        strict-JSON and the run must still fail closed.
+        """
+        from gateway import costs
+
+        def _catalogue(input_rate, cached_rate):
+            return {
+                "models": {
+                    MODEL: {
+                        "price_input_per_m": input_rate,
+                        "price_output_per_m": 1.2,
+                        "price_cached_read_per_m": cached_rate,
+                        "source": "https://opencode.ai/data/xiaomi/mimo-v2-6-flash",
+                        "observed_at": "2026-10-25",
+                    }
+                }
+            }
+
+        # A non-finite *input* rate makes price_status() report "unknown", so
+        # the tariff gate refuses deterministically -- the poisoned rates are
+        # exactly the ones the tariff block would otherwise serialise. The
+        # overflow literal is standards-valid JSON Python reads as inf; the NaN
+        # variant writes the bare token Python's own json.loads accepts. Each
+        # case names the rate keys poisoned (must be omitted from the block)
+        # and the finite key that must survive untouched.
+        variants = {
+            "input_and_cached_overflow": (
+                _catalogue(1e400, 1e400),
+                ("input_per_m", "cached_read_per_m"),
+                {"output_per_m": 1.2},
+            ),
+            "input_nan_literal": (
+                _catalogue(float("nan"), 0.3),
+                ("input_per_m",),
+                {"output_per_m": 1.2, "cached_read_per_m": 0.3},
+            ),
+        }
+        original = costs._CATALOG_PATH
+        try:
+            for name, (catalogue, poisoned_keys, finite_rates) in variants.items():
+                with self.subTest(poison=name), tempfile.TemporaryDirectory() as tmp:
+                    poisoned = Path(tmp) / "go_catalog.json"
+                    poisoned.write_text(json.dumps(catalogue), encoding="utf-8")
+                    costs._CATALOG_PATH = poisoned
+                    status, raw, _ = self.h.request(
+                        "POST",
+                        "/owner/api/capabilities/preview",
+                        {"provider_id": PROVIDER, "model_id": MODEL,
+                         "probes": ALL_PROBES, "owner": OWNER},
+                        raw=True,
+                    )
+                    self.assertEqual(status, 422)
+                    assert isinstance(raw, bytes), raw
+                    body = raw.decode("utf-8")
+                    parsed = _strict_json_loads(body)
+                    self.assertFalse(parsed["available"])
+                    self.assertEqual(parsed["code"], "no_trusted_price")
+                    price = parsed["price"]
+                    for key in poisoned_keys:
+                        self.assertNotIn(key, price)
+                    for key, value in finite_rates.items():
+                        self.assertEqual(price[key], value)
+                    self.assertNotIn("confirmation", parsed)
+                    self.assertEqual(
+                        _UpstreamHandler.requests, [],
+                        "a refused preview sends nothing upstream",
+                    )
+        finally:
+            costs._CATALOG_PATH = original
 
     # --- confirmation --------------------------------------------------
 
