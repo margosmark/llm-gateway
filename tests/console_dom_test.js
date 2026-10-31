@@ -19,12 +19,12 @@ const el = helpers.el;
 
 // A minimal DOM node, enough to observe attribute behaviour.
 function makeNode(tag) {
-  return {
+  const node = {
     tag: tag,
     attributes: {},
     listeners: {},
     children: [],
-    textContent: "",
+    _text: "",
     appendChild(child) {
       this.children.push(child);
     },
@@ -38,6 +38,17 @@ function makeNode(tag) {
       this.listeners[name] = handler;
     },
   };
+  // Like the DOM: assigning textContent replaces every child.
+  Object.defineProperty(node, "textContent", {
+    get() {
+      return node._text;
+    },
+    set(value) {
+      node._text = String(value);
+      node.children = [];
+    },
+  });
+  return node;
 }
 
 // The helper builds real DOM nodes, so exercise it through a tiny stub.
@@ -51,6 +62,11 @@ const domStub = {
   createDocumentFragment() {
     return makeNode("#fragment");
   },
+  // toast() looks up its host and falls back to document.body.
+  getElementById() {
+    return null;
+  },
+  body: makeNode("body"),
 };
 global.document = domStub;
 
@@ -150,6 +166,152 @@ check("capability preview refuses unknown prices honestly and never runs unavail
   assert(source.includes('if (preview.available)'));
   assert(source.includes('Price estimates are not guaranteed billing caps.'));
   assert(source.includes('Price estimates are not guaranteed billing caps.'));
+});
+
+// A synchronous thenable so the panel's fetch chains settle inside a check.
+function syncResolve(value) {
+  if (value && typeof value.then === "function") return value;
+  return {
+    then: function (onFulfilled) {
+      if (!onFulfilled) return this;
+      try { return syncResolve(onFulfilled(value)); } catch (error) { return syncReject(error); }
+    },
+    catch: function (onRejected) { return this.then(undefined, onRejected); }
+  };
+}
+function syncReject(error) {
+  return {
+    then: function (onFulfilled, onRejected) {
+      if (!onRejected) return this;
+      try { return syncResolve(onRejected(error)); } catch (next) { return syncReject(next); }
+    },
+    catch: function (onRejected) { return this.then(undefined, onRejected); }
+  };
+}
+
+const AVAILABLE_PREVIEW = {
+  available: true, code: "ready",
+  provider_id: "opencode_go", model_id: "mimo-v2.6-flash",
+  probes: ["text_generation"], suite_version: "mvp-1",
+  maximum_requests: 1, max_output_tokens: 128, timeout_seconds: 60,
+  concurrency: 1, retries: 0, base_revision: 4, confirmation: "conf-1",
+  estimate_is_not_a_bill_guarantee: true, hard_ceiling_available: false,
+  reason: "1 bounded synthetic request(s) are ready for explicit confirmation.",
+  price: { status: "known", amount: 0.0001, currency: "USD", source: "catalog" }
+};
+
+check("the capability panel sends the owner gate fields only from an explicit authorisation, and cancel sends nothing", function () {
+  const recorded = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  global.setTimeout = function () { return 0; };  // toast cleanup must not outlive the check
+  globalThis.confirm = function () { return true; };
+  const jsonResponse = (payload) => syncResolve({
+    ok: true,
+    headers: { get: () => "application/json" },
+    json: () => syncResolve(payload),
+    text: () => syncResolve(JSON.stringify(payload)),
+  });
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+    if (url.indexOf("/api/capabilities/run") !== -1) {
+      // Avoid the refresh()/draw() full-app path; the run's own .catch toasts.
+      return syncReject(new Error("run recorded"));
+    }
+    if (url.indexOf("/api/capabilities/preview") !== -1) return jsonResponse(AVAILABLE_PREVIEW);
+    return jsonResponse({ runs: [], proposals: [], approvals: [] });
+  };
+  try {
+    const panel = domStub.createElement("div");
+    helpers.renderCapabilityPanelForTest(
+      { provider_id: "opencode_go" },
+      { model_id: "mimo-v2.6-flash" },
+      panel,
+      { can_mutate: true }
+    );
+    const buttons = () => findAll(panel, (node) => node.tag === "button");
+    const buttonText = (text) => buttons().find((b) => b.textContent === text);
+    const posts = () => recorded.filter((r) => r.method === "POST");
+
+    // Rendering reads evidence only; nothing was posted and preview is gated.
+    assert.strictEqual(recorded.length, 1, "only the evidence GET");
+    assert.strictEqual(posts().length, 0);
+    assert.strictEqual(buttonText("Preview selected probes").attributes.disabled, "", "preview gated until authorised");
+
+    // A probe is selected, then preview is attempted without authorisation.
+    const probeBox = findAll(panel, (node) => node.tag === "input" && node.attributes.type === "checkbox")[0];
+    probeBox.checked = true;
+    buttonText("Preview selected probes").listeners.click();
+    assert.strictEqual(posts().length, 0, "unauthorised preview sends nothing");
+
+    // Cancel at the authorisation step sends nothing.
+    buttonText("Cancel").listeners.click();
+    assert.strictEqual(posts().length, 0, "cancel sends nothing");
+    assert(collectText(panel).join("\n").includes("No billing route authorised. Nothing was sent to the provider."));
+
+    // The prompt is recoverable, and an invalid ceiling is refused
+    // client-side without any request.
+    buttonText("Authorise a paid probe run").listeners.click();
+    const ceilingInput = () => findAll(panel, (node) => node.tag === "input" && node.attributes.type === "number")[0];
+    ceilingInput().value = "0";
+    buttonText("Authorise billing route").listeners.click();
+    ceilingInput().value = "not-a-number";
+    buttonText("Authorise billing route").listeners.click();
+    assert.strictEqual(posts().length, 0, "an invalid ceiling sends nothing");
+
+    // A valid ceiling authorises in-page and still sends nothing by itself.
+    ceilingInput().value = "0.5";
+    buttonText("Authorise billing route").listeners.click();
+    assert.strictEqual(posts().length, 0, "authorising itself is not a request");
+    // The handler flips the live `disabled` property (the stub does not
+    // reflect properties back onto attributes the way a browser does).
+    assert.strictEqual(buttonText("Preview selected probes").disabled, false, "preview enabled after authorisation");
+    assert(collectText(panel).join("\n").includes("Held in this page only"));
+
+    // Preview now sends the exact owner gate fields.
+    buttonText("Preview selected probes").listeners.click();
+    assert.strictEqual(posts().length, 1, "one preview POST");
+    assert.deepStrictEqual(posts()[0].body.owner, {
+      authorize_billing_route: true, spend_policy: "estimate_accepted", max_spend_estimate_usd: 0.5
+    });
+
+    // The run carries the same owner object plus its confirmation and revision.
+    const runButton = buttonText("Run selected probes");
+    assert(runButton, "an available preview renders the run button");
+    runButton.listeners.click();
+    const run = posts()[1];
+    assert(run && run.url.indexOf("/api/capabilities/run") !== -1, "one run POST");
+    assert.deepStrictEqual(run.body.owner, posts()[0].body.owner, "run re-sends the confirmed owner");
+    assert.strictEqual(run.body.confirmation, "conf-1");
+    assert.strictEqual(run.body.base_revision, 4);
+
+    // Withdrawing returns the panel to the gated state.
+    buttonText("Withdraw authorisation").listeners.click();
+    assert.strictEqual(buttonText("Preview selected probes").disabled, true, "preview gated again after withdraw");
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+  }
+});
+
+check("the capability panel's authorisation is explicit, honest and never persisted", function () {
+  const panel = source.slice(source.indexOf("function renderCapabilityPanel"), source.indexOf("function renderModels()"));
+  assert(panel.includes('text: "Authorise a paid probe run"'));
+  assert(panel.includes("Probes are paid inference requests"));
+  assert(panel.includes("no request-level max-charge control"));
+  assert(panel.includes("not a provider-enforced limit"));
+  assert(panel.includes("Estimate is not a bill guarantee"));
+  assert(panel.includes('spend_policy: "estimate_accepted"'));
+  assert(panel.includes("authorize_billing_route: true"));
+  assert(panel.includes("max_spend_estimate_usd"));
+  assert(panel.includes("Held in this page only"));
+  // Nothing may persist the grant: no storage, no cookie, no config write.
+  assert(!panel.includes("localStorage"));
+  assert(!panel.includes("sessionStorage"));
+  assert(!panel.includes("document.cookie"));
 });
 
 check("metadata decisions require selected fields, an explicit confirmation, and CAS; no fields preselected", function () {

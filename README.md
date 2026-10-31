@@ -191,6 +191,17 @@ gate and names the gate that refused it:
 | Confirmation | A run needs the single-use, expiring confirmation issued by the preview that produced the estimate. |
 | Concurrency | One run in flight per gateway. A second run and a second preview are refused while one is running. |
 
+In the console, the billing-route authorisation is an explicit step inside the
+capability panel: the owner selects the probes, sets a spend ceiling (validated
+greater than zero), and clicks **Authorise billing route**. Only that
+interaction supplies `authorize_billing_route`/`spend_policy`, and the panel
+states that the probe is a paid inference request whose price is an estimate,
+not a hard cap (OpenCode Go exposes no request-level max-charge control). The
+authorisation is **not persisted** — it lives in the open console page only, so
+every preview and every run re-authorises explicitly; withdrawing it, or
+closing the page, ends the grant immediately. Cancelling at this step sends
+nothing to the provider.
+
 The run itself is at most **two one-shot requests** — one for text, one shared
 by image and function tools — non-streamed, non-retried, never failed over,
 concurrency 1, each bounded by time, request bytes, image bytes and output
