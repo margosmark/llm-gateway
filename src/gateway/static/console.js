@@ -1827,14 +1827,53 @@
 
   // --- models and routes ------------------------------------------------
 
+  // One honest price line for every preview state. A published tariff is
+  // never rendered as "Unknown": known rates print with their source and
+  // observation date even when another gate blocks the run, a stale tariff
+  // says it is stale, and only a model the catalogue does not price reads
+  // "no published price". `amount` is the worst-case run *estimate* and only
+  // exists when a protocol supplied the request bounds.
+  function probePriceText(price) {
+    if (!price || price.status === "unknown" || price.status === undefined) return "no published price";
+    var tariff = "";
+    if (typeof price.input_per_m === "number" && typeof price.output_per_m === "number") {
+      tariff = "tariff " + price.input_per_m + "/" + price.output_per_m + " USD per 1M in/out";
+      if (typeof price.cached_read_per_m === "number") tariff += " (cached read " + price.cached_read_per_m + ")";
+    }
+    var provenance = (price.source ? " from " + price.source : "") + (price.as_of ? ", observed " + price.as_of : "");
+    if (typeof price.amount === "number") {
+      return "worst-case estimate " + price.amount + " " + price.currency + (tariff ? " (" + tariff + ")" : "") + provenance;
+    }
+    if (price.status === "stale") {
+      return "stale published price" + (tariff ? " (" + tariff + ")" : "") + provenance + "; stale pricing blocks paid probes";
+    }
+    return (tariff || "published price") + provenance;
+  }
+
   function renderCapabilityPanel(provider, model, panel) {
     var target = { provider_id: provider.provider_id, model_id: model.model_id };
     var readUrl = BASE + "/api/capabilities?provider_id=" + encodeURIComponent(target.provider_id) + "&model_id=" + encodeURIComponent(target.model_id);
     panel.appendChild(el("p", { class: "small muted", text: "Optional synthetic capability discovery. No probes run on page load or catalogue refresh. Any device that can reach this trusted-LAN console is an administrator; there is no individual owner login." }));
     panel.appendChild(el("p", { class: "small muted", text: "Probe results are evidence, not guarantees. Unknown price or unsupported probe protocol blocks execution; estimates are not a bill ceiling. Fixed suite mvp-1: exact bounded synthetic text marker; locally generated inline shape-count image; harmless forced function schema whose returned call is never executed." }));
+    // Probe-registry coverage, rendered from the evidence read so the owner
+    // sees the opt-in allowlist before clicking anything: a refusal on an
+    // unregistered pair is policy, not a malfunction.
+    var registryLine = el("p", { class: "small muted" });
+    panel.appendChild(registryLine);
     var evidence = el("div", { class: "capability-evidence", role: "status", "aria-live": "polite" });
     panel.appendChild(evidence);
     api(readUrl).then(function (data) {
+      var registry = data.probe_registry;
+      if (registry) {
+        var scope = typeof registry.staged_model_count === "number"
+          ? " of " + registry.staged_model_count + " staged model(s)"
+          : "";
+        registryLine.textContent = "Probe registry: " + registry.registered_count + " pair(s) registered for paid probing" + scope +
+          " — an opt-in allowlist, so an unregistered pair refuses before any request. This pair: " +
+          (registry.this_pair_registered ? "registered." : "not registered.");
+      } else {
+        registryLine.textContent = "Probe registry coverage not reported; probing remains an opt-in allowlist.";
+      }
       (data.runs || []).forEach(function (runRecord) {
         (runRecord.results || []).forEach(function (result) {
           evidence.appendChild(el("p", { class: "small", text: result.capability + ": " + result.status + " · " + (result.method || "method unknown") + " · " + when(runRecord.finished_at) + " (observed evidence; not a guarantee)" }));
@@ -1940,7 +1979,7 @@
         .then(function (preview) {
           previewHost.textContent = "";
           previewHost.appendChild(el("p", { class: "small", text: "Target: " + preview.provider_id + " / " + preview.model_id + " · selected: " + preview.probes.join(", ") + " · suite " + preview.suite_version + " · max " + preview.maximum_requests + " request(s), output " + preview.max_output_tokens + " tokens, " + preview.timeout_seconds + "s, concurrency " + preview.concurrency + ", retries " + preview.retries + "." }));
-          previewHost.appendChild(el("p", { class: "notice warn", text: preview.reason + " Price: " + (preview.price && preview.price.status === "known" ? preview.price.amount + " " + preview.price.currency + " from " + preview.price.source : "Unknown") + ". No provider request has been sent." }));
+          previewHost.appendChild(el("p", { class: "notice warn", text: preview.reason + " Price: " + probePriceText(preview.price) + ". No provider request has been sent." }));
           previewHost.appendChild(el("p", { class: "small muted", text: "Estimate is not a bill guarantee: worst-case tariff arithmetic on the published bounds; no provider-enforced hard ceiling exists for this route." }));
           if (preview.available) {
             previewHost.appendChild(el("button", { type: "button", text: "Run selected probes", disabled: !canMutate, onclick: function () {
@@ -1948,14 +1987,14 @@
               api(BASE + "/api/capabilities/run", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected, owner: authorisedOwner, base_revision: preview.base_revision, confirmation: preview.confirmation, confirmed: true } }).then(function () { return refresh(); }).catch(function (error) { toast(error.message + " No result is treated as unsupported unless the evidence is an unambiguous capability-specific refusal.", "bad"); });
             } }));
           } else {
-            previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable: no trustworthy price/probe contract. This probe cannot be run; Unknown is not false." }));
+            previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable: this probe cannot be run for the reason above; Unknown is not false." }));
           }
         }).catch(function (error) {
           var unavailable = error.payload && typeof error.payload.available === "boolean" ? error.payload : null;
           previewHost.textContent = "";
           if (unavailable) {
             previewHost.appendChild(el("p", { class: "small", text: "Target: " + unavailable.provider_id + " / " + unavailable.model_id + " · selected: " + (unavailable.probes || []).join(", ") + " · suite " + unavailable.suite_version + " · maximum " + unavailable.maximum_requests + " request(s), output " + unavailable.max_output_tokens + " tokens, timeout " + unavailable.timeout_seconds + "s." }));
-            previewHost.appendChild(el("p", { class: "notice warn", text: unavailable.reason + " Price: Unknown. No provider request has been sent." }));
+            previewHost.appendChild(el("p", { class: "notice warn", text: unavailable.reason + " Price: " + probePriceText(unavailable.price) + ". No provider request has been sent." }));
             previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable; Unknown is not false. No probe was executed." }));
           } else {
             previewHost.appendChild(el("p", { class: "notice warn", text: "Preview refused: " + error.message + ". No provider request was sent." }));
@@ -3021,6 +3060,11 @@
         } finally {
           state = previous;
         }
+      },
+      probePriceTextForTest: function (price) {
+        // The preview price line, exercised directly on real payloads so a
+        // priced model can never render as "no published price".
+        return probePriceText(price);
       },
       renderLeaderboardForTest: function (payload, view) {
         // A test hands the tab a payload directly; the phase is forced to

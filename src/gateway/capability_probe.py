@@ -45,7 +45,6 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from gateway.adapters.base import AdapterError, ProviderResponse
-from gateway.capability_discovery import preview_for as _blocked_preview
 from gateway.config import (
     ERROR_AUTH,
     ERROR_EXHAUSTED,
@@ -420,6 +419,82 @@ def request_estimate(
 
 # --- preview ---------------------------------------------------------------
 
+def registry_coverage(staged_model_count: int | None = None) -> dict[str, Any]:
+    """What the opt-in probe allowlist covers, so a refusal reads as policy.
+
+    The protocol registry is deliberate: a pair joins it only after its
+    bounded request and pricing contract has been reviewed. The console
+    surfaces this *before* the owner previews, so "not registered" is never
+    mistaken for a malfunction.
+    """
+    summary: dict[str, Any] = {
+        "registered_pairs": [list(pair) for pair in sorted(PROBE_PROTOCOLS)],
+        "registered_count": len(PROBE_PROTOCOLS),
+    }
+    if staged_model_count is not None:
+        summary["staged_model_count"] = staged_model_count
+    return summary
+
+
+def _validate_target(provider_id: str, model_id: str) -> None:
+    if not provider_id or len(provider_id) > 64 or not model_id or len(model_id) > 256:
+        raise ValueError("invalid target")
+
+
+def _base_preview(provider_id: str, model_id: str, probes: list[str], revision: int) -> dict[str, Any]:
+    """The complete preview shape every path returns, including refusals.
+
+    The console renders this shape whether or not a run is possible, so an
+    unavailable preview carries the same fields as a ready one. This is the
+    single definition of that shape (it previously lived in
+    ``capability_discovery.preview_for``, whose bundled reason text claimed
+    both a missing protocol and a missing price -- factually wrong for a
+    model the catalogue does price, and unreachable from the routes).
+    """
+    return {
+        "available": False,
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "probes": list(probes),
+        "suite_version": SUITE_VERSION,
+        "maximum_requests": len(probes),
+        "max_output_tokens": 128,
+        "timeout_seconds": 15,
+        "concurrency": 1,
+        "retries": 0,
+        "streaming": False,
+        "price": {"status": "unknown", "amount": None, "currency": "USD", "source": None},
+        "reason": "",
+        "base_revision": revision,
+        "estimate_is_not_a_bill_guarantee": True,
+    }
+
+
+def _tariff_price_block(price: Any, status: str) -> dict[str, Any]:
+    """The published tariff as it stands, honestly labelled.
+
+    ``status`` mirrors :func:`price_status` (``known``/``stale``/``unknown``)
+    and the per-million rates travel whenever the catalogue published them,
+    even when the run is blocked by another gate -- a blocked probe never
+    turns a real price into "Unknown". ``amount`` stays ``None`` here: the
+    dollar amount is the worst-case run *estimate*, which only exists once a
+    protocol supplies the request bounds.
+    """
+    block: dict[str, Any] = {
+        "status": status,
+        "amount": None,
+        "currency": "USD",
+        "source": price.get("source") if isinstance(price, dict) else None,
+        "as_of": price.get("observed_at") if isinstance(price, dict) else None,
+    }
+    if isinstance(price, dict):
+        for key in ("input_per_m", "output_per_m", "cached_read_per_m"):
+            value = price.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                block[key] = float(value)
+    return block
+
+
 def _owner_gate(owner: Any) -> tuple[str, str] | None:
     """Validate the owner's explicit selection. Returns the first refusal."""
     if not isinstance(owner, dict):
@@ -475,19 +550,37 @@ def build_preview(
     """Render the full preview. Sends nothing, persists nothing.
 
     Always returns the complete preview shape — including when unavailable —
-    so the console can show the owner exactly why a run is blocked. Unknown
-    or stale pricing, a missing route authorization, a hard-cap policy and a
-    ceiling below the estimate all fail closed, in that order.
+    so the console can show the owner exactly why a run is blocked. Each
+    refusal names only the gate that refused it: a missing protocol entry is
+    never reported as a missing price, and a published tariff is rendered
+    even when the protocol gate blocks the run. Gate order is unchanged:
+    target/selection, protocol, plan bounds, tariff freshness, owner
+    selection, ceiling. The tariff lookup runs before the protocol gate
+    because it is a local catalogue read — zero requests, zero cost — and
+    the price must be honest in every refusal.
     """
-    base = _blocked_preview(provider_id, model_id, probes, revision)  # validates target + selection
-    protocol = protocol_for(provider_id, model_id)
-    if protocol is None:
-        return _unavailable(base, "probe_unavailable", base.get("reason", "No approved probe protocol is registered."))
+    _validate_target(provider_id, model_id)
+    selected = _validate_probes(probes)
+    base = _base_preview(provider_id, model_id, selected, revision)
 
     now = now or datetime.now(timezone.utc)
     lookup = price_lookup if price_lookup is not None else catalog_price_for
     price = lookup(provider_id, model_id)
     status = price_status(price, now)
+
+    protocol = protocol_for(provider_id, model_id)
+    if protocol is None:
+        # Registry refusal. The price is *not* the blocker, so it is reported
+        # exactly as the catalogue holds it and the reason says only what is
+        # actually missing: the reviewed protocol entry.
+        base["price"] = _tariff_price_block(price, status)
+        return _unavailable(
+            base,
+            "no_probe_protocol",
+            "This exact provider/model pair has no reviewed probe protocol registered, so the paid "
+            "probe is blocked; probe registration is an opt-in allowlist, not a catalogue-wide "
+            "setting. The published tariff below is shown for reference and is not the blocker.",
+        )
 
     result = dict(base)
     result.update(
@@ -506,6 +599,7 @@ def build_preview(
             "reason": "",
         }
     )
+    result["price"] = _tariff_price_block(price, status)
 
     try:
         plan = plan_requests(protocol, probes)
@@ -527,23 +621,16 @@ def build_preview(
             "price_source": price.get("source") if isinstance(price, dict) else None,
             "price_as_of": price.get("observed_at") if isinstance(price, dict) else None,
         }
-        result["price"] = {
-            "status": "unknown",
-            "amount": None,
-            "currency": "USD",
-            "source": price.get("source") if isinstance(price, dict) else None,
-            "as_of": price.get("observed_at") if isinstance(price, dict) else None,
-        }
         if status == "stale" and isinstance(price, dict):
             return _unavailable(
                 result,
-                "price_unavailable",
+                "no_trusted_price",
                 f"The published OpenCode Go tariff for this exact model was observed on "
                 f"{price.get('observed_at')} and is stale; paid probes are blocked until it is refreshed.",
             )
         return _unavailable(
             result,
-            "price_unavailable",
+            "no_trusted_price",
             "No published, fresh OpenCode Go tariff is available for this exact provider/model; paid probes are blocked.",
         )
 

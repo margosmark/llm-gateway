@@ -575,7 +575,11 @@ minute of wall clock.
    the full contract — request count, output-token cap, timeouts, byte
    ceilings, the tariff it priced against and its observation date — plus a
    single-use `confirmation`. Preview sends nothing upstream.
-   * `price_unavailable` → the published tariff is missing or stale; nothing
+   * `no_probe_protocol` → no reviewed protocol entry exists for this exact
+     pair; the probe registry is an opt-in allowlist (the console shows its
+     coverage before you preview). The published tariff, if the catalogue
+     has one, still renders — it is not the blocker.
+   * `no_trusted_price` → the published tariff is missing or stale; nothing
      can run until the catalogue is refreshed.
    * `hard_cap_unavailable` → a hard dollar ceiling was requested; OpenCode
      Go publishes no enforceable cap, so the run is refused rather than
