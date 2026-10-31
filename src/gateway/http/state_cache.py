@@ -8,7 +8,8 @@ answers in under 6ms. The console reads it human-paced, so the rendered
 body is cached and served verbatim while its inputs are unchanged.
 
 **Invalidation is keying, not callbacks.** The cache key is a digest of
-every input the render reads:
+every input the render reads whose value can change while the process is
+up:
 
 ====================  ====================================================
 input                 change detector
@@ -35,7 +36,22 @@ circuits              structural digest of ``details()`` with the two
 limits                digest of ``LimitStore.all()``
 request               query string, surface, and the mutation/credential
                       verdicts derived from the request
+release identity      the **result** of ``release_identity()`` - a plain
+                      four-key dict of strings. The function re-reads
+                      ``release.json`` on every call, so a release written
+                      after the container was up (``scripts/release.py
+                      --build``, ``scripts/write_release_identity.py``
+                      against a running volume) must change the key on the
+                      next read. The callable *object* is a per-process
+                      constant and would catch nothing - that was the
+                      original defect
 ====================  ====================================================
+
+Process constants the render also reads are deliberately not part of the
+key: ``ledger.durability()`` (``persistence is not None`` plus two
+literals) and the cooldown-policy literals cannot change after start-up,
+and wall-clock fields are handled by ``refresh_after`` / ``hard_max``
+below.
 
 A mutation therefore changes the key, and the very next read takes the
 miss path and renders synchronously: no staleness window can lie about
@@ -135,7 +151,9 @@ class StateCache:
     # --- token ----------------------------------------------------------
 
     def token(self, request: Request) -> str:
-        """The cache key: a digest of every input the render reads."""
+        """The cache key: a digest of every input the render reads that
+        can change while the process is up (process constants are not
+        part of it - see the module docstring)."""
         app = self._app
         config = app.config.snapshot()
         try:
@@ -162,7 +180,11 @@ class StateCache:
             }],
             ["limits", app.limits.all()],
             ["request", [request.raw_query, app._surface(request), app._can_mutate(request), app._can_enroll_credentials(request)]],
-            ["identity", [app.base_url, app._release_identity]],
+            # The release identity's *result*, not the callable: the
+            # callable object str()s to a per-process constant, while
+            # release_identity() re-reads release.json on every call, so a
+            # release written after start-up has to change this key.
+            ["identity", [app.base_url, app._release_identity() if app._release_identity else {}]],
         ]
         if app.ledger is not None:
             components.append(["ledger", [app.ledger.version, app.ledger.evicted, app.ledger.totals(), app.ledger.rollup()]])
