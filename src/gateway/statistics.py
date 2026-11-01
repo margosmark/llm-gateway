@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from gateway.bridge.streams import usable_token_count
 from gateway.costs import calculate_cost
 
 WINDOW_HOURS = {"hour": 1, "day": 24, "month": 24 * 30}
@@ -64,9 +65,13 @@ def aggregate_statistics(events: list[dict[str, Any]], window: str = "day", *, _
             latency = event.get("latency_ms")
             if isinstance(latency, int) and not isinstance(latency, bool) and latency >= 0:
                 row["latency_ms"].append(latency)
-            input_tokens = counters.get("prompt_tokens", counters.get("input_tokens"))
-            output_tokens = counters.get("completion_tokens", counters.get("output_tokens"))
-            if isinstance(input_tokens, int) and input_tokens >= 0 and isinstance(output_tokens, int) and output_tokens >= 0:
+            # Bounded at read time: an over-bound provider counter (a
+            # 401-digit ledger row) is unknown, so the group's token columns
+            # read None instead of summing a JSON number the console parses
+            # as Infinity.
+            input_tokens = usable_token_count(counters.get("prompt_tokens", counters.get("input_tokens")))
+            output_tokens = usable_token_count(counters.get("completion_tokens", counters.get("output_tokens")))
+            if input_tokens is not None and output_tokens is not None:
                 row["input_tokens"] += input_tokens
                 row["output_tokens"] += output_tokens
                 row["token_counted_requests"] += 1

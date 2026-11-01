@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from gateway.bridge.streams import usable_token_count
 from gateway.stores import atomic_write_json, read_json
 
 PROBES = {"text_generation", "image_input", "function_tools"}
@@ -84,8 +85,9 @@ def _usage_metadata(value: Any) -> dict[str, int | None] | None:
     if not isinstance(value, dict):
         return None
     def _token(key: str) -> int | None:
-        entry = value.get(key)
-        return entry if isinstance(entry, int) and not isinstance(entry, bool) and entry >= 0 else None
+        # Bounded: a tampered discovery sidecar must not serialise a
+        # 401-digit count into the console as ``Infinity``.
+        return usable_token_count(value.get(key))
     tokens = {"input_tokens": _token("input_tokens"), "output_tokens": _token("output_tokens")}
     return tokens if tokens["input_tokens"] is not None or tokens["output_tokens"] is not None else None
 

@@ -45,6 +45,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from gateway.adapters.base import AdapterError, ProviderResponse
+from gateway.bridge.streams import usable_token_count
 from gateway.config import (
     ERROR_AUTH,
     ERROR_EXHAUSTED,
@@ -1009,15 +1010,18 @@ def evidence_summary_for(capability: str, status: str, payload: Any) -> str:
 
 
 def _usage_tokens(usage: Any) -> dict[str, int | None]:
+    """The token counters a run body may report, or None where they were refused.
+
+    Provider-controlled: a counter above
+    :data:`gateway.bridge.streams.MAX_TOKEN_COUNTER` reads as unknown here
+    rather than serialising into the run body as a JSON number the console's
+    ``JSON.parse`` turns into ``Infinity``.
+    """
     if not isinstance(usage, dict):
         return {"input_tokens": None, "output_tokens": None}
-    prompt = usage.get("prompt_tokens")
-    completion = usage.get("completion_tokens")
     return {
-        "input_tokens": prompt if isinstance(prompt, int) and not isinstance(prompt, bool) and prompt >= 0 else None,
-        "output_tokens": completion
-        if isinstance(completion, int) and not isinstance(completion, bool) and completion >= 0
-        else None,
+        "input_tokens": usable_token_count(usage.get("prompt_tokens")),
+        "output_tokens": usable_token_count(usage.get("completion_tokens")),
     }
 
 
