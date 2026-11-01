@@ -766,12 +766,18 @@ class ApiSurfaceTests(unittest.TestCase):
         with self.harness.config.mutate() as config:
             config.aliases["coding"].enabled = True
             config.aliases["coding"].budget = 0.01
+        from gateway.budget import month_window
         from gateway.observability import RequestEvent
         # An explicit reported zero cached counter keeps the recorded spend
         # known under the catalogue's cached-token completeness rule; a
         # counter set without it is Unknown and must never refuse.
+        # The event is seeded at the first instant of the *current* budget
+        # month, so it can never walk outside month_window() as the clock
+        # advances; reset_at is that same window's end.
+        window_start, reset_at = month_window()
+        reset_text = reset_at.isoformat().replace("+00:00", "Z")
         self.harness.router._ledger.record(RequestEvent(
-            "req_prior", "2026-10-02T00:00:00Z", "coding", serving_provider="opencode_go",
+            "req_prior", window_start.isoformat().replace("+00:00", "Z"), "coding", serving_provider="opencode_go",
             serving_model="gpt-6-luna", status=200,
             token_counters={"prompt_tokens": 1_000_000, "completion_tokens": 0, "cached_read_tokens": 0}))
         status, payload, _ = self.harness.request("POST", "/v1/chat/completions",
@@ -779,7 +785,7 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(status, 429)
         self.assertIn("$0.01", payload["error"]["message"])
         self.assertIn("$0.10", payload["error"]["message"])
-        self.assertIn("2026-11-01T00:00:00Z", payload["error"]["message"])
+        self.assertIn(reset_text, payload["error"]["message"])
         self.assertEqual(self.harness.adapter.calls, [])
 
     def test_streamed_usage_is_amended_into_request_ledger(self) -> None:

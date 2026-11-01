@@ -4,9 +4,21 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from gateway.observability import RequestEvent, RequestLedger
+
+
+def stamp(days_ago: float) -> str:
+    """A ledger timestamp ``days_ago`` days before the wall clock.
+
+    The ledger prunes rows older than its 30-day retention window against
+    the real clock, so fixture rows must be seeded relative to it: a fixed
+    calendar date eventually ages out of its own fixture (the 2026-11-20
+    bomb wave, where the seeded row was pruned before the restart read it).
+    """
+    return (datetime.now(UTC) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class DurableLedgerTests(unittest.TestCase):
@@ -14,7 +26,7 @@ class DurableLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "request-ledger.jsonl"
             ledger = RequestLedger(capacity=10, persistence_path=path)
-            ledger.record(RequestEvent("req-1", "2026-10-21T00:00:00Z", "coding", status=200))
+            ledger.record(RequestEvent("req-1", stamp(days_ago=1), "coding", status=200))
             self.assertTrue(ledger.flush())
             ledger.close()
             stored = path.read_text()
@@ -70,7 +82,7 @@ class DurableLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger.jsonl"
             ledger = RequestLedger(persistence_path=path)
-            event = RequestEvent("req", "2026-10-21T00:00:00Z", "a", status=200)
+            event = RequestEvent("req", stamp(days_ago=1), "a", status=200)
             row = event.to_dict()
             row["prompt"] = "private content"
             ledger._persistence.submit(row)
@@ -82,8 +94,8 @@ class DurableLedgerTests(unittest.TestCase):
     def test_load_physically_prunes_expired_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger.jsonl"
-            expired = {"request_id": "old", "timestamp": "2026-09-01T00:00:00Z", "requested_alias": "a"}
-            fresh = {"request_id": "new", "timestamp": "2026-10-22T00:00:00Z", "requested_alias": "a"}
+            expired = {"request_id": "old", "timestamp": stamp(days_ago=31), "requested_alias": "a"}
+            fresh = {"request_id": "new", "timestamp": stamp(days_ago=1), "requested_alias": "a"}
             path.write_text(json.dumps(expired) + "\n" + json.dumps(fresh) + "\n")
             ledger = RequestLedger(persistence_path=path)
             self.assertEqual([event["request_id"] for event in ledger.recent()], ["new"])
@@ -96,7 +108,7 @@ class DurableLedgerTests(unittest.TestCase):
             path = Path(directory) / "ledger.jsonl"
             secret = "sk-" + "A" * 28
             row = {
-                "request_id": "legacy", "timestamp": "2026-10-22T00:00:00Z",
+                "request_id": "legacy", "timestamp": stamp(days_ago=1),
                 "requested_alias": "a", "error_class": "auth",
                 "attempts": [{"provider": "p", "outcome": "error", "error_class": "auth", "reason": secret}],
             }
