@@ -507,10 +507,15 @@ most.
   strand reopened capacity behind a multi-hour circuit.
 * A **rate limit** opens the route for as long as the provider asked.
 * A **transient** failure is a blip. It opens the route only after a
-  pattern of consecutive failures, and a success resets the count.
-* The window **escalates** with consecutive failures, up to a day - for
-  every class except a confirmed exhaustion, which stays within the
-  bounded window described above.
+  pattern of consecutive failures, and a success resets the count. Its
+  exponential window is capped at one hour by default
+  (`TRANSIENT_BACKOFF_MAX_SECONDS`, configurable at startup with
+  `GATEWAY_TRANSIENT_COOLDOWN_MAX_SECONDS`); the exponential below the cap
+  is unchanged.
+* The window **escalates** with consecutive failures up to the configured
+  transient cap, for every class except confirmed exhaustion (bounded
+  separately) and rate limits (which honour an upstream `Retry-After` even
+  when it exceeds their local cap).
 * When a window ends the circuit is **half-open**: exactly one request is
   let through to find out whether the provider recovered. A success
   closes it; a failure re-arms it within the bounded window and keeps the
