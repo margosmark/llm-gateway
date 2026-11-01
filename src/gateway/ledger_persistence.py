@@ -47,6 +47,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from gateway.bridge.streams import usable_token_count
+from gateway.costs import INVALID_USAGE_MARKER
 from gateway.fallback_reasons import fallback_reason_class
 
 RETENTION_SECONDS = 30 * 24 * 60 * 60
@@ -644,8 +646,16 @@ def _row_delta(row: dict[str, Any]) -> dict[str, Any]:
     """
     counters = row.get("token_counters")
     counters = counters if isinstance(counters, dict) else {}
-    usage_reported = any(name in counters for name in
-                         ("prompt_tokens", "input_tokens", "completion_tokens", "output_tokens"))
+    # A refused counter set (``invalid_usage``) contributes no tokens and is
+    # counted among the unpriced requests: its numbers were reported but this
+    # gateway will not claim them, and summing the smaller counters that
+    # survived would price the refusal as if the refused part were zero. The
+    # sidecar vocabulary has no "invalid" bucket, so the row lands in
+    # ``requests_without_usage`` - which withholds the amount instead of
+    # asserting one.
+    refused = counters.get(INVALID_USAGE_MARKER) is True
+    usage_reported = not refused and any(name in counters for name in
+                                         ("prompt_tokens", "input_tokens", "completion_tokens", "output_tokens"))
     cached_reported = any(name in counters for name in ("cached_read_tokens", "cache_read_input_tokens"))
     fallback = bool(row.get("fallback_used"))
     reason = row.get("fallback_reason")
@@ -653,10 +663,10 @@ def _row_delta(row: dict[str, Any]) -> dict[str, Any]:
     status = row.get("status")
     return {
         "requests": 1,
-        "input_tokens": _token(counters, "prompt_tokens", "input_tokens"),
-        "output_tokens": _token(counters, "completion_tokens", "output_tokens"),
-        "cached_tokens": _token(counters, "cached_read_tokens", "cache_read_input_tokens"),
-        "cached_tokens_unreported": 1 if usage_reported and not cached_reported else 0,
+        "input_tokens": 0 if refused else _token(counters, "prompt_tokens", "input_tokens"),
+        "output_tokens": 0 if refused else _token(counters, "completion_tokens", "output_tokens"),
+        "cached_tokens": 0 if refused else _token(counters, "cached_read_tokens", "cache_read_input_tokens"),
+        "cached_tokens_unreported": 0 if refused else (1 if usage_reported and not cached_reported else 0),
         "requests_without_usage": 0 if usage_reported else 1,
         # Folded at ingest onto the shared closed vocabulary: a raw reason
         # embeds a per-second cooldown counter, a climbing failure count and
@@ -672,10 +682,15 @@ def _row_delta(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _token(counters: dict[str, Any], *names: str) -> int:
+    """A row's counter under the first name it reported, or 0 when unusable.
+
+    The bound matters here: a provider-controlled 401-digit counter must
+    never be summed into a rollup bucket, where it would persist in the
+    sidecar and serialise into the console as ``Infinity``.
+    """
     for name in names:
         if name in counters:
-            value = counters[name]
-            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+            return usable_token_count(counters[name]) or 0
     return 0
 
 
