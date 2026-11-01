@@ -33,7 +33,7 @@ from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
     EXHAUSTED_MAX_SECONDS,
     RATE_LIMITED_MAX_SECONDS,
-    MAX_BACKOFF_SECONDS,
+    TRANSIENT_BACKOFF_MAX_SECONDS,
     MAX_ENTRIES,
     MAX_ENTRY_AGE_SECONDS,
     TRANSIENT_FAILURE_THRESHOLD,
@@ -208,14 +208,84 @@ class CircuitStoreTests(unittest.TestCase):
         second = self.store.remaining("opencode_go", "mimo-v2.6-flash")
         self.assertGreater(second, first, "repeated failures must back off further")
 
+    def test_the_transient_window_escalates_then_clamps_at_the_cap(self) -> None:
+        """base=300: the first blip does not bench the route (it only
+        counts), then 600, 1200, 2400, and clamped at the cap for every
+        window thereafter - never truncated or skipped."""
+        windows = []
+        for _ in range(7):
+            self.store.record_failure(
+                "opencode_go", "mimo-v2.6-flash", "transient", base_seconds=300
+            )
+            windows.append(self.store.remaining("opencode_go", "mimo-v2.6-flash"))
+            self.clock.advance(1)
+        self.assertEqual(
+            windows,
+            [0, 600, 1200, 2400, 3600, 3600, 3600],
+        )
+
+    def test_the_generic_window_escalates_then_clamps_at_the_cap(self) -> None:
+        """A class with no threshold of its own (``route_gone``) walks the
+        exponential from the base: 300, 600, 1200, 2400, then clamped at
+        the cap - the exponential below the cap is untouched."""
+        windows = []
+        for _ in range(7):
+            self.store.record_failure(
+                "opencode_go", "mimo-v2.6-flash", "route_gone", base_seconds=300
+            )
+            windows.append(self.store.remaining("opencode_go", "mimo-v2.6-flash"))
+            self.clock.advance(1)
+        self.assertEqual(
+            windows,
+            [300, 600, 1200, 2400, 3600, 3600, 3600],
+        )
+
+    def test_the_default_transient_cap_is_one_hour(self) -> None:
+        self.assertEqual(TRANSIENT_BACKOFF_MAX_SECONDS, 3600)
+
+    def test_sixty_five_transient_failures_are_bounded_by_one_hour(self) -> None:
+        for _ in range(64):
+            self.store.record_failure(
+                "chatgpt_codex", "gpt-6.1-terra", "transient", base_seconds=300
+            )
+            self.clock.advance(1)
+        self.store.record_failure(
+            "chatgpt_codex", "gpt-6.1-terra", "transient", base_seconds=300
+        )
+        self.assertEqual(
+            self.store.remaining("chatgpt_codex", "gpt-6.1-terra"),
+            TRANSIENT_BACKOFF_MAX_SECONDS,
+            "the live scenario: 65 consecutive transient failures must hold for "
+            "the cap (1h), never 86400s",
+        )
+
+    def test_the_transient_cap_is_configurable(self) -> None:
+        store = CircuitStore(transient_max_seconds=600, clock=self.clock)
+        for _ in range(5):
+            store.record_failure(
+                "chatgpt_codex", "gpt-6.1-terra", "transient", base_seconds=300
+            )
+        self.assertEqual(store.remaining("chatgpt_codex", "gpt-6.1-terra"), 600)
+        self.assertEqual(store.transient_max_seconds, 600)
+
+    def test_a_rate_limit_retry_after_longer_than_cap_is_honoured(self) -> None:
+        """The provider's own ask is evidence: 7200s must still win over
+        the 3600s local cap for the transient class."""
+        self.store.record_failure(
+            "opencode_go", "mimo-v2.6-flash", "rate_limited",
+            base_seconds=300, retry_after=7200,
+        )
+        self.assertEqual(self.store.remaining("opencode_go", "mimo-v2.6-flash"), 7200)
+
     def test_the_window_is_capped(self) -> None:
         for _ in range(30):
             self.store.record_failure(
-                "opencode_go", "mimo-v2.6-flash", "rate_limited", base_seconds=300
+                "opencode_go", "mimo-v2.6-flash", "transient", base_seconds=300
             )
-        self.assertLessEqual(
+        self.assertEqual(
             self.store.remaining("opencode_go", "mimo-v2.6-flash"),
-            MAX_BACKOFF_SECONDS,
+            TRANSIENT_BACKOFF_MAX_SECONDS,
+            "however many failures accumulate, no window may exceed the cap",
         )
 
     def test_a_rate_limit_window_is_capped_without_a_provider_ask(self) -> None:

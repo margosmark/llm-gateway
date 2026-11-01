@@ -620,7 +620,7 @@ function fixtureState() {
     providers: [],
     aliases: [],
     limits: [],
-    cooldown_policy: { exhausted_base_seconds: 60, exhausted_max_seconds: 900, probe_timeout_seconds: 5 },
+    cooldown_policy: { exhausted_base_seconds: 60, exhausted_max_seconds: 900, transient_max_seconds: 3600, probe_timeout_seconds: 5 },
     cooldown_details: {},
     ledger: [],
     ledger_durability: { enabled: true, retention_days: 30, billing_system: false },
@@ -982,6 +982,7 @@ check("the cooldown table renders the reason tied to its own event, with the set
   assert(rendered.includes("rate limited; the route resumes after the provider's window"), rendered);
   assert(rendered.includes("event request-cooldown-setter"), rendered);
   assert(rendered.includes("Local cooldown policy"), rendered);
+  assert(rendered.includes("transient failure holds at most 3600s"), rendered);
 });
 
 check("the cooldown table has a clear empty state", function () {

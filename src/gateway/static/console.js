@@ -955,9 +955,14 @@
   function cooldownPolicyText() {
     var policy = state.cooldown_policy || {};
     if (policy.exhausted_max_seconds == null) return "unknown";
-    return "a confirmed provider exhaustion holds for at most " + policy.exhausted_max_seconds +
+    var text = "a confirmed provider exhaustion holds for at most " + policy.exhausted_max_seconds +
       "s (floor " + policy.exhausted_base_seconds + "s); when the window ends exactly one recovery" +
       " probe is let through, and a concurrent request falls back until it answers";
+    if (policy.transient_max_seconds != null) {
+      text += "; a transient failure holds at most " + policy.transient_max_seconds +
+        "s however many failures accumulate";
+    }
+    return text;
   }
 
   // The cooldown table is the operator's view of a held provider: when the

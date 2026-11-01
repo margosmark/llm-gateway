@@ -69,6 +69,37 @@ class ParserTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, 2)
 
+    def test_the_transient_cooldown_cap_defaults_to_an_hour(self) -> None:
+        args = build_parser().parse_args(["--host", "10.10.11.109"])
+        self.assertEqual(args.transient_cooldown_max_seconds, 3600)
+
+    def test_the_transient_cooldown_cap_is_configurable(self) -> None:
+        args = build_parser().parse_args(
+            ["--host", "10.10.11.109", "--transient-cooldown-max-seconds", "600"]
+        )
+        self.assertEqual(args.transient_cooldown_max_seconds, 600)
+
+    def test_the_transient_cooldown_cap_comes_from_the_environment(self) -> None:
+        with mock.patch.dict(
+            "os.environ", {"GATEWAY_TRANSIENT_COOLDOWN_MAX_SECONDS": "900"}
+        ):
+            args = build_parser().parse_args(["--host", "10.10.11.109"])
+        self.assertEqual(args.transient_cooldown_max_seconds, 900)
+
+    def test_an_invalid_transient_cooldown_cap_is_refused(self) -> None:
+        for bad in ("0", "-5", "not-a-number"):
+            error = StringIO()
+            with (
+                self.subTest(value=bad),
+                redirect_stderr(error),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                build_parser().parse_args(
+                    ["--host", "10.10.11.109", "--transient-cooldown-max-seconds", bad]
+                )
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("cooldown cap", error.getvalue())
+
     def test_reserved_setup_port_is_rejected_from_cli_before_startup(self) -> None:
         error = StringIO()
         with redirect_stderr(error), mock.patch("gateway.cli.build_application") as build_app, \
@@ -176,6 +207,18 @@ class ApplicationTests(unittest.TestCase):
             self.data_dir, "10.10.11.109", 8765, exhausted_max_seconds=600
         )
         self.assertEqual(router.circuits.exhausted_max_seconds, 600)
+
+    def test_the_transient_cap_reaches_the_circuit_store(self) -> None:
+        _app, _config, _credentials, router = build_application(
+            self.data_dir, "10.10.11.109", 8765, transient_max_seconds=600
+        )
+        self.assertEqual(router.circuits.transient_max_seconds, 600)
+
+    def test_the_transient_cap_defaults_to_an_hour_in_a_fresh_application(self) -> None:
+        _app, _config, _credentials, router = build_application(
+            self.data_dir, "10.10.11.109", 8765
+        )
+        self.assertEqual(router.circuits.transient_max_seconds, 3600)
 
 
 if __name__ == "__main__":
