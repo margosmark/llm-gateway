@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import tempfile
 import threading
 import unittest
@@ -594,6 +595,39 @@ class _EchoTransport(_ScriptedTransport):
         return super().__call__(payload, **kwargs)
 
 
+class _CostEchoTransport:
+    """Answers each text probe with the nonce it was given, at a scripted cost.
+
+    ``_EchoTransport`` fixes the cost at its own default; this one takes the
+    cost from the script, which is what the accumulator boundary needs: the
+    classification stays a genuine ``observed_supported`` claim, so a test
+    can prove an unrepresentable running total *withdraws* that claim rather
+    than merely failing to make one.
+    """
+
+    def __init__(self, costs):
+        self._costs = list(costs)
+        self.payloads: list[dict] = []
+        self.session_ids: list[str | None] = []
+
+    def __call__(self, payload, *, timeout, connect_timeout, session_id=None):
+        from gateway.adapters.base import ProviderResponse
+
+        self.payloads.append(payload)
+        self.session_ids.append(session_id)
+        if not self._costs:
+            raise AssertionError("the runner sent more requests than the script has costs")
+        cost = self._costs.pop(0)
+        messages = payload.get("messages")
+        content = messages[0].get("content") if isinstance(messages, list) else None
+        if not isinstance(content, str):
+            raise TypeError("the scripted transport only answers text probes")
+        answer = chat_response(text=content.rsplit(": ", 1)[-1], cost=cost)
+        body = json.dumps(answer).encode("utf-8")
+        return ProviderResponse(status=200, headers={}, body=body, content_type="application/json",
+                                dialect="openai_chat")
+
+
 def _failing_transport(error, calls=None):
     def transport(payload, *, timeout, connect_timeout, session_id=None):
         if calls is not None:
@@ -780,6 +814,145 @@ class RunnerBoundsTests(unittest.TestCase):
         self.assertEqual(by_capability["text_generation"]["status"], "inconclusive")
         self.assertEqual(by_capability["image_input"]["status"], "not_tested")
         self.assertEqual(by_capability["function_tools"]["status"], "not_tested")
+
+    def test_non_finite_cost_accounting_is_inconclusive_not_a_claim(self):
+        """R66 F-2: `NaN` and ±inf `usage.cost` are unusable accounting.
+
+        ``NaN < 0`` is ``False``, so the old check passed a NaN cost through
+        to ``observed_supported`` evidence; ``inf >= 0`` kept an overflowing
+        cost accounted. Both take the missing-cost path instead: one request,
+        inconclusive result, no unrun claim, and no reported cost.
+        """
+        for bad_cost in (float("nan"), float("inf"), float("-inf"), 1e400):
+            with self.subTest(cost=bad_cost):
+                transport = _scripted([chat_response(text="a" * 32, cost=bad_cost)])
+                outcome = run_suite(PROTOCOL, ALL_PROBES, transport, price=FRESH_PRICE)
+                self.assertEqual(len(transport.payloads), 1, "the second request must never be sent")
+                self.assertEqual(outcome.blocked_reason, "cost_accounting")
+                self.assertIsNone(outcome.reported_cost_usd)
+                by_capability = {row["capability"]: row for row in outcome.results}
+                self.assertEqual(by_capability["text_generation"]["status"], "inconclusive")
+                self.assertEqual(by_capability["image_input"]["status"], "not_tested")
+                self.assertEqual(by_capability["function_tools"]["status"], "not_tested")
+
+    def test_cost_accounting_and_reported_cost_draw_the_finite_line(self):
+        """R66 F-1/F-2: `math.isfinite` at the value boundary, nowhere else.
+
+        Every previously accepted cost stays accepted byte-for-byte and
+        every previously rejected one stays rejected; the new rejections
+        are exactly NaN, ±inf, and an integer too large for a float (which
+        used to be "accounted" and crashed ``_reported_cost`` with
+        OverflowError).
+        """
+        from gateway.capability_probe import _reported_cost, cost_accounting_ok
+
+        for cost in (0, 0.0, 1, 1.5, 0.000002, 10**9):
+            with self.subTest(accepted=cost):
+                self.assertTrue(cost_accounting_ok({"cost": cost}), cost)
+                self.assertEqual(_reported_cost({"cost": cost}), float(cost))
+        rejected = (-1, -0.5, True, False, "1", None, float("nan"), float("inf"),
+                    float("-inf"), 1e400, 10**400)
+        for cost in rejected:
+            with self.subTest(rejected=cost):
+                self.assertFalse(cost_accounting_ok({"cost": cost}), cost)
+                self.assertIsNone(_reported_cost({"cost": cost}), cost)
+        for usage in (None, {}, {"prompt_tokens": 10, "completion_tokens": 5}):
+            with self.subTest(usage=usage):
+                self.assertFalse(cost_accounting_ok(usage))
+                self.assertIsNone(_reported_cost(usage))
+        # a bad inner billing source still refuses a finite cost
+        self.assertFalse(cost_accounting_ok({"cost": 1.0, "opencode": {"billing_source": 5}}))
+        self.assertTrue(cost_accounting_ok({"cost": 1.0, "opencode": {"billing_source": "plan"}}))
+
+    def test_accumulate_cost_bounds_the_running_total(self):
+        """SEC-R66-A: the *sum* needs the same finite-float line as the operands.
+
+        Finite operands add to a non-finite value: ``1e308 + 1e308`` is
+        ``+inf`` and ``-1e308 + -1e308`` is ``-inf``. The accumulator must
+        refuse both, and must keep the plain addition for every sum that is
+        representable (no rounding, no cap, no drift).
+        """
+        from gateway.capability_probe import _accumulate_cost
+
+        for total, added, want in (
+            (None, 0.000002, 0.000002),
+            (None, 1e308, 1e308),
+            (0.5, 0.25, 0.75),
+            (1e308, 1e-300, 1e308),
+            (0.000002, 0.000002, 0.000004),
+        ):
+            with self.subTest(total=total, added=added):
+                self.assertEqual(_accumulate_cost(total, added), want)
+        for total, added in (
+            (1e308, 1e308),
+            (9e307, 9e307),
+            (-1e308, -1e308),  # rejected per-value upstream, bounded here too
+            (1e308, float("inf")),
+            (float("inf"), 1.0),
+            (float("nan"), 1.0),
+            (1.0, float("nan")),
+            (9e307, 8.98e307),  # sums past the largest finite float
+        ):
+            with self.subTest(total=total, added=added):
+                self.assertIsNone(_accumulate_cost(total, added))
+
+    def test_an_unrepresentable_cost_total_fails_the_run_closed(self):
+        """SEC-R66-A: bound the RUNNING total, not just each operand.
+
+        Every cost below passes ``_usable_cost`` on its own, so the first
+        request is a genuine ``observed_supported`` claim with accounted
+        money — and the sum of the run is still not a float: ``1e308 +
+        1e308`` is ``+inf``, which ``json_response`` (``allow_nan=True``
+        default) would emit as the non-RFC-8259 token ``Infinity`` on the
+        **200** body of a run that has already spent and persisted. The run
+        must instead stop with no reported cost, an honest stop reason, and
+        every claim it made withdrawn.
+        """
+        cases = (
+            ("pair 1e308 + 1e308", [1e308, 1e308], 2),
+            ("pair 9e307 + 9e307", [9e307, 9e307], 2),
+            # 18 x 1e307 already exceeds the largest finite float, so a
+            # long script overflows in the middle of the run: the earlier
+            # requests were accounted and the claims must still be withdrawn.
+            ("20 mid-size values", [1e307] * 20, None),
+        )
+        for name, costs, expect_sent in cases:
+            with self.subTest(case=name):
+                plan = [plan_requests(PROTOCOL, ["text_generation"])[0] for _ in costs]
+                transport = _CostEchoTransport(costs)
+                outcome = run_suite(
+                    PROTOCOL, ["text_generation"], transport, price=FRESH_PRICE, plan=plan
+                )
+                if expect_sent is not None:
+                    self.assertEqual(outcome.request_count, expect_sent)
+                else:
+                    self.assertLess(outcome.request_count, len(costs), "the run must stop at the overflowing add")
+                self.assertIsNone(outcome.reported_cost_usd, "an unrepresentable total is not a reported cost")
+                self.assertEqual(outcome.blocked_reason, "cost_accounting")
+                by_capability = {row["capability"]: row["status"] for row in outcome.results}
+                self.assertEqual(by_capability, {"text_generation": "inconclusive"}, by_capability)
+                self.assertNotIn("observed_supported", by_capability.values())
+                body = json.dumps({"reported_cost_usd": outcome.reported_cost_usd}, allow_nan=False)
+                self.assertEqual(body, '{"reported_cost_usd": null}')
+
+    def test_a_finite_cost_total_is_reported_exactly_as_before(self):
+        """No drift: a representable total is still the plain left-to-right sum.
+
+        The accumulator's arithmetic for every finite, representable run is
+        byte-identical to the pre-fix behaviour (``d81700b``), and the run
+        keeps its claims.
+        """
+        costs = [0.000002, 0.000004, 0.000001, 0.000003, 1e-9]
+        plan = [plan_requests(PROTOCOL, ["text_generation"])[0] for _ in costs]
+        transport = _CostEchoTransport(costs)
+        outcome = run_suite(PROTOCOL, ["text_generation"], transport, price=FRESH_PRICE, plan=plan)
+        self.assertEqual(outcome.request_count, len(costs))
+        self.assertIsNone(outcome.blocked_reason)
+        self.assertEqual(outcome.reported_cost_usd, sum(costs))
+        assert outcome.reported_cost_usd is not None, "a representable run reports its total"
+        self.assertTrue(math.isfinite(outcome.reported_cost_usd))
+        by_capability = {row["capability"]: row["status"] for row in outcome.results}
+        self.assertEqual(by_capability, {"text_generation": "observed_supported"}, by_capability)
 
     def test_cancellation_stops_before_the_second_request(self):
         cancel = threading.Event()

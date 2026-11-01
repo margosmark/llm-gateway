@@ -7,6 +7,9 @@ file contacts a provider.
 from __future__ import annotations
 
 import json
+import math
+import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -47,6 +50,52 @@ def _strict_json_loads(body: str) -> Any:
         raise AssertionError(f"non-RFC-8259 token {token!r} in body: {body}")
 
     return json.loads(body, parse_constant=_reject)
+
+
+_NODE_PROBE = (
+    "const fs=require('fs');"
+    "const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));"
+    "process.stdout.write(JSON.stringify({"
+    "reported_cost_usd:p.reported_cost_usd,"
+    "reported_cost_type:typeof p.reported_cost_usd,"
+    "blocked_reason:p.blocked_reason,cancelled:p.cancelled,"
+    "request_count:p.request_count,"
+    "statuses:[...new Set(p.results.map((r)=>r.status))].sort()}));"
+)
+
+
+def _node_json_parse(body: bytes) -> dict[str, Any]:
+    """Parse the exact response bytes with node's ``JSON.parse``.
+
+    ``json.loads`` accepts ``Infinity``/``NaN``, so a Python-only strictness
+    check can pass on a body the owner console cannot parse. Node's
+    ``JSON.parse`` is what ``static/console.js`` runs on these bytes, so the
+    raw body must survive it: a non-RFC-8259 token makes node exit non-zero
+    and this helper raises with the parser's error instead of returning.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
+        handle.write(body)
+        path = handle.name
+    try:
+        probe = subprocess.run(
+            ["node", "-e", _NODE_PROBE, path], capture_output=True, text=True, timeout=60, check=False
+        )
+    finally:
+        os.unlink(path)
+    if probe.returncode != 0:
+        raise AssertionError(f"node JSON.parse rejected the body: {probe.stderr.strip()}")
+    return json.loads(probe.stdout)
+
+
+def _non_finite_paths(value: Any, where: str = "$") -> list[str]:
+    """Every path in a parsed structure that holds a non-finite float."""
+    if isinstance(value, float):
+        return [] if math.isfinite(value) else [f"{where}={value!r}"]
+    if isinstance(value, dict):
+        return [path for key, item in value.items() for path in _non_finite_paths(item, f"{where}.{key}")]
+    if isinstance(value, list):
+        return [path for index, item in enumerate(value) for path in _non_finite_paths(item, f"{where}[{index}]")]
+    return []
 
 
 def _usage() -> dict[str, Any]:
@@ -490,6 +539,187 @@ class ProbeHttpTests(unittest.TestCase):
                     )
         finally:
             costs._CATALOG_PATH = original
+
+    def test_an_overflowing_provider_cost_never_reaches_the_run_body(self):
+        """R66 F-1: a provider's overflowing `usage.cost` must stay strict JSON.
+
+        The upstream payload carries the overflowing literal ``1e400``,
+        which Python decodes as ``inf``; the old ``_reported_cost`` accepted
+        it (``inf >= 0``) and ``json_response`` (``allow_nan=True``) emitted
+        the non-RFC-8259 token ``Infinity`` — so the console's
+        ``JSON.parse`` threw *after a paid run had executed and persisted*,
+        the owner saw a generic failure, and a re-run meant duplicate
+        spend. The raw 200 body must parse strictly, must carry no
+        accounted cost, and must not claim usable cost accounting.
+        """
+        _UpstreamHandler.usage = {"prompt_tokens": 120, "completion_tokens": 40, "cost": 1e400}
+        probes = ["text_generation"]
+        confirmation, revision = self._confirmation(probes=probes)
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": probes,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        body = raw.decode("utf-8")
+        self.assertNotIn("Infinity", body)
+        parsed = _strict_json_loads(body)  # raises on Infinity/NaN/-Infinity
+        self.assertIsNone(parsed["reported_cost_usd"], "an unusable cost is not accounted cost")
+        statuses = sorted({row["status"] for row in parsed["results"]})
+        self.assertEqual(statuses, ["inconclusive"], statuses)
+        self.assertEqual(parsed["blocked_reason"], "cost_accounting")
+
+    def test_a_nan_provider_cost_yields_inconclusive_results(self):
+        """R66 F-2: a `NaN` provider `usage.cost` is not cost accounting.
+
+        ``NaN < 0`` is ``False``, so the old ``cost_accounting_ok`` returned
+        ``True`` and the run recorded ``observed_supported`` evidence — a
+        claim the scope's rule says must be inconclusive. The upstream sends
+        the bare ``NaN`` token (valid to Python's decoder, not to RFC 8259);
+        the run body must stay strict JSON and the result inconclusive.
+        """
+        _UpstreamHandler.usage = {"prompt_tokens": 120, "completion_tokens": 40, "cost": float("nan")}
+        probes = ["text_generation"]
+        confirmation, revision = self._confirmation(probes=probes)
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": probes,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        parsed = _strict_json_loads(raw.decode("utf-8"))
+        statuses = sorted({row["status"] for row in parsed["results"]})
+        self.assertEqual(statuses, ["inconclusive"], statuses)
+        self.assertNotIn("observed_supported", statuses)
+        self.assertIsNone(parsed["reported_cost_usd"])
+        self.assertEqual(parsed["blocked_reason"], "cost_accounting")
+
+    def test_an_unrepresentable_cost_total_never_reaches_the_run_body(self):
+        """SEC-R66-A: two boundary-accepted costs must not serialise as `Infinity`.
+
+        `_usable_cost` bounds each operand, but `run_suite` accumulated them
+        with no total check, so `usage.cost = 1e308` on both responses of a
+        two-request run summed to `+inf` and the **200** body carried the
+        non-RFC-8259 token `Infinity` — after the paid run had executed and
+        persisted, so the console's `JSON.parse` threw and a re-run meant
+        duplicate spend. The exact bytes must survive node's `JSON.parse`,
+        report no cost, and name the accounting as the honest stop reason;
+        a claim made before the overflow is withdrawn, never left standing.
+        """
+        _UpstreamHandler.usage = {"prompt_tokens": 120, "completion_tokens": 40, "cost": 1e308}
+        confirmation, revision = self._confirmation()
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": ALL_PROBES,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        self.assertNotIn(b"Infinity", raw)
+        parsed = _node_json_parse(raw)  # raises: node's JSON.parse is the console's parser
+        self.assertEqual(parsed["reported_cost_type"], "object", "typeof null is 'object'")
+        self.assertIsNone(parsed["reported_cost_usd"])
+        self.assertEqual(parsed["blocked_reason"], "cost_accounting")
+        self.assertEqual(parsed["request_count"], 2)
+        self.assertEqual(parsed["statuses"], ["inconclusive"])
+        self.assertFalse(parsed["cancelled"])
+        # and the Python-side strict reader agrees on the same bytes
+        self.assertIsNone(_strict_json_loads(raw.decode("utf-8"))["reported_cost_usd"])
+
+    def test_persisted_evidence_after_an_overflowing_run_stays_clean(self):
+        """The money is recorded before the body goes out — the record must be clean.
+
+        The escape this closes is response-body-only, so the stored run
+        record after an overflowing run must hold no non-finite value and
+        must propose nothing: an unrepresentable total claims no capability
+        and leaves the owner with an honest `inconclusive` run.
+        """
+        _UpstreamHandler.usage = {"prompt_tokens": 120, "completion_tokens": 40, "cost": 1e308}
+        confirmation, revision = self._confirmation()
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": ALL_PROBES,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+
+        text = Path(self.h.data_dir / "capability_discovery.json").read_text()
+        self.assertNotIn("Infinity", text)
+        store = _strict_json_loads(text)  # non-RFC-8259 token would raise here
+        self.assertEqual(_non_finite_paths(store), [], "the stored record must hold no non-finite value")
+        self.assertEqual(len(store["runs"]), 1)
+        run = store["runs"][0]
+        self.assertEqual(run["request_count"], 2)
+        statuses = {row["status"] for row in run["results"]}
+        self.assertFalse(statuses & {"observed_supported", "observed_unsupported"}, statuses)
+        self.assertEqual(statuses, {"inconclusive"}, statuses)
+        self.assertEqual(store["proposals"][0]["status"], "pending")
+        self.assertEqual(store["proposals"][0]["fields"], [], "an inconclusive run proposes no capability change")
+
+    def test_a_genuine_cost_total_is_reported_exactly(self):
+        """No drift: representable costs still sum plainly, on the wire and in the record.
+
+        Two responses at `0.000002` are `0.000004` — the same arithmetic
+        `d81700b` performed — and the run keeps every claim it made.
+        """
+        _UpstreamHandler.usage = {"prompt_tokens": 120, "completion_tokens": 40, "cost": 0.000002}
+        confirmation, revision = self._confirmation()
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": ALL_PROBES,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        parsed = _node_json_parse(raw)
+        self.assertEqual(parsed["reported_cost_usd"], 0.000004)
+        self.assertEqual(parsed["reported_cost_type"], "number")
+        self.assertIsNone(parsed["blocked_reason"])
+        self.assertEqual(parsed["request_count"], 2)
+        self.assertEqual(parsed["statuses"], ["observed_supported"])
 
     # --- confirmation --------------------------------------------------
 
