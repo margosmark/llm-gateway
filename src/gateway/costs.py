@@ -3,14 +3,48 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
-from gateway.bridge.streams import iter_sse_frames, normalise_usage
+from gateway.bridge.streams import (
+    iter_sse_frames,
+    normalise_usage,
+    reported_counters_unusable,
+    usable_token_count,
+)
 
 _CATALOG_PATH = Path(__file__).resolve().parents[2] / "data" / "go_catalog.json"
+
+#: Boolean completeness markers that may sit beside the integer counters in
+#: a ledger ``token_counters`` dict. They withhold a number while recording
+#: that the accounting exists (``cached_tokens_reported``) or that the
+#: provider reported counters this gateway refused to use (``invalid_usage``).
+#: A refusal is recorded, never silently dropped: "reported and refused" is
+#: not "never reported", and a refused counter must never be priced as zero
+#: next to the smaller counters that survived.
+CACHED_MARKER = "cached_tokens_reported"
+INVALID_USAGE_MARKER = "invalid_usage"
+COUNTER_MARKERS = frozenset({CACHED_MARKER, INVALID_USAGE_MARKER})
+
+
+def _record_refusals(usage: dict[str, Any], counters: dict[str, Any]) -> dict[str, int] | None:
+    """Mark refused provider counters, and re-check what survives the bound.
+
+    ``normalise_usage`` drops counters outside
+    :data:`gateway.bridge.streams.MAX_TOKEN_COUNTER`; this records that the
+    refusal happened (``invalid_usage``) so the cost path can answer
+    *invalid*, not *no usage* and never a partial claim. Every surviving
+    integer is re-checked, so no over-bound counter can leave this seam even
+    if a future caller assembles ``counters`` differently.
+    """
+    if reported_counters_unusable(usage):
+        counters[INVALID_USAGE_MARKER] = True
+    result = {key: value for key, value in counters.items()
+              if key in COUNTER_MARKERS or usable_token_count(value) is not None}
+    return result or None
 
 
 def published_prices() -> dict[str, dict[str, Any]]:
@@ -45,14 +79,12 @@ def response_token_counters(body: bytes | None, dialect: str) -> dict[str, int] 
     result = normalise_usage(usage)
     details = usage.get("prompt_tokens_details", usage.get("input_tokens_details"))
     if isinstance(details, dict):
-        cached = details.get("cached_tokens", details.get("cache_read"))
-        if isinstance(cached, int) and cached >= 0:
+        cached = usable_token_count(details.get("cached_tokens", details.get("cache_read")))
+        if cached is not None:
             result["cached_read_tokens"] = cached
         else:
-            result["cached_tokens_reported"] = True
-    result = {key: value for key, value in result.items()
-              if key == "cached_tokens_reported" or isinstance(value, int) and value >= 0}
-    return result or None
+            result[CACHED_MARKER] = True
+    return _record_refusals(usage, result)
 
 
 def stream_token_counters(frames: Iterable[bytes], dialect: str) -> dict[str, int] | None:
@@ -72,15 +104,17 @@ def stream_token_counters(frames: Iterable[bytes], dialect: str) -> dict[str, in
                 total.update(normalise_usage(usage))
                 details = usage.get("prompt_tokens_details", usage.get("input_tokens_details"))
                 if isinstance(details, dict):
-                    cached = details.get("cached_tokens", details.get("cache_read"))
-                    if isinstance(cached, int) and cached >= 0:
+                    cached = usable_token_count(details.get("cached_tokens", details.get("cache_read")))
+                    if cached is not None:
                         total["cached_read_tokens"] = cached
-                        total.pop("cached_tokens_reported", None)
+                        total.pop(CACHED_MARKER, None)
                     else:
-                        total["cached_tokens_reported"] = True
-                total = {key: value for key, value in total.items()
-                         if key == "cached_tokens_reported" or isinstance(value, int) and value >= 0}
-    return total or None
+                        total[CACHED_MARKER] = True
+                if reported_counters_unusable(usage):
+                    total[INVALID_USAGE_MARKER] = True
+    filtered = {key: value for key, value in total.items()
+                if key in COUNTER_MARKERS or usable_token_count(value) is not None}
+    return filtered or None
 
 
 def price_for(model: str, *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
@@ -115,6 +149,16 @@ def _cached_key(counters: dict[str, Any]) -> str | None:
     return next((key for key in CACHED_COUNTER_KEYS if key in counters), None)
 
 
+def _usable_rate(value: Any) -> TypeGuard[int | float]:
+    """Whether a catalogue rate is a number that can be multiplied safely.
+
+    ``bool`` is an ``int`` subclass, and ``NaN``/``inf`` are floats: none of
+    them is a publishable price, and a non-finite rate would turn any
+    multiplication into an ``Infinity`` amount in the console.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | None = "opencode_go", *, _prices: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Estimate one request's cost from published prices, or say why it is unknown.
 
@@ -127,8 +171,8 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
     # transfer a matching model ID's price to another provider.
     catalog = published_prices() if _prices is None else _prices
     price = catalog.get(model) if provider == "opencode_go" else None
-    if (not price or not isinstance(price.get("input_per_m"), (int, float))
-            or not isinstance(price.get("output_per_m"), (int, float))
+    if (not price or not _usable_rate(price.get("input_per_m"))
+            or not _usable_rate(price.get("output_per_m"))
             or not isinstance(price.get("source"), str)
             or not isinstance(price.get("observed_at"), str)):
         price = None
@@ -145,7 +189,15 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
     output_tokens = counters.get("completion_tokens", counters.get("output_tokens", 0))
     cached_key = _cached_key(counters)
     cached = counters.get(cached_key, 0) if cached_key else 0
-    if any(not isinstance(value, int) or value < 0 for value in (input_tokens, output_tokens, cached)):
+    if counters.get(INVALID_USAGE_MARKER) is True or any(
+            usable_token_count(value) is None for value in (input_tokens, output_tokens, cached)):
+        # A provider-reported counter this gateway refuses - over-bound (a
+        # 401-digit JSON integer), negative, boolean or otherwise not a
+        # count - makes the whole report invalid. This is also the read-path
+        # guard for ledger rows written before the bound existed: no
+        # counter-supplied number can raise here (the old
+        # ``int * float`` raised ``OverflowError`` and turned one ledger row
+        # into an owner-console 500) and none can be priced as a claim.
         return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_INVALID_USAGE}
     if cached_key is None:
         # Absent is not zero. The ledger stores only the keys the provider
@@ -157,12 +209,22 @@ def calculate_cost(counters: dict[str, int] | None, model: str, provider: str | 
         return {"amount_usd": None, "source": source, "observed_at": observed_at,
                 "reason": COST_MISSING_CACHED_TOKENS}
     cached_rate = price.get("cached_read_per_m")
-    if cached and not isinstance(cached_rate, (int, float)):
+    if cached and not _usable_rate(cached_rate):
         # Never assume cached reads are free.
         return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_MISSING_CACHED_PRICE}
     billable_input = max(0, input_tokens - cached)
-    amount = (billable_input * price["input_per_m"] + output_tokens * price["output_per_m"] +
-              cached * (cached_rate if isinstance(cached_rate, (int, float)) else 0)) / 1_000_000
+    try:
+        amount = (billable_input * price["input_per_m"] + output_tokens * price["output_per_m"] +
+                  cached * (cached_rate if _usable_rate(cached_rate) else 0)) / 1_000_000
+    except (OverflowError, ValueError):
+        # Unreachable with bounded counters and finite rates - kept because
+        # the cost path must never be able to raise on provider input.
+        return {"amount_usd": None, "source": source, "observed_at": observed_at, "reason": COST_INVALID_USAGE}
+    if not math.isfinite(amount):
+        # A finite-but-absurd rate can still overflow the product to
+        # ``inf``; an unbounded amount would serialise into the console as
+        # ``Infinity``. That is not a price this gateway can publish.
+        return {"amount_usd": None, "source": None, "observed_at": None, "reason": COST_NO_PRICE}
     return {"amount_usd": amount, "source": source, "observed_at": observed_at, "reason": None}
 
 
@@ -208,8 +270,15 @@ def aggregate_usage(events: list[dict[str, Any]], window_hours: int = 24, *, evi
                 continue
             row = groups[dimension].setdefault(key, _empty_group_row())
             row["requests"] += 1
-            row["input_tokens"] += counters.get("prompt_tokens", counters.get("input_tokens", 0))
-            row["output_tokens"] += counters.get("completion_tokens", counters.get("output_tokens", 0))
+            # Bounded at read time: a pre-bound ledger row (written before
+            # the counter bound existed) must not sum a 401-digit integer
+            # into the state body, where JSON.parse reads it as Infinity.
+            # An over-bound counter is unknown - uncounted here, priced as
+            # invalid by ``calculate_cost`` - never clamped into a claim.
+            row["input_tokens"] += usable_token_count(
+                counters.get("prompt_tokens", counters.get("input_tokens", 0))) or 0
+            row["output_tokens"] += usable_token_count(
+                counters.get("completion_tokens", counters.get("output_tokens", 0))) or 0
             if counters and _cached_key(counters) is None:
                 # Usage reported, cached count absent: counted here so the
                 # console can show the coverage instead of a silent zero.
@@ -326,7 +395,13 @@ def _empty_group_row() -> dict[str, Any]:
 
 
 def _counter(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    """A summable counter, or 0 when the value is not one this gateway claims.
+
+    An over-bound provider counter (a 401-digit JSON integer) lands here like
+    any other damaged value: not summed, so it can never reach a response
+    body as a JSON number the console's ``JSON.parse`` reads as ``Infinity``.
+    """
+    return usable_token_count(value) or 0
 
 
 def _fold_cost(row: dict[str, Any], cost: dict[str, Any],
@@ -373,12 +448,30 @@ def _finish_group_row(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def sanitise_counters(counters: dict[str, Any]) -> dict[str, Any]:
+    """A render-safe copy of a ledger ``token_counters`` dict.
+
+    The owner-state body carries ledger rows' counters verbatim, so a
+    pre-bound row with a 401-digit counter would serialise into the JSON the
+    console parses. Unusable counters are replaced by the ``invalid_usage``
+    marker: the row still says *why* no number is shown, instead of
+    pretending the provider reported none.
+    """
+    usable = {key: value for key, value in counters.items()
+              if key in COUNTER_MARKERS or usable_token_count(value) is not None}
+    if usable != counters:
+        usable[INVALID_USAGE_MARKER] = True
+    return usable
+
+
 def annotate_events(events: list[dict[str, Any]], *, _prices: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Attach calculated metadata-only costs for rendering; do not persist estimates."""
     prices = published_prices() if _prices is None else _prices
     result = []
     for event in events:
         row = dict(event)
+        if isinstance(row.get("token_counters"), dict):
+            row["token_counters"] = sanitise_counters(row["token_counters"])
         model, counters = row.get("serving_model"), row.get("token_counters")
         row["cost"] = calculate_cost(counters if isinstance(counters, dict) else None, model, row.get("serving_provider"), _prices=prices) if isinstance(model, str) else {
             "amount_usd": None, "source": None, "observed_at": None

@@ -49,6 +49,53 @@ USAGE_PROMPT = "prompt_tokens"
 USAGE_COMPLETION = "completion_tokens"
 USAGE_TOTAL = "total_tokens"
 
+#: Upper bound on a single provider-reported token counter. Counters are
+#: provider-controlled integers inside otherwise valid JSON, so a body may
+#: legally carry a 401-digit ``prompt_tokens``: it overflows every ``int`` to
+#: ``float`` conversion on the owner-console read path (HTTP 500) and
+#: serialises into a response body as a JSON number the console's
+#: ``JSON.parse`` reads as ``Infinity``. 10**9 tokens per counter is already
+#: far past any real request; above it a counter is not a count this gateway
+#: will claim - it is unknown.
+MAX_TOKEN_COUNTER = 10**9
+
+#: The usage-dictionary fields that carry token counts (either dialect).
+USAGE_FIELDS = (USAGE_PROMPT, "input_tokens", USAGE_COMPLETION, "output_tokens", USAGE_TOTAL)
+
+
+def usable_token_count(value: Any) -> int | None:
+    """A token counter this gateway will claim, or None when it refuses.
+
+    Refuses non-integers, ``bool`` (an ``int`` subclass), negatives and
+    anything above :data:`MAX_TOKEN_COUNTER`. None means *unknown*: the
+    caller must never substitute zero for it.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0 or value > MAX_TOKEN_COUNTER:
+        return None
+    return value
+
+
+def reported_counters_unusable(usage: dict[str, Any]) -> bool:
+    """Whether the provider *reported a number* this gateway refuses to use.
+
+    Only reported numbers count: an absent, null or non-numeric counter is
+    "not reported" and stays dropped as before, while a number outside the
+    usable range is a refusal that has to be recorded as such - silently
+    dropping it next to a smaller, still-priced counter would turn a refusal
+    into a claim.
+    """
+    values = [usage.get(name) for name in USAGE_FIELDS if name in usage]
+    for details_name in ("prompt_tokens_details", "input_tokens_details"):
+        details = usage.get(details_name)
+        if isinstance(details, dict):
+            for name in ("cached_tokens", "cache_read"):
+                if name in details:
+                    values.append(details[name])
+    return any(isinstance(value, (int, float)) and usable_token_count(value) is None
+               for value in values)
+
 
 # --- SSE framing -------------------------------------------------------
 
@@ -176,20 +223,23 @@ def normalise_usage(usage: dict[str, Any]) -> dict[str, int]:
 
     Chat Completions uses ``prompt_tokens`` / ``completion_tokens``;
     Responses uses ``input_tokens`` / ``output_tokens``. Missing counters stay
-    missing - they are never invented as zero.
+    missing - they are never invented as zero. A counter outside
+    :data:`MAX_TOKEN_COUNTER` is refused the same way: it reads as missing,
+    never as a number, and :func:`reported_counters_unusable` tells callers
+    the refusal happened so it can be recorded instead of silently dropped.
     """
     result: dict[str, int] = {}
-    prompt = usage.get("prompt_tokens", usage.get("input_tokens"))
-    completion = usage.get("completion_tokens", usage.get("output_tokens"))
-    total = usage.get("total_tokens")
-    if isinstance(prompt, int):
+    prompt = usable_token_count(usage.get("prompt_tokens", usage.get("input_tokens")))
+    completion = usable_token_count(usage.get("completion_tokens", usage.get("output_tokens")))
+    total = usable_token_count(usage.get("total_tokens"))
+    if prompt is not None:
         result[USAGE_PROMPT] = prompt
-    if isinstance(completion, int):
+    if completion is not None:
         result[USAGE_COMPLETION] = completion
-    if isinstance(total, int):
+    if total is not None:
         result[USAGE_TOTAL] = total
-    elif USAGE_PROMPT in result and USAGE_COMPLETION in result:
-        result[USAGE_TOTAL] = result[USAGE_PROMPT] + result[USAGE_COMPLETION]
+    elif prompt is not None and completion is not None and prompt + completion <= MAX_TOKEN_COUNTER:
+        result[USAGE_TOTAL] = prompt + completion
     return result
 
 
