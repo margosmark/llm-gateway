@@ -582,9 +582,9 @@ def build_preview(
     target/selection, protocol, plan bounds, tariff freshness, owner
     selection, ceiling. The tariff lookup runs before the protocol gate
     because it is a local catalogue read — zero requests, zero cost — and
-    an unusable ceiling (NaN, ±inf, a bool or an unrepresentable
-    integer) also fails closed, below the protocol/tariff text.
-    the price must be honest in every refusal.
+    the price must be honest in every refusal. An unusable ceiling (NaN,
+    ±inf, a bool or an unrepresentable integer) also fails closed, below
+    the protocol/tariff text.
     """
     _validate_target(provider_id, model_id)
     selected = _validate_probes(probes)
@@ -1021,6 +1021,65 @@ def _usage_tokens(usage: Any) -> dict[str, int | None]:
     }
 
 
+def _usable_cost(cost: Any) -> float | None:
+    """Return ``cost`` as a usable non-negative finite float, else ``None``.
+
+    A provider's ``usage.cost`` arrives from JSON, where an overflowing
+    literal (``1e400``) parses to ``inf`` and a bare ``NaN`` token is
+    accepted by ``json.loads``: neither is a usable cost, and neither may
+    reach a persisted evidence claim or a response body. An integer too
+    large to represent as a float is likewise unusable.
+    """
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    try:
+        value = float(cost)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def _accumulate_cost(total: float | None, added: float) -> float | None:
+    """Add ``added`` to the running total, or ``None`` if the sum is unusable.
+
+    Every operand already passed :func:`_usable_cost`, but that bounds the
+    *operands*, not the sum: two finite values past half the float range
+    (``1e308 + 1e308``, ``-1e308 + -1e308``) add to ``±inf``, and a total
+    that is not a finite float has no RFC-8259 spelling. The caller must
+    therefore fail closed when this returns ``None`` rather than carry a
+    value ``json_response`` would emit as the non-standard ``Infinity``
+    token — the same escape the value boundary exists to stop (SEC-R66-A).
+    """
+    candidate = (0.0 if total is None else total) + added
+    if not math.isfinite(candidate):
+        return None
+    return candidate
+
+
+def _downgrade_claimed_results(
+    pending: dict[str, dict[str, Any]], summary: str, *, request_count: int
+) -> None:
+    """Replace every claimed result of a run with ``inconclusive``.
+
+    Used when the run's accumulated cost stops being representable: a run
+    whose total cannot be stated must not claim any capability, so every
+    ``observed_*`` row is withdrawn. Probes the runner never sent keep their
+    honest ``not_tested`` — an unrun probe is not an inconclusive one.
+    """
+    for capability, row in pending.items():
+        if row.get("status") == "not_tested":
+            continue
+        pending[capability] = _result(
+            capability,
+            "inconclusive",
+            summary,
+            error_class=None,
+            request_count=request_count,
+        )
+
+
 def cost_accounting_ok(usage: Any) -> bool:
     """Whether the response carries cost accounting the policy requires.
 
@@ -1028,12 +1087,13 @@ def cost_accounting_ok(usage: Any) -> bool:
     has no evidence that the request was accounted for, so the scope's rule
     applies: stop before the next request and leave the unrun capabilities
     ``not_tested``. The billing-source *vocabulary* is not documented, so
-    only its structure is checked — never a guessed meaning.
+    only its structure is checked — never a guessed meaning. A non-finite
+    cost (``NaN`` or ±inf) is not cost accounting: it is unusable, so the
+    same inconclusive rule applies rather than a claim.
     """
     if not isinstance(usage, dict):
         return False
-    cost = usage.get("cost")
-    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+    if _usable_cost(usage.get("cost")) is None:
         return False
     if "opencode" in usage:
         inner = usage.get("opencode")
@@ -1045,10 +1105,7 @@ def cost_accounting_ok(usage: Any) -> bool:
 def _reported_cost(usage: Any) -> float | None:
     if not isinstance(usage, dict):
         return None
-    cost = usage.get("cost")
-    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
-        return float(cost)
-    return None
+    return _usable_cost(usage.get("cost"))
 
 
 def evidence_error_class(error: AdapterError) -> str:
@@ -1124,7 +1181,11 @@ def run_suite(
 
     The runner stops — and marks the remaining capabilities ``not_tested`` —
     on the first transport failure, on an unusable response, on absent cost
-    accounting, on cancellation, and at the run deadline. A returned tool
+    accounting, on cancellation, and at the run deadline. When the running
+    total of the reported costs stops being a finite float (two usable
+    operands can still add to ``inf``), the run stops the same way and
+    withdraws every claim it made: ``reported_cost_usd`` stays ``None``,
+    so no response body can carry ``Infinity``. A returned tool
     call is read as data and never invoked.
     """
     selected = _validate_probes(probes)
@@ -1244,8 +1305,18 @@ def run_suite(
         usage_meta = _usage_tokens(usage)
         accounted = cost_accounting_ok(usage)
         reported = _reported_cost(usage)
+        cost_total_overflow = False
         if reported is not None:
-            outcome.reported_cost_usd = (outcome.reported_cost_usd or 0.0) + reported
+            total = _accumulate_cost(outcome.reported_cost_usd, reported)
+            if total is None:
+                # Every operand was a usable cost, but their running sum is
+                # not representable (SEC-R66-A). The value is dropped, and
+                # the run-level rule below withdraws every claim it would
+                # otherwise make: a body must never carry ``Infinity``.
+                cost_total_overflow = True
+                outcome.reported_cost_usd = None
+            else:
+                outcome.reported_cost_usd = total
         spend = request_estimate(protocol, price, item) if price is not None else None
         if spend is not None:
             spend = {
@@ -1293,6 +1364,20 @@ def run_suite(
                     usage=usage_meta,
                     spend=spend,
                 )
+
+        if cost_total_overflow:
+            # Fail closed at the run level: the total this run's accounting
+            # would report cannot be represented, so no claim from this run
+            # survives and the stop reason names the accounting — never a
+            # success state, never a 5xx (the run already spent and
+            # persisted; the body must stay parseable either way).
+            _downgrade_claimed_results(
+                pending,
+                "the run's accumulated cost total is unrepresentable, so no capability is claimed",
+                request_count=outcome.request_count,
+            )
+            outcome.blocked_reason = "cost_accounting"
+            break
 
         if not accounted:
             outcome.blocked_reason = "cost_accounting"
