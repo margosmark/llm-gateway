@@ -522,15 +522,21 @@ class LeaderboardEndpointTests(unittest.TestCase):
         harness.app.ledger = ledger
         cls.ledger = ledger
         now = datetime.now(UTC)
+        # Both markers must sit inside today's UTC bucket: the matrix's final
+        # cell is rendered from this same clock, and a fixed now-1h/now-2h
+        # offset crosses midnight during the first hour of the day, turning
+        # that cell into no_rows (values[0] null).
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        mid_today = day_start + (now - day_start) / 2
         ledger.record(RequestEvent(
-            request_id="lb-marker-1", timestamp=(now - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+            request_id="lb-marker-1", timestamp=now.isoformat().replace("+00:00", "Z"),
             requested_alias="a0", requested_model="mimo-v2.6-flash",
             serving_provider="opencode_go", serving_model="mimo-v2.6-flash",
             status=200, latency_ms=42,
             token_counters={"prompt_tokens": 1000, "completion_tokens": 100,
                             "cached_read_tokens": 0}))
         ledger.record(RequestEvent(
-            request_id="lb-marker-2", timestamp=(now - timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
+            request_id="lb-marker-2", timestamp=mid_today.isoformat().replace("+00:00", "Z"),
             requested_alias="a1", requested_model="mimo-v2.6-flash",
             serving_provider="opencode_go", serving_model="mimo-v2.6-flash",
             status=502, error_class="exhausted", fallback_used=True,
