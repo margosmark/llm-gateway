@@ -11,10 +11,12 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
+from gateway import costs
 from gateway.adapters.http_client import UpstreamClient
 from gateway.adapters.opencode_go import OpenCodeGoAdapter
 from gateway.config import ModelEntry
@@ -31,6 +33,17 @@ OWNER = {
 }
 SYNTHETIC_KEY = "synthetic-probe-key-0123456789"
 LEAKY_TEXT = "LEAKY-PROVIDER-TEXT-MUST-NOT-PERSIST"
+
+# The shipped catalogue carries its real crawl date, which ages: past
+# PRICE_MAX_AGE_DAYS every preview fails closed on staleness and the whole
+# file goes red for the wrong reason (the 2026-11-25 bomb wave). setUp
+# re-points the catalogue at a temp copy re-dated FRESH_AS_OF - one day back,
+# fresh and never future at any wall clock - preserving every rate and
+# provenance byte. Staleness itself stays proved against a pinned old date
+# in test_unknown_or_stale_pricing_fails_closed.
+FRESH_AS_OF = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+STALE_AS_OF = (datetime.now(UTC).date() - timedelta(days=60)).isoformat()
+_PRISTINE_CATALOGUE = costs._CATALOG_PATH
 
 
 def _strict_json_loads(body: str) -> Any:
@@ -155,6 +168,20 @@ class ProbeHttpTests(unittest.TestCase):
 
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # Re-date the shipped catalogue instead of trusting its crawl date:
+        # the fresh-tariff path must be exercised at any wall clock, and the
+        # re-dated copy keeps every rate and provenance byte of the real one.
+        catalogue = json.loads(_PRISTINE_CATALOGUE.read_text(encoding="utf-8"))
+        for row in catalogue.get("models", {}).values():
+            if isinstance(row, dict):
+                for key, value in row.items():
+                    if key.endswith("observed_at") and isinstance(value, str):
+                        row[key] = FRESH_AS_OF
+        staged = Path(self._tmp.name) / "go_catalog.json"
+        staged.write_text(json.dumps(catalogue), encoding="utf-8")
+        self._catalogue_before = costs._CATALOG_PATH
+        costs._CATALOG_PATH = staged
+        self.addCleanup(self._restore_catalogue)
         credentials = CredentialStore(Path(self._tmp.name))
         credentials.provider_handle(PROVIDER).write({"api_key": SYNTHETIC_KEY})
         self.adapter = OpenCodeGoAdapter(
@@ -186,6 +213,9 @@ class ProbeHttpTests(unittest.TestCase):
         self.addCleanup(stop_upstream)
 
     # --- helpers -------------------------------------------------------
+
+    def _restore_catalogue(self) -> None:
+        costs._CATALOG_PATH = self._catalogue_before
 
     def _preview(self, probes=ALL_PROBES, owner=OWNER, headers=None, provider=PROVIDER, model=MODEL):
         status, payload, headers_out = self.h.request(
@@ -288,7 +318,7 @@ class ProbeHttpTests(unittest.TestCase):
         self.assertEqual(price["input_per_m"], 0.3)
         self.assertEqual(price["output_per_m"], 1.2)
         self.assertEqual(price["source"], "https://opencode.ai/data/minimax/minimax-m2-7")
-        self.assertEqual(price["as_of"], "2026-10-25")
+        self.assertEqual(price["as_of"], FRESH_AS_OF)
         self.assertIsNone(price["amount"], "no run estimate exists without a protocol")
         self.assertNotIn("confirmation", payload)
         self.assertEqual(_UpstreamHandler.requests, [], "a refused preview sends nothing")
@@ -328,7 +358,7 @@ class ProbeHttpTests(unittest.TestCase):
         self.assertEqual(payload["protocol_dialect"], "openai_chat")
         self.assertEqual(payload["price"]["status"], "known")
         self.assertEqual(payload["price"]["source"], "https://opencode.ai/data/xiaomi/mimo-v2-6-flash")
-        self.assertEqual(payload["price"]["as_of"], "2026-10-25")
+        self.assertEqual(payload["price"]["as_of"], FRESH_AS_OF)
         self.assertGreater(payload["estimate"]["total_usd"], 0)
         self.assertLess(payload["estimate"]["total_usd"], OWNER["max_spend_estimate_usd"])
         self.assertFalse(payload["estimate"]["hard_ceiling_available"])
@@ -400,7 +430,7 @@ class ProbeHttpTests(unittest.TestCase):
                     "input_per_m": 0.14,
                     "output_per_m": 0.28,
                     "source": "https://opencode.ai/data/xiaomi/mimo-v2-6-flash",
-                    "observed_at": "2026-01-01",
+                    "observed_at": STALE_AS_OF,
                 }
             )
             status, payload, _ = self._preview()
@@ -434,7 +464,7 @@ class ProbeHttpTests(unittest.TestCase):
                         "price_output_per_m": 1.2,
                         "price_cached_read_per_m": cached_rate,
                         "source": "https://opencode.ai/data/xiaomi/mimo-v2-6-flash",
-                        "observed_at": "2026-10-25",
+                        "observed_at": FRESH_AS_OF,
                     }
                 }
             }

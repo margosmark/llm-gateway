@@ -11,7 +11,7 @@ import stat
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,23 +30,49 @@ from gateway.observability import (
     scan_for_secrets,
 )
 
+# The fixture's days, anchored to the wall clock. The ledger's 30-day
+# retention window runs against the real clock, so a fixed calendar date
+# eventually prunes its own fixture rows out from under their assertions
+# (the 2026-11-21/22 rollup bomb wave). The original relations survive the
+# anchoring: DAY_OLDEST < DAY_EARLY < DAY_LATE (yesterday) < now, and every
+# fixture row stays several days inside the retention window at any instant.
+_TODAY = datetime.now(UTC).date()
+DAY_OLDEST = (_TODAY - timedelta(days=3)).isoformat()    # was 2026-10-22
+DAY_EARLY = (_TODAY - timedelta(days=2)).isoformat()     # was 2026-10-23
+DAY_LATE = (_TODAY - timedelta(days=1)).isoformat()      # was 2026-10-24
+#: A day provably past the 30-day window at any wall clock.
+EXPIRED_DAY = (_TODAY - timedelta(days=45)).isoformat()  # was 2026-08-01
+
 # Hand-computed expectation for the three-row fixture below, serialised the
 # way the sidecar serialises rows (sorted keys, compact separators): one row
 # per day x alias x provider x model, tokens summed, the 502 fallback broken
 # out by reason, and the amended request counted exactly once. The fixture's
 # raw reason (``primary_exhausted``) matches none of the shared rules, so it
 # folds to the closed vocabulary's ``other`` bucket at ingest - counted, never
-# dropped, and never persisted as a raw sentence.
-EXPECTED_ROWS = (
+# dropped, and never persisted as a raw sentence. The two day fields are the
+# only clock-coupled bytes in the template, so they are the only substitution
+# ``expected_rows()`` performs; every other byte stays hand-written.
+EXPECTED_ROWS_TEMPLATE = (
     '[{"alias":"coding","cached_tokens":4,"cached_tokens_unreported":0,"day":"2026-10-23","errors":{},"fallback_reasons":{},"fallbacks":0,"input_tokens":100,"model":"m-one","output_tokens":20,"provider":"opencode_go","requests":1,"requests_without_usage":0,"statuses":{"200":1}},'
     '{"alias":"coding","cached_tokens":0,"cached_tokens_unreported":0,"day":"2026-10-23","errors":{"exhausted":1},"fallback_reasons":{"other":1},"fallbacks":1,"input_tokens":0,"model":"m-two","output_tokens":0,"provider":"p-two","requests":1,"requests_without_usage":1,"statuses":{"502":1}},'
     '{"alias":"flash","cached_tokens":0,"cached_tokens_unreported":1,"day":"2026-10-24","errors":{},"fallback_reasons":{},"fallbacks":0,"input_tokens":50,"model":"m-one","output_tokens":10,"provider":"opencode_go","requests":1,"requests_without_usage":0,"statuses":{"200":1}}]'
 )
 
 
+def expected_rows() -> str:
+    """The hand-computed expectation, re-dated to the anchored fixture days."""
+    return (EXPECTED_ROWS_TEMPLATE
+            .replace("2026-10-23", DAY_EARLY)
+            .replace("2026-10-24", DAY_LATE))
+
+
 def frozen() -> datetime:
-    """A fixed clock, so a written sidecar can be compared byte for byte."""
-    return datetime(2026, 10, 24, 12, 0, 0, tzinfo=UTC)
+    """Midday on the fixture's later day: after every fixture row, inside retention.
+
+    A fixed clock let a written sidecar be compared byte for byte; anchored
+    to the fixture days it keeps that property at any wall-clock instant.
+    """
+    return datetime.combine(date.fromisoformat(DAY_LATE), time(12, 0, 0), tzinfo=UTC)
 
 
 def rows_json(payload: dict[str, Any]) -> str:
@@ -68,17 +94,17 @@ def build_fixture(path: Path) -> RequestLedger:
     """A success row, a 502 fallback row, and a row amended after the response."""
     ledger = RequestLedger(capacity=10, persistence_path=path)
     ledger.record(RequestEvent(
-        "req_a", "2026-10-23T10:00:00Z", "coding",
+        "req_a", f"{DAY_EARLY}T10:00:00Z", "coding",
         serving_provider="opencode_go", serving_model="m-one", status=200,
         token_counters={"prompt_tokens": 100, "completion_tokens": 20, "cached_read_tokens": 4},
     ))
     ledger.record(RequestEvent(
-        "req_b", "2026-10-23T11:00:00Z", "coding",
+        "req_b", f"{DAY_EARLY}T11:00:00Z", "coding",
         serving_provider="p-two", serving_model="m-two", status=502,
         error_class="exhausted", fallback_used=True, fallback_reason="primary_exhausted",
     ))
     ledger.record(RequestEvent(
-        "req_c", "2026-10-24T09:00:00Z", "flash",
+        "req_c", f"{DAY_LATE}T09:00:00Z", "flash",
         serving_provider="opencode_go", serving_model="m-one", status=200,
     ))
     amended = ledger.amend("req_c", token_counters={"prompt_tokens": 50, "completion_tokens": 10}, latency_ms=42)
@@ -95,11 +121,11 @@ class RollupAggregationTests(unittest.TestCase):
             payload = json.loads(rollup_path_for(path).read_text())
             self.assertEqual(payload["schema"], "daily-rollup/v1")
             self.assertEqual(payload["source"], "request-ledger.jsonl")
-            self.assertEqual(rows_json(payload), EXPECTED_ROWS)
+            self.assertEqual(rows_json(payload), expected_rows())
             coverage = payload["coverage"]
             self.assertEqual(coverage["requests"], 3)
-            self.assertEqual(coverage["first_row_ts"], "2026-10-23T10:00:00Z")
-            self.assertEqual(coverage["last_row_ts"], "2026-10-24T09:00:00Z")
+            self.assertEqual(coverage["first_row_ts"], f"{DAY_EARLY}T10:00:00Z")
+            self.assertEqual(coverage["last_row_ts"], f"{DAY_LATE}T09:00:00Z")
             self.assertEqual(coverage["rows_superseded"], 1)
             self.assertEqual(coverage["rows_skipped"], 0)
             self.assertEqual(coverage["rows_expired"], 0)
@@ -113,7 +139,7 @@ class RollupAggregationTests(unittest.TestCase):
             ledger = build_fixture(path)
             self.assertTrue(ledger.flush())
             live = rollup_of(ledger)
-            self.assertEqual(rows_json(live), EXPECTED_ROWS)
+            self.assertEqual(rows_json(live), expected_rows())
             written = json.loads(rollup_path_for(path).read_text())
             self.assertEqual(without_generated_at(live), without_generated_at(written))
             # One row per day x alias x provider x model; no request identifiers.
@@ -128,16 +154,16 @@ class RollupAggregationTests(unittest.TestCase):
             payload = json.loads(rollup_path_for(path).read_text())
             ledger.close()
             daily = payload["daily"]
-            self.assertEqual([row["day"] for row in daily], ["2026-10-23", "2026-10-24"])
+            self.assertEqual([row["day"] for row in daily], [DAY_EARLY, DAY_LATE])
             self.assertEqual(daily[0], {
-                "day": "2026-10-23", "requests": 2, "input_tokens": 100,
+                "day": DAY_EARLY, "requests": 2, "input_tokens": 100,
                 "output_tokens": 20, "cached_tokens": 4, "fallbacks": 1,
                 "cached_tokens_unreported": 0, "requests_without_usage": 1,
                 "fallback_reasons": {"other": 1},
                 "errors": {"exhausted": 1}, "statuses": {"200": 1, "502": 1},
             })
             self.assertEqual(daily[1], {
-                "day": "2026-10-24", "requests": 1, "input_tokens": 50,
+                "day": DAY_LATE, "requests": 1, "input_tokens": 50,
                 "output_tokens": 10, "cached_tokens": 0, "fallbacks": 0,
                 "cached_tokens_unreported": 1, "requests_without_usage": 0,
                 "fallback_reasons": {}, "errors": {}, "statuses": {"200": 1},
@@ -155,17 +181,17 @@ class RollupAggregationTests(unittest.TestCase):
             path = Path(directory) / "request-ledger.jsonl"
             ledger = RequestLedger(capacity=10, persistence_path=path)
             ledger.record(RequestEvent(
-                "req_cached", "2026-10-24T10:00:00Z", "coding",
+                "req_cached", f"{DAY_LATE}T10:00:00Z", "coding",
                 serving_provider="opencode_go", serving_model="m-one", status=200,
                 token_counters={"prompt_tokens": 100, "completion_tokens": 10, "cached_read_tokens": 4},
             ))
             ledger.record(RequestEvent(
-                "req_silent", "2026-10-24T10:00:01Z", "coding",
+                "req_silent", f"{DAY_LATE}T10:00:01Z", "coding",
                 serving_provider="opencode_go", serving_model="m-one", status=200,
                 token_counters={"prompt_tokens": 100, "completion_tokens": 10},
             ))
             ledger.record(RequestEvent(
-                "req_zero", "2026-10-24T10:00:02Z", "coding",
+                "req_zero", f"{DAY_LATE}T10:00:02Z", "coding",
                 serving_provider="opencode_go", serving_model="m-one", status=200,
                 token_counters={"prompt_tokens": 100, "completion_tokens": 10, "cached_read_tokens": 0},
             ))
@@ -198,7 +224,7 @@ class RollupBackfillTests(unittest.TestCase):
 
             payload = rebuild_rollups(path, now=frozen)
             self.assertEqual(payload["rows"], live["rows"])
-            self.assertEqual(rows_json(payload), EXPECTED_ROWS)
+            self.assertEqual(rows_json(payload), expected_rows())
             # Coverage must agree too, apart from the live-process bookkeeping
             # (how many rows this process appended, and which run rebuilt).
             def stable(coverage: dict[str, Any]) -> dict[str, Any]:
@@ -233,7 +259,7 @@ class RollupBackfillTests(unittest.TestCase):
             sidecar.unlink()
             payload = rebuild_rollups(path, write=False, now=frozen)
             self.assertFalse(sidecar.exists())
-            self.assertEqual(rows_json(payload), EXPECTED_ROWS)
+            self.assertEqual(rows_json(payload), expected_rows())
 
     def test_boot_rebuild_aggregates_rows_written_before_this_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -244,7 +270,7 @@ class RollupBackfillTests(unittest.TestCase):
             # A new process over the same directory: history is already there.
             restarted = RequestLedger(capacity=10, persistence_path=path)
             payload = rollup_of(restarted)
-            self.assertEqual(rows_json(payload), EXPECTED_ROWS)
+            self.assertEqual(rows_json(payload), expected_rows())
             self.assertEqual(payload["coverage"]["rebuild"]["trigger"], "boot")
             self.assertEqual(payload["coverage"]["rebuild"]["lines_read"], 4)
             self.assertEqual(payload["coverage"]["rows_appended"], 0)
@@ -256,7 +282,7 @@ class RollupDurabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "request-ledger.jsonl"
             ledger = RequestLedger(capacity=2, persistence_path=path)
-            days = ("2026-10-22", "2026-10-22", "2026-10-23", "2026-10-23", "2026-10-24")
+            days = (DAY_OLDEST, DAY_OLDEST, DAY_EARLY, DAY_EARLY, DAY_LATE)
             for index, day in enumerate(days):
                 ledger.record(RequestEvent(
                     f"req_{index}", f"{day}T0{index % 6}:00:00Z", "coding",
@@ -273,16 +299,16 @@ class RollupDurabilityTests(unittest.TestCase):
             coverage = payload["coverage"]
             # The ring lost three rows; the rollup did not.
             self.assertEqual(coverage["requests"], 5)
-            self.assertEqual(coverage["first_row_ts"], "2026-10-22T00:00:00Z")
+            self.assertEqual(coverage["first_row_ts"], f"{DAY_OLDEST}T00:00:00Z")
             self.assertFalse(coverage["incomplete"])
             self.assertEqual([row["day"] for row in payload["rows"]],
-                             ["2026-10-22", "2026-10-23", "2026-10-24"])
+                             [DAY_OLDEST, DAY_EARLY, DAY_LATE])
             self.assertEqual(sum(row["requests"] for row in payload["rows"]), 5)
             self.assertEqual(sum(row["input_tokens"] for row in payload["rows"]), 50)
 
             # The aggregated days keep their shape while new rows keep arriving.
             restarted.record(RequestEvent(
-                "req_5", "2026-10-24T15:00:00Z", "coding",
+                "req_5", f"{DAY_LATE}T15:00:00Z", "coding",
                 serving_provider="opencode_go", serving_model="m-one", status=200,
                 token_counters={"prompt_tokens": 7, "completion_tokens": 2},
             ))
@@ -306,16 +332,16 @@ class RollupCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "request-ledger.jsonl"
             lines = [
-                json.dumps({"request_id": "ok-1", "timestamp": "2026-10-23T08:00:00Z",
+                json.dumps({"request_id": "ok-1", "timestamp": f"{DAY_EARLY}T08:00:00Z",
                             "requested_alias": "coding", "serving_provider": "p",
                             "serving_model": "m", "status": 200}),
                 "{this line is not json",
                 json.dumps({"request_id": "bad-ts", "timestamp": "whenever",
                             "requested_alias": "coding"}),
-                json.dumps({"request_id": "legacy", "timestamp": "2026-10-23T09:00:00Z",
+                json.dumps({"request_id": "legacy", "timestamp": f"{DAY_EARLY}T09:00:00Z",
                             "requested_alias": "coding", "unexpected": "field"}),
-                json.dumps({"timestamp": "2026-10-23T10:00:00Z", "requested_alias": "coding"}),
-                json.dumps({"request_id": "expired", "timestamp": "2026-08-01T00:00:00Z",
+                json.dumps({"timestamp": f"{DAY_EARLY}T10:00:00Z", "requested_alias": "coding"}),
+                json.dumps({"request_id": "expired", "timestamp": f"{EXPIRED_DAY}T00:00:00Z",
                             "requested_alias": "coding"}),
             ]
             path.write_text("\n".join(lines) + "\n")
@@ -326,17 +352,17 @@ class RollupCoverageTests(unittest.TestCase):
             self.assertEqual(coverage["rows_expired"], 1)
             self.assertEqual(coverage["requests"], 1)
             self.assertTrue(coverage["incomplete"])
-            self.assertEqual(coverage["first_row_ts"], "2026-10-23T08:00:00Z")
+            self.assertEqual(coverage["first_row_ts"], f"{DAY_EARLY}T08:00:00Z")
             self.assertEqual(len(payload["rows"]), 1)
 
     def test_a_clean_ledger_reports_complete_coverage_with_its_first_row(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "request-ledger.jsonl"
             path.write_text("\n".join([
-                json.dumps({"request_id": "ok-1", "timestamp": "2026-10-23T08:00:00Z",
+                json.dumps({"request_id": "ok-1", "timestamp": f"{DAY_EARLY}T08:00:00Z",
                             "requested_alias": "coding", "serving_provider": "p",
                             "serving_model": "m", "status": 200}),
-                json.dumps({"request_id": "no-alias", "timestamp": "2026-10-23T12:00:00Z"}),
+                json.dumps({"request_id": "no-alias", "timestamp": f"{DAY_EARLY}T12:00:00Z"}),
             ]) + "\n")
             payload = rebuild_rollups(path, now=frozen)
             coverage = payload["coverage"]
@@ -344,8 +370,8 @@ class RollupCoverageTests(unittest.TestCase):
             self.assertEqual(coverage["rows_skipped"], 0)
             self.assertEqual(coverage["rows_expired"], 0)
             self.assertEqual(coverage["requests"], 2)
-            self.assertEqual(coverage["first_row_ts"], "2026-10-23T08:00:00Z")
-            self.assertEqual(coverage["last_row_ts"], "2026-10-23T12:00:00Z")
+            self.assertEqual(coverage["first_row_ts"], f"{DAY_EARLY}T08:00:00Z")
+            self.assertEqual(coverage["last_row_ts"], f"{DAY_EARLY}T12:00:00Z")
             # A row without dimensions is reported under an explicit bucket,
             # never folded into a real name and never silently dropped.
             self.assertEqual(payload["rows"][1]["alias"], "unknown")
@@ -367,7 +393,7 @@ class RollupCoverageTests(unittest.TestCase):
     def test_an_unreadable_ledger_file_marks_coverage_partial(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "request-ledger.jsonl"
-            valid = json.dumps({"request_id": "ok-1", "timestamp": "2026-10-23T08:00:00Z",
+            valid = json.dumps({"request_id": "ok-1", "timestamp": f"{DAY_EARLY}T08:00:00Z",
                                 "requested_alias": "coding", "status": 200})
             path.write_bytes(valid.encode("utf-8") + b"\n" + b"\xff\xfe not utf-8 \n")
             payload = rebuild_rollups(path, now=frozen)
@@ -382,7 +408,7 @@ class RollupMetadataTests(unittest.TestCase):
             path = Path(directory) / "request-ledger.jsonl"
             ledger = RequestLedger(capacity=10, persistence_path=path)
             ledger.record(RequestEvent(
-                "req_private_1", "2026-10-23T10:00:00Z", "coding",
+                "req_private_1", f"{DAY_EARLY}T10:00:00Z", "coding",
                 serving_provider="opencode_go", serving_model="m-one", status=200,
                 token_counters={"prompt_tokens": 11, "completion_tokens": 3},
                 skipped=[{"provider": "p", "reason": "unsupported"}],
@@ -391,7 +417,7 @@ class RollupMetadataTests(unittest.TestCase):
             persistence = ledger._persistence
             assert persistence is not None
             persistence.submit({
-                "request_id": "req_private_2", "timestamp": "2026-10-23T11:00:00Z",
+                "request_id": "req_private_2", "timestamp": f"{DAY_EARLY}T11:00:00Z",
                 "requested_alias": "coding", "status": 200,
                 "prompt": "a private prompt", "messages": [{"role": "user", "content": "private"}],
             })
@@ -438,7 +464,7 @@ class RollupCommandTests(unittest.TestCase):
                 code = main([str(path)])
             self.assertEqual(code, 0)
             self.assertTrue(sidecar.exists())
-            self.assertEqual(json.loads(sidecar.read_text())["rows"], json.loads(EXPECTED_ROWS))
+            self.assertEqual(json.loads(sidecar.read_text())["rows"], json.loads(expected_rows()))
 
     def test_rebuild_command_exits_one_for_incomplete_coverage_and_two_without_a_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
