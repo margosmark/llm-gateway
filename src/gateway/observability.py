@@ -28,6 +28,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .bridge.streams import usable_token_count
+from .costs import COUNTER_MARKERS
 from .ledger_persistence import LedgerPersistence
 
 # Sources for a limit snapshot. Ordered by decreasing authority.
@@ -200,21 +202,25 @@ class RequestLedger:
         if "token_counters" in fields and fields["token_counters"] is not None:
             counters = fields["token_counters"]
             # Only keys the provider reported belong here: the rollup reads a
-            # missing cached key as "not reported", never as zero. The one
-            # non-integer value allowed is ``cached_tokens_reported``, a
-            # boolean completeness marker for "cached accounting named, count
-            # withheld"; every other counter stays a non-negative integer
-            # (``bool`` is an ``int`` subclass, so it has to be excluded
-            # explicitly rather than by accident).
+            # missing cached key as "not reported", never as zero. The only
+            # non-integer values allowed are the boolean completeness
+            # markers: ``cached_tokens_reported`` ("cached accounting named,
+            # count withheld") and ``invalid_usage`` ("counters reported,
+            # this gateway refused them"). Every other counter stays a
+            # bounded non-negative integer (``bool`` is an ``int`` subclass,
+            # so it has to be excluded explicitly rather than by accident),
+            # and the bound is enforced here too: a provider-controlled
+            # 401-digit counter must be refused at the write seam, not
+            # persisted to 500 the owner console on its next read.
             if not isinstance(counters, dict) or any(
                 not isinstance(k, str)
-                or (k == "cached_tokens_reported" and not isinstance(v, bool))
-                or (k != "cached_tokens_reported" and (not isinstance(v, int) or isinstance(v, bool) or v < 0))
+                or (k in COUNTER_MARKERS and not isinstance(v, bool))
+                or (k not in COUNTER_MARKERS and usable_token_count(v) is None)
                 for k, v in counters.items()
             ):
                 raise ValueError(
-                    "token_counters must contain non-negative integer metadata "
-                    "or the cached_tokens_reported flag"
+                    "token_counters must contain bounded non-negative integer metadata "
+                    "or the cached_tokens_reported/invalid_usage flags"
                 )
         with self._lock:
             matches = [item for item in self._events if item.request_id == request_id]
