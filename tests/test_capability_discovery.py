@@ -26,6 +26,47 @@ class DiscoveryBackendTests(unittest.TestCase):
             loaded = DiscoveryStore(path)
             self.assertEqual(loaded.proposal(proposal), proposal_obj)
 
+    def test_reported_usage_refusal_is_persisted_and_absent_usage_is_not(self) -> None:
+        """SEC-R66-C information loss: stored evidence keeps the refusal record.
+
+        A refused counter must persist as ``invalid_usage: true`` beside its
+        nulls — "the provider reported a number this gateway will not carry"
+        is evidence, and it is not the same record as a run whose provider
+        reported no usage at all (which keeps no ``reported_usage`` key).
+        A tampered non-bool marker value is dropped, never trusted.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "discovery.json"
+            store = DiscoveryStore(path)
+            store.record_fake_result("p", "m", [
+                {"capability": "image_input", "status": "inconclusive",
+                 "reported_usage": {"input_tokens": None, "output_tokens": 3,
+                                    "invalid_usage": True}},
+                {"capability": "function_tools", "status": "inconclusive",
+                 "reported_usage": {"input_tokens": None, "output_tokens": None}},
+            ], {"supports_image_input": False, "supports_function_tools": True}, 4)
+            run = store.read("p", "m")["runs"][0]
+            by_capability = {row["capability"]: row for row in run["results"]}
+            self.assertEqual(
+                by_capability["image_input"]["reported_usage"],
+                {"input_tokens": None, "output_tokens": 3, "invalid_usage": True},
+            )
+            self.assertNotIn("reported_usage", by_capability["function_tools"])
+            # The raw file must hold the marker too — not just the parsed view.
+            self.assertIn('"invalid_usage": true', path.read_text())
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "discovery.json"
+            store = DiscoveryStore(path)
+            store.record_fake_result("p", "m", [
+                {"capability": "image_input", "status": "inconclusive",
+                 "reported_usage": {"input_tokens": None, "output_tokens": None,
+                                    "invalid_usage": "true"}},
+            ], {"supports_image_input": False, "supports_function_tools": True}, 4)
+            run = store.read("p", "m")["runs"][0]
+            self.assertNotIn("reported_usage", run["results"][0],
+                             "a non-bool marker value is tampering, not evidence")
+
     def test_field_decision_idempotent_and_conflict_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             store = DiscoveryStore(Path(directory) / "d.json")

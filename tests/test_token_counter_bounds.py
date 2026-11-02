@@ -228,6 +228,58 @@ class ProbeRunBodyBoundTests(unittest.TestCase):
         usage = _usage_tokens({"prompt_tokens": 1200, "completion_tokens": 80})
         self.assertEqual(usage, {"input_tokens": 1200, "output_tokens": 80})
 
+    def test_a_refused_run_body_counter_is_recorded_not_erased(self) -> None:
+        """A *reported* count the bound refuses leaves a refusal record (SEC-R66-C).
+
+        On candidate `d12d980` a 401-digit counter read exactly like absent
+        usage — both produced `{"input_tokens": null, "output_tokens": null}`
+        — so the evidence could not tell "the provider gave a number this
+        gateway will not carry" from "the provider reported nothing". The
+        `invalid_usage: true` marker (the ledger seam's own vocabulary)
+        records the refusal; it is a bool, so it can never serialise into a
+        number the console reads as `Infinity`.
+        """
+        self.assertEqual(
+            _usage_tokens({"prompt_tokens": HUGE, "completion_tokens": 3}),
+            {"input_tokens": None, "output_tokens": 3, INVALID_USAGE_MARKER: True},
+        )
+        for usage in (
+            {"prompt_tokens": HUGE, "completion_tokens": 3},
+            {"prompt_tokens": float("inf"), "completion_tokens": 3},
+            {"prompt_tokens": 12.5, "completion_tokens": 3},
+            {"completion_tokens": 3, "total_tokens": HUGE},
+            {"prompt_tokens": True, "completion_tokens": 3},
+        ):
+            with self.subTest(usage=usage):
+                result = _usage_tokens(usage)
+                self.assertIs(result[INVALID_USAGE_MARKER], True)
+                self.assertLessEqual(_max_int(result), MAX_TOKEN_COUNTER)
+
+    def test_absent_or_non_numeric_usage_reports_nulls_without_a_refusal(self) -> None:
+        """`not reported` stays distinct from `reported and refused`.
+
+        An absent, null or non-numeric counter was never a number this
+        gateway could refuse, so it must not acquire the marker — otherwise
+        every ordinary run would claim a refusal that never happened.
+        """
+        for usage in (
+            None,
+            {},
+            {"cost": 0.0},
+            {"prompt_tokens": None, "completion_tokens": None},
+        ):
+            with self.subTest(usage=usage):
+                result = _usage_tokens(usage)
+                self.assertEqual(result, {"input_tokens": None, "output_tokens": None})
+                self.assertNotIn(INVALID_USAGE_MARKER, result)
+        # A non-numeric counter is "not reported" under the shared
+        # `reported_counters_unusable` definition: it claims no number, and
+        # it does not claim a refusal that never happened — but the counter
+        # that *is* a number still travels.
+        result = _usage_tokens({"prompt_tokens": "120", "completion_tokens": 40})
+        self.assertEqual(result, {"input_tokens": None, "output_tokens": 40})
+        self.assertNotIn(INVALID_USAGE_MARKER, result)
+
 
 class OwnerStateAcceptanceTests(unittest.TestCase):
     """GET /owner/api/state stays 200 with a pre-bound 10**400 ledger row.

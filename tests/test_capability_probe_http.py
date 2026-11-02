@@ -751,6 +751,62 @@ class ProbeHttpTests(unittest.TestCase):
         self.assertEqual(parsed["request_count"], 2)
         self.assertEqual(parsed["statuses"], ["observed_supported"])
 
+    def test_a_refused_huge_token_counter_is_recorded_not_carried(self):
+        """SEC-R66-C on the run path: a refused count is a record, not a number.
+
+        A 401-digit `prompt_tokens` is valid JSON a provider may send. The
+        exact bytes must survive node's `JSON.parse` (no digit run, no
+        `Infinity`), the count must not be claimed — but the run must still
+        say the provider *reported* one: `invalid_usage: true` beside the
+        nulls, in the body and in the persisted evidence. This is the
+        information-loss finding on candidate `d12d980`, where a refused
+        counter read exactly like absent usage. Cost accounting was fine, so
+        the claims stand: metadata recorded honestly, not an inconclusive run.
+        """
+        huge = 10 ** 400
+        _UpstreamHandler.usage = {"prompt_tokens": huge, "completion_tokens": 40, "cost": 0.000002}
+        confirmation, revision = self._confirmation()
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": ALL_PROBES,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        self.assertNotIn(b"Infinity", raw)
+        self.assertNotIn(str(huge).encode("ascii"), raw, "the refused count must not be carried")
+        parsed = _node_json_parse(raw)  # raises: node's JSON.parse is the console's parser
+        self.assertEqual(parsed["statuses"], ["observed_supported"])
+        self.assertIsNone(parsed["blocked_reason"])
+        # The detail rows come from the same bytes under Python's strict reader
+        # (`_node_json_parse` returns only the scalar summary fields).
+        body = _strict_json_loads(raw.decode("utf-8"))
+        for row in body["results"]:
+            with self.subTest(capability=row["capability"], surface="body"):
+                usage = row["reported_usage"]
+                self.assertIsNone(usage["input_tokens"])
+                self.assertEqual(usage["output_tokens"], 40)
+                self.assertIs(usage["invalid_usage"], True)
+
+        text = Path(self.h.data_dir / "capability_discovery.json").read_text()
+        self.assertNotIn(str(huge), text)
+        store = _strict_json_loads(text)
+        self.assertEqual(_non_finite_paths(store), [])
+        for row in store["runs"][0]["results"]:
+            with self.subTest(capability=row["capability"], surface="store"):
+                usage = row["reported_usage"]
+                self.assertIsNone(usage["input_tokens"])
+                self.assertEqual(usage["output_tokens"], 40)
+                self.assertIs(usage["invalid_usage"], True)
+
     # --- confirmation --------------------------------------------------
 
     def test_a_run_needs_the_confirmation_issued_by_its_own_preview(self):
