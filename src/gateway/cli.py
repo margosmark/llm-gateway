@@ -17,7 +17,7 @@ from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
 from gateway.buildinfo import release_identity
 from gateway.backup import snapshot_interval_seconds
-from gateway.circuits import EXHAUSTED_MAX_SECONDS, RATE_LIMITED_MAX_SECONDS, CircuitStore
+from gateway.circuits import EXHAUSTED_MAX_SECONDS, RATE_LIMITED_MAX_SECONDS, TRANSIENT_BACKOFF_MAX_SECONDS, CircuitStore
 from gateway.snapshots import SnapshotWorker
 from gateway.config import ConfigStore, ProviderState
 from gateway.core.capabilities import apply_image_evidence, image_evidence
@@ -157,6 +157,15 @@ def build_parser() -> argparse.ArgumentParser:
             f"(default: {RATE_LIMITED_MAX_SECONDS}; configurable with GATEWAY_RATE_LIMITED_COOLDOWN_MAX_SECONDS)."
         ),
     )
+    parser.add_argument(
+        "--transient-cooldown-max-seconds",
+        type=_cooldown_max_seconds,
+        default=os.environ.get("GATEWAY_TRANSIENT_COOLDOWN_MAX_SECONDS", str(TRANSIENT_BACKOFF_MAX_SECONDS)),
+        help=(
+            "Longest window a transient or unclassified failure may hold a route "
+            f"(default: {TRANSIENT_BACKOFF_MAX_SECONDS}; configurable with GATEWAY_TRANSIENT_COOLDOWN_MAX_SECONDS)."
+        ),
+    )
     parser.add_argument("--print-url", action="store_true", help="Print gateway URLs and exit.")
     return parser
 
@@ -167,6 +176,7 @@ def build_application(
     port: int,
     exhausted_max_seconds: int = EXHAUSTED_MAX_SECONDS,
     rate_limited_max_seconds: int = RATE_LIMITED_MAX_SECONDS,
+    transient_max_seconds: int = TRANSIENT_BACKOFF_MAX_SECONDS,
 ):
     data_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(data_dir, 0o700)
@@ -210,6 +220,7 @@ def build_application(
     circuits = CircuitStore(
         data_dir / "circuits.json", exhausted_max_seconds=exhausted_max_seconds,
         rate_limited_max_seconds=rate_limited_max_seconds,
+        transient_max_seconds=transient_max_seconds,
     )
     router = Router(config, registry, ledger=ledger, circuits=circuits)
     profile_auth = ProfileAuth(config, credentials)
@@ -238,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.data_dir), args.host, args.port,
         exhausted_max_seconds=args.exhausted_cooldown_max_seconds,
         rate_limited_max_seconds=args.rate_limited_cooldown_max_seconds,
+        transient_max_seconds=args.transient_cooldown_max_seconds,
     )
     authority = format_authority_host(args.host)
     if args.print_url:

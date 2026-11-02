@@ -278,6 +278,10 @@ class OwnerRecoveryActionTests(unittest.TestCase):
         policy = state["cooldown_policy"]
         self.assertGreater(policy["exhausted_max_seconds"], 0)
         self.assertGreater(policy["rate_limited_max_seconds"], 0)
+        self.assertEqual(
+            policy["transient_max_seconds"], 3600,
+            "the default transient cap must be reported so the owner can see it",
+        )
         self.assertGreaterEqual(
             policy["exhausted_max_seconds"],
             policy["exhausted_base_seconds"],

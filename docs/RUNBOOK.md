@@ -497,6 +497,14 @@ the environment variable, a whole number of seconds ≥ 1). The window does
 not grow with repeated failures, so a subscription window that reopens on
 the provider's own schedule is never stranded behind a multi-hour hold.
 
+Transient route failures are also bounded: the exponential backoff has a
+global cap of **3600 seconds (1 hour)** by default, configurable with
+`--transient-cooldown-max-seconds` or `GATEWAY_TRANSIENT_COOLDOWN_MAX_SECONDS`
+(a positive whole number of seconds). Its `base × 2^(failures−1)` sequence
+is unchanged below the cap. This local transient cap does not shorten an
+upstream `Retry-After` for a rate-limit response; the provider's explicit
+wait remains authoritative.
+
 Recovery is automatic and stampede-safe: when the window ends, the next
 request claims the single **half-open probe**; every concurrent request
 is skipped with a truthful reason (`a recovery probe is already in
