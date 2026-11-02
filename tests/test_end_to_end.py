@@ -768,24 +768,23 @@ class ApiSurfaceTests(unittest.TestCase):
             config.aliases["coding"].budget = 0.01
         from gateway.budget import month_window
         from gateway.observability import RequestEvent
-        # An explicit reported zero cached counter keeps the recorded spend
-        # known under the catalogue's cached-token completeness rule; a
-        # counter set without it is Unknown and must never refuse.
-        # The event is seeded at the first instant of the *current* budget
-        # month, so it can never walk outside month_window() as the clock
-        # advances; reset_at is that same window's end.
-        window_start, reset_at = month_window()
-        reset_text = reset_at.isoformat().replace("+00:00", "Z")
+        # Anchor the seed to the active UTC month so this budget test remains
+        # meaningful as wall-clock time advances. An explicit reported zero
+        # cached counter keeps spend known; without it the cost is Unknown.
+        month_start, month_end = month_window()
+        seeded_at = month_start.isoformat().replace("+00:00", "Z")
+        expected_reset_at = month_end.strftime("%Y-%m-%dT%H:%M:%SZ")
         self.harness.router._ledger.record(RequestEvent(
-            "req_prior", window_start.isoformat().replace("+00:00", "Z"), "coding", serving_provider="opencode_go",
+            "req_prior", seeded_at, "coding", serving_provider="opencode_go",
             serving_model="gpt-6-luna", status=200,
             token_counters={"prompt_tokens": 1_000_000, "completion_tokens": 0, "cached_read_tokens": 0}))
+
         status, payload, _ = self.harness.request("POST", "/v1/chat/completions",
             body={"model": "coding", "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(status, 429)
         self.assertIn("$0.01", payload["error"]["message"])
         self.assertIn("$0.10", payload["error"]["message"])
-        self.assertIn(reset_text, payload["error"]["message"])
+        self.assertIn(expected_reset_at, payload["error"]["message"])
         self.assertEqual(self.harness.adapter.calls, [])
 
     def test_streamed_usage_is_amended_into_request_ledger(self) -> None:

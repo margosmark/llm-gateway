@@ -89,9 +89,19 @@ EXHAUSTED_MAX_SECONDS = 1800
 #: own ask is evidence and the local escalation is not.
 RATE_LIMITED_MAX_SECONDS = 600
 
-#: The longest window any circuit may hold a route, however many failures
-#: have happened.
-MAX_BACKOFF_SECONDS = 86400
+#: The longest window a transient failure (or any other class that is
+#: neither a confirmed exhaustion nor a rate limit) may hold a route,
+#: however many failures have happened. The cap must stay: a generic
+#: exponential that is never bounded fences a route the provider is
+#: already serving again, which took a whole alias down while a second
+#: route cooled in the same way. But 24 hours was far too long - it
+#: stranded a live ChatGPT route for a full day after 65 consecutive
+#: transient failures, and the account's real recovery schedule is
+#: unknown to us, so a local hold must not outlast it by a day. One hour
+#: is the bound: retry, and at most another hour again after that.
+#: Configurable at startup with
+#: ``GATEWAY_TRANSIENT_COOLDOWN_MAX_SECONDS``.
+TRANSIENT_BACKOFF_MAX_SECONDS = 3600
 
 #: How many *consecutive* transient failures are needed before a route is
 #: benched. One 520 from an edge is a blip, not an outage.
@@ -224,6 +234,7 @@ class CircuitStore:
         clock: Callable[[], float] = time.time,
         exhausted_max_seconds: int = EXHAUSTED_MAX_SECONDS,
         rate_limited_max_seconds: int = RATE_LIMITED_MAX_SECONDS,
+        transient_max_seconds: int = TRANSIENT_BACKOFF_MAX_SECONDS,
     ) -> None:
         self._path = path
         #: The clock, so a test can move time without sleeping.
@@ -236,6 +247,11 @@ class CircuitStore:
         #: honour. Like the exhaustion cap it is a local retry policy,
         #: never evidence about the provider's own state.
         self._rate_limited_max_seconds = max(1, int(rate_limited_max_seconds))
+        #: The cap on every other window (transient and unclassified),
+        #: however many failures have accumulated. One hour, by default:
+        #: the exponential below the cap is untouched, and the hold is
+        #: clamped to it.
+        self._transient_max_seconds = max(1, int(transient_max_seconds))
         self._entries: dict[str, CircuitEntry] = {}
         self._lock = threading.RLock()
         if path is not None:
@@ -250,6 +266,11 @@ class CircuitStore:
     def rate_limited_max_seconds(self) -> int:
         """The configured cap on a rate-limit window with no Retry-After."""
         return self._rate_limited_max_seconds
+
+    @property
+    def transient_max_seconds(self) -> int:
+        """The configured cap on every transient (or unclassified) window."""
+        return self._transient_max_seconds
 
     def _now(self) -> float:
         return self._clock()
@@ -551,7 +572,7 @@ class CircuitStore:
                     max(self._rate_limited_max_seconds, retry_after or 0),
                 )
             else:
-                window = min(base * (2 ** (failures - 1)), MAX_BACKOFF_SECONDS)
+                window = min(base * (2 ** (failures - 1)), self._transient_max_seconds)
             reason = self._reason_for(error_class, window, failures, retry_after, base)
             # The route's own circuit always opens.
             self._entries[self._route_key(provider, model)] = CircuitEntry(

@@ -289,7 +289,11 @@ of the route that actually served. You must:
 You also choose which triggers may fire it. A confirmed provider-reported
 allowance exhaustion is different from a rate limit, and the console keeps
 those apart. A local cooldown is a retry policy, not evidence that the
-provider reset.
+provider reset. Transient route failures use a separate global exponential
+backoff cap of **1 hour** by default (`GATEWAY_TRANSIENT_COOLDOWN_MAX_SECONDS`;
+CLI: `--transient-cooldown-max-seconds`). The ordinary sequence remains
+300s, 600s, 1200s, 2400s, then clamps at the cap. Rate limits still honour an
+upstream `Retry-After` longer than their local cap.
 
 A confirmed exhaustion is held only within a **bounded** window — at most
 30 minutes by default, configurable with
