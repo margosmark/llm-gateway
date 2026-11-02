@@ -45,7 +45,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from gateway.adapters.base import AdapterError, ProviderResponse
-from gateway.bridge.streams import usable_token_count
+from gateway.bridge.streams import reported_counters_unusable, usable_token_count
 from gateway.config import (
     ERROR_AUTH,
     ERROR_EXHAUSTED,
@@ -56,6 +56,7 @@ from gateway.config import (
     ERROR_TRANSIENT,
     ERROR_UNKNOWN,
 )
+from gateway.costs import INVALID_USAGE_MARKER
 from gateway.costs import price_for as catalog_model_price
 
 #: The closed probe vocabulary an owner may select from.
@@ -1009,20 +1010,28 @@ def evidence_summary_for(capability: str, status: str, payload: Any) -> str:
     return f"no {TOOL_NAME} tool call was returned"
 
 
-def _usage_tokens(usage: Any) -> dict[str, int | None]:
+def _usage_tokens(usage: Any) -> dict[str, int | bool | None]:
     """The token counters a run body may report, or None where they were refused.
 
     Provider-controlled: a counter above
     :data:`gateway.bridge.streams.MAX_TOKEN_COUNTER` reads as unknown here
     rather than serialising into the run body as a JSON number the console's
-    ``JSON.parse`` turns into ``Infinity``.
+    ``JSON.parse`` turns into ``Infinity``. A *reported* counter the bound
+    refuses is recorded, never erased: ``invalid_usage: true`` travels beside
+    the nulls so the evidence can tell "the provider gave a number this
+    gateway will not carry" from "the provider reported no usage at all"
+    (SEC-R66-C information loss). The marker is a bool — it cannot itself
+    become a number the console reads as Infinity.
     """
     if not isinstance(usage, dict):
         return {"input_tokens": None, "output_tokens": None}
-    return {
+    tokens: dict[str, int | bool | None] = {
         "input_tokens": usable_token_count(usage.get("prompt_tokens")),
         "output_tokens": usable_token_count(usage.get("completion_tokens")),
     }
+    if reported_counters_unusable(usage):
+        tokens[INVALID_USAGE_MARKER] = True
+    return tokens
 
 
 def _usable_cost(cost: Any) -> float | None:
@@ -1153,7 +1162,7 @@ def _result(
     *,
     error_class: str | None = None,
     request_count: int = 0,
-    usage: dict[str, int | None] | None = None,
+    usage: dict[str, int | bool | None] | None = None,
     spend: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {

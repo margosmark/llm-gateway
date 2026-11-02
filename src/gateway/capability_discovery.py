@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from gateway.bridge.streams import usable_token_count
+from gateway.costs import INVALID_USAGE_MARKER
 from gateway.stores import atomic_write_json, read_json
 
 PROBES = {"text_generation", "image_input", "function_tools"}
@@ -80,16 +81,30 @@ def _bounded_summary(value: Any) -> str | None:
     return cleaned[:240] or None
 
 
-def _usage_metadata(value: Any) -> dict[str, int | None] | None:
-    """Reported token counts only — never a prompt, completion or secret."""
+def _usage_metadata(value: Any) -> dict[str, int | bool | None] | None:
+    """Reported token counts only — never a prompt, completion or secret.
+
+    A count the shared bound refuses is persisted as the ``invalid_usage``
+    marker instead of a number, so stored evidence distinguishes "the
+    provider reported a counter this gateway will not carry" from "the
+    provider reported nothing" — the R66-C information-loss seam. Only the
+    probe's own ``true`` marker is carried: a tampered sidecar value is
+    dropped, never trusted.
+    """
     if not isinstance(value, dict):
         return None
     def _token(key: str) -> int | None:
         # Bounded: a tampered discovery sidecar must not serialise a
         # 401-digit count into the console as ``Infinity``.
         return usable_token_count(value.get(key))
-    tokens = {"input_tokens": _token("input_tokens"), "output_tokens": _token("output_tokens")}
-    return tokens if tokens["input_tokens"] is not None or tokens["output_tokens"] is not None else None
+    tokens: dict[str, int | bool | None] = {
+        "input_tokens": _token("input_tokens"), "output_tokens": _token("output_tokens")
+    }
+    if value.get(INVALID_USAGE_MARKER) is True:
+        tokens[INVALID_USAGE_MARKER] = True
+    if tokens["input_tokens"] is None and tokens["output_tokens"] is None and INVALID_USAGE_MARKER not in tokens:
+        return None
+    return tokens
 
 
 def _spend_metadata(value: Any) -> dict[str, Any] | None:
