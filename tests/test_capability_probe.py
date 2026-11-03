@@ -628,6 +628,46 @@ class _CostEchoTransport:
                                 dialect="openai_chat")
 
 
+class _UsageScriptedTransport:
+    """Answers each request with the next scripted ``usage`` payload.
+
+    Text probes get an honest nonce echo (so a claim stays a real claim)
+    and visual probes get the closed-schema tool answer — the classification
+    is identical to ``_EchoTransport``, but the *usage* of every response
+    comes from the script. That is what the cost-overflow/downgrade
+    intersection needs: response 1 can carry a refused counter while
+    response 2 overflows the running total.
+    """
+
+    def __init__(self, usages):
+        self._usages = list(usages)
+        self.payloads: list[dict] = []
+
+    def __call__(self, payload, *, timeout, connect_timeout, session_id=None):
+        from gateway.adapters.base import ProviderResponse
+
+        self.payloads.append(payload)
+        if not self._usages:
+            raise AssertionError("the runner sent more requests than the script has usages")
+        usage = self._usages.pop(0)
+        messages = payload.get("messages")
+        content = messages[0].get("content") if isinstance(messages, list) else None
+        if isinstance(content, str):
+            answer = chat_response(text=content.rsplit(": ", 1)[-1], usage=usage)
+        else:
+            answer = chat_response(
+                tool_calls=[tool_call(arguments={
+                    "blue_circle_count": BLUE_CIRCLE_COUNT,
+                    "red_square_present": RED_SQUARE_PRESENT,
+                })],
+                finish_reason="tool_calls",
+                usage=usage,
+            )
+        body = json.dumps(answer).encode("utf-8")
+        return ProviderResponse(status=200, headers={}, body=body,
+                                content_type="application/json", dialect="openai_chat")
+
+
 def _failing_transport(error, calls=None):
     def transport(payload, *, timeout, connect_timeout, session_id=None):
         if calls is not None:
@@ -953,6 +993,113 @@ class RunnerBoundsTests(unittest.TestCase):
         self.assertTrue(math.isfinite(outcome.reported_cost_usd))
         by_capability = {row["capability"]: row["status"] for row in outcome.results}
         self.assertEqual(by_capability, {"text_generation": "observed_supported"}, by_capability)
+
+    def test_a_cost_overflow_downgrade_keeps_the_refusal_record(self):
+        """SEC-1: the cost-overflow downgrade withdraws claims, not evidence.
+
+        Response 1 carries a 401-digit ``prompt_tokens`` — refused and
+        recorded as ``invalid_usage: true`` beside the nulls — with a
+        boundary-accepted ``1e308`` cost; response 2 reports ``1e308``
+        again, so the running total stops being representable and the run
+        must fail closed (``reported_cost_usd: null``,
+        ``cost_accounting``, every claim withdrawn). The downgrade used to
+        *rebuild* each row from scratch, dropping ``reported_usage``,
+        ``spend_estimate`` and the row's own ``request_count``, so the
+        refusal recorded by response 1 vanished and an overflow run read
+        exactly like a run where the provider reported no usage at all —
+        the SEC-R66-C information-loss shape back in the branch where the
+        two probes intersect. A reported refusal is recorded, never
+        erased, and the raw refused value still never travels.
+        """
+        huge = 10 ** 400
+        transport = _UsageScriptedTransport([
+            {"prompt_tokens": huge, "completion_tokens": 40, "cost": 1e308,
+             "opencode": {"billing_source": "plan"}},
+            {"prompt_tokens": 5, "completion_tokens": 5, "cost": 1e308,
+             "opencode": {"billing_source": "plan"}},
+        ])
+        outcome = run_suite(PROTOCOL, ALL_PROBES, transport, price=FRESH_PRICE)
+
+        # The fail-closed behaviour this fix must not disturb.
+        self.assertEqual(outcome.request_count, 2, "the run stops at the overflowing add")
+        self.assertIsNone(outcome.reported_cost_usd)
+        self.assertEqual(outcome.blocked_reason, "cost_accounting")
+        self.assertEqual({row["status"] for row in outcome.results}, {"inconclusive"})
+
+        by_capability = {row["capability"]: row for row in outcome.results}
+        text_row = by_capability["text_generation"]
+        usage = text_row.get("reported_usage")
+        self.assertIsInstance(
+            usage, dict,
+            "the downgrade rebuilt the row and dropped the refusal record",
+        )
+        assert isinstance(usage, dict)
+        self.assertIs(usage["invalid_usage"], True, "invalid vs absent must stay distinguishable")
+        self.assertIsNone(usage["input_tokens"], "the refused count must not be carried")
+        self.assertEqual(usage["output_tokens"], 40)
+        for row in outcome.results:
+            with self.subTest(capability=row["capability"]):
+                self.assertIn("spend_estimate", row, "the tariff estimate must survive too")
+                self.assertEqual(row["spend_estimate"]["currency"], "USD")
+                body = json.dumps(row, allow_nan=False)
+                self.assertNotIn(str(huge), body, "no raw refused value may travel")
+                self.assertNotIn("Infinity", body)
+        # Every row keeps the request evidence that produced it: response 1
+        # produced text_generation, response 2 the visual pair.
+        self.assertEqual(text_row["request_count"], 1)
+        self.assertEqual(by_capability["image_input"]["request_count"], 2)
+        self.assertEqual(by_capability["function_tools"]["request_count"], 2)
+
+    def test_the_overflow_downgrade_leaves_ordinary_and_absent_usage_honest(self):
+        """Controls for the downgrade: a marker means "reported and refused".
+
+        An ordinary run (finite costs, real counters) still claims with no
+        marker, a run whose provider reported no counters at all never
+        acquires one — including when that run ends in the cost-overflow
+        downgrade — and a plain absent-usage run is byte-identical to what
+        it was before the fix.
+        """
+        # Ordinary: accounted costs, real counters, no refusal anywhere.
+        transport = _UsageScriptedTransport([
+            {"prompt_tokens": 120, "completion_tokens": 40, "cost": 0.000002,
+             "opencode": {"billing_source": "plan"}},
+            {"prompt_tokens": 60, "completion_tokens": 20, "cost": 0.000002,
+             "opencode": {"billing_source": "plan"}},
+        ])
+        outcome = run_suite(PROTOCOL, ALL_PROBES, transport, price=FRESH_PRICE)
+        self.assertIsNone(outcome.blocked_reason)
+        self.assertEqual(outcome.request_count, 2)
+        self.assertEqual({row["status"] for row in outcome.results}, {"observed_supported"})
+        for row in outcome.results:
+            with self.subTest(surface="ordinary", capability=row["capability"]):
+                self.assertNotIn("invalid_usage", row.get("reported_usage") or {})
+
+        # Absent usage: accounted cost, no counters reported at all.
+        transport = _UsageScriptedTransport([{"cost": 0.000002}, {"cost": 0.000002}])
+        outcome = run_suite(PROTOCOL, ALL_PROBES, transport, price=FRESH_PRICE)
+        self.assertIsNone(outcome.blocked_reason)
+        self.assertEqual({row["status"] for row in outcome.results}, {"observed_supported"})
+        for row in outcome.results:
+            with self.subTest(surface="absent", capability=row["capability"]):
+                self.assertEqual(
+                    row.get("reported_usage"),
+                    {"input_tokens": None, "output_tokens": None},
+                )
+                self.assertNotIn("invalid_usage", row.get("reported_usage") or {})
+
+        # Absent usage that also overflows: still no refusal that happened.
+        transport = _UsageScriptedTransport([{"cost": 1e308}, {"cost": 1e308}])
+        outcome = run_suite(PROTOCOL, ALL_PROBES, transport, price=FRESH_PRICE)
+        self.assertIsNone(outcome.reported_cost_usd)
+        self.assertEqual(outcome.blocked_reason, "cost_accounting")
+        self.assertEqual({row["status"] for row in outcome.results}, {"inconclusive"})
+        for row in outcome.results:
+            with self.subTest(surface="absent-overflow", capability=row["capability"]):
+                self.assertEqual(
+                    row.get("reported_usage"),
+                    {"input_tokens": None, "output_tokens": None},
+                )
+                self.assertNotIn("invalid_usage", row.get("reported_usage") or {})
 
     def test_cancellation_stops_before_the_second_request(self):
         cancel = threading.Event()

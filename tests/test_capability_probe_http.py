@@ -807,6 +807,127 @@ class ProbeHttpTests(unittest.TestCase):
                 self.assertEqual(usage["output_tokens"], 40)
                 self.assertIs(usage["invalid_usage"], True)
 
+    def test_a_cost_overflow_keeps_the_refusal_record_in_body_and_store(self):
+        """SEC-1 on the wire: the overflow downgrade must not erase the marker.
+
+        Every response of this run carries a 401-digit `prompt_tokens`
+        with `cost: 1e308`. The second cost overflows the running total,
+        so the run fails closed — `reported_cost_usd: null`,
+        `cost_accounting`, no claim — but the refusal the responses
+        reported must survive into the exact bytes node parses **and**
+        into the persisted evidence. Before the fix the downgrade rebuilt
+        every row without usage, so both surfaces read `0/3` marker rows
+        and an overflow run was indistinguishable from absent usage while
+        the sibling not-accounted path kept its marker.
+        """
+        huge = 10 ** 400
+        _UpstreamHandler.usage = {"prompt_tokens": huge, "completion_tokens": 40, "cost": 1e308}
+        confirmation, revision = self._confirmation()
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": ALL_PROBES,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        self.assertNotIn(b"Infinity", raw)
+        self.assertNotIn(str(huge).encode("ascii"), raw, "the refused count must not be carried")
+
+        # The exact bytes through node's JSON.parse — the console's parser.
+        parsed = _node_json_parse(raw)
+        self.assertIsNone(parsed["reported_cost_usd"])
+        self.assertEqual(parsed["blocked_reason"], "cost_accounting")
+        self.assertEqual(parsed["statuses"], ["inconclusive"])
+        self.assertEqual(parsed["request_count"], 2)
+
+        body = _strict_json_loads(raw.decode("utf-8"))
+        self.assertEqual(_non_finite_paths(body), [])
+        for row in body["results"]:
+            with self.subTest(capability=row["capability"], surface="body"):
+                usage = row.get("reported_usage")
+                self.assertIsInstance(
+                    usage, dict,
+                    "the downgrade rebuilt the row and dropped the refusal record",
+                )
+                assert isinstance(usage, dict)
+                self.assertIs(usage["invalid_usage"], True)
+                self.assertIsNone(usage["input_tokens"])
+                self.assertEqual(usage["output_tokens"], 40)
+                self.assertNotIn(str(huge), json.dumps(usage))
+
+        # ...and the same record in the persisted evidence.
+        text = Path(self.h.data_dir / "capability_discovery.json").read_text()
+        self.assertNotIn(str(huge), text)
+        self.assertNotIn("Infinity", text)
+        store = _strict_json_loads(text)
+        self.assertEqual(_non_finite_paths(store), [])
+        self.assertEqual(len(store["runs"]), 1)
+        rows = store["runs"][0]["results"]
+        self.assertEqual(len(rows), 3, "every planned probe produced a row")
+        for row in rows:
+            with self.subTest(capability=row["capability"], surface="store"):
+                usage = row.get("reported_usage")
+                self.assertIsInstance(usage, dict, "the persisted row lost the refusal record")
+                assert isinstance(usage, dict)
+                self.assertIs(usage["invalid_usage"], True)
+                self.assertIsNone(usage["input_tokens"])
+                self.assertEqual(usage["output_tokens"], 40)
+
+    def test_an_absent_usage_run_forges_no_refusal_marker(self):
+        """Control: `not reported` must never read as `reported and refused`.
+
+        An accounted run whose provider sent no token counters at all
+        still claims, still reports plain nulls in the body, and must not
+        acquire an `invalid_usage` marker on any surface — otherwise the
+        marker stops meaning anything.
+        """
+        _UpstreamHandler.usage = {"cost": 0.000002}
+        confirmation, revision = self._confirmation()
+        status, raw, _ = self.h.request(
+            "POST",
+            "/owner/api/capabilities/run",
+            {
+                "provider_id": PROVIDER,
+                "model_id": MODEL,
+                "probes": ALL_PROBES,
+                "owner": OWNER,
+                "confirmation": confirmation,
+                "base_revision": revision,
+            },
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(raw, bytes), raw
+        parsed = _node_json_parse(raw)
+        self.assertIsNone(parsed["blocked_reason"])
+        self.assertEqual(parsed["statuses"], ["observed_supported"])
+
+        body = _strict_json_loads(raw.decode("utf-8"))
+        for row in body["results"]:
+            with self.subTest(capability=row["capability"], surface="body"):
+                usage = row.get("reported_usage")
+                self.assertEqual(usage, {"input_tokens": None, "output_tokens": None})
+                self.assertNotIn("invalid_usage", usage or {})
+
+        store = _strict_json_loads(
+            Path(self.h.data_dir / "capability_discovery.json").read_text()
+        )
+        for row in store["runs"][0]["results"]:
+            with self.subTest(capability=row["capability"], surface="store"):
+                self.assertNotIn("invalid_usage", row.get("reported_usage") or {})
+                self.assertNotIn(
+                    "reported_usage", row,
+                    "absent usage persists nothing — no refusal that never happened",
+                )
+
     # --- confirmation --------------------------------------------------
 
     def test_a_run_needs_the_confirmation_issued_by_its_own_preview(self):

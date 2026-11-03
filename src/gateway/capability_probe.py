@@ -1071,26 +1071,30 @@ def _accumulate_cost(total: float | None, added: float) -> float | None:
     return candidate
 
 
-def _downgrade_claimed_results(
-    pending: dict[str, dict[str, Any]], summary: str, *, request_count: int
-) -> None:
+def _downgrade_claimed_results(pending: dict[str, dict[str, Any]], summary: str) -> None:
     """Replace every claimed result of a run with ``inconclusive``.
 
     Used when the run's accumulated cost stops being representable: a run
     whose total cannot be stated must not claim any capability, so every
     ``observed_*`` row is withdrawn. Probes the runner never sent keep their
     honest ``not_tested`` — an unrun probe is not an inconclusive one.
+
+    The row is edited in place rather than rebuilt. A rebuild would drop
+    ``reported_usage``, ``spend_estimate`` and the row's own
+    ``request_count``, so a refused counter recorded by an earlier response
+    would vanish with it and an overflow run would read exactly like a run
+    where the provider reported no usage at all — the SEC-R66-C
+    information-loss shape, in the branch where the cost-overflow and the
+    invalid-usage probes intersect (SEC-1). A reported refusal is recorded,
+    never erased; nothing raw travels either way, because ``reported_usage``
+    only ever holds bounded counters or the boolean marker.
     """
-    for capability, row in pending.items():
+    for row in pending.values():
         if row.get("status") == "not_tested":
             continue
-        pending[capability] = _result(
-            capability,
-            "inconclusive",
-            summary,
-            error_class=None,
-            request_count=request_count,
-        )
+        row["status"] = "inconclusive"
+        row["evidence_summary"] = _clean(summary)
+        row["error_class"] = None
 
 
 def cost_accounting_ok(usage: Any) -> bool:
@@ -1387,7 +1391,6 @@ def run_suite(
             _downgrade_claimed_results(
                 pending,
                 "the run's accumulated cost total is unrepresentable, so no capability is claimed",
-                request_count=outcome.request_count,
             )
             outcome.blocked_reason = "cost_accounting"
             break
