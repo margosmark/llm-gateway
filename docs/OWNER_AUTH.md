@@ -30,7 +30,7 @@ One username/password account. It protects `GET /owner/` and every
   plain-HTTP LAN listener a `Secure` cookie would simply be dropped.
 - **First run.** A fresh gateway has **no account**. `ensure_setup_code()`
   mints a random one-time code, prints it on server startup and writes it
-  to `owner_setup_code` (mode `0600`). `POST /owner/api/auth/setup`
+  to `owner_setup_code` (mode `0600`, JSON: `{"setup_code": "..."}`). `POST /owner/api/auth/setup`
   consumes it exactly once and deletes the file. There is no default
   credential: `admin/admin` does not exist.
 - **Throttling.** Failed sign-ins are throttled in memory per account
@@ -75,7 +75,9 @@ stream): `GET /v1/models`, `GET /v1/alias-catalog`,
 
 - `GET /version`, `GET /health`, `GET /metrics` are unchanged.
 - **Set / rotate / clear** from Settings → Access
-  (`POST /owner/api/auth/client-key`, owner session required).
+  (`POST /owner/api/auth/client-key`, owner session required). The owner
+  supplies the key they will hand to clients; it must be 32-256
+  characters.
   The response carries only a random display id and the transition, plus
   an `impact` sentence that states what clients will experience. The key
   value itself is never echoed, logged or stored in plaintext (SHA-256
@@ -115,3 +117,8 @@ next read.
   and mutations refused, authenticated ones work).
 - `tests/console_dom_test.js` - the sign-in view, the access card, and
   the copy that keeps the two boundaries apart.
+- `tests/live_owner_auth_smoke.py` - spawns a real gateway on a
+  throwaway data directory and a local port, then drives setup, sign-in,
+  throttling, key set/rotate/clear and secret non-exposure over actual
+  HTTP. Run by hand: `PYTHONPATH=src python3 tests/live_owner_auth_smoke.py`
+  (34 checks; not collected by `unittest discover`).
