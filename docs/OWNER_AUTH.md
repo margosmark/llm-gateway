@@ -61,8 +61,29 @@ Handing the flag a password anyway (`--reset-owner-password <password>`)
 is refused with exit 2, and the refusal does not echo the value: argument
 errors replace every argv-supplied value with `<redacted>`, so a secret
 that lands on the command line by mistake stays out of the terminal and
-out of anything capturing stderr. Option names stay in the message, so a
-plain typo is still diagnosable. The running gateway picks
+out of anything capturing stderr. The recovery regime is entered on how
+the flag *resolves* - the exact flag, `=`-attached spellings, every
+unambiguous abbreviation (`--reset-owner-p`), and close misspellings of
+it (`--rest-owner-password`) - and the misspelled flag keeps its own name
+in the message, because that is the diagnosis. Outside that regime a
+value is withheld whole, including tokens that start with `--` after the
+`--` separator and positional tokens containing `=` (rewriting `secret=`
+to `secret=<redacted>` would still print the secret); a token that could
+be an option name of this parser - `--` plus lowercase letters, digits
+and hyphens, the grammar every registered long option matches - stays
+named, so a plain typo is still diagnosable.
+
+**Documented boundary.** Because unknown flags are named verbatim (the
+preserved diagnosis: `unrecognized arguments: --bogus-flag`), a password
+that is byte-identical to a flag-shaped unknown token - `--` plus
+lowercase letters, digits and hyphens, e.g. `--summer2026-pass` - on a
+command line with no recovery signal (no recovery flag, abbreviation or
+misspelling) cannot be told apart from a typo'd flag and is echoed in
+those two shapes: a lone token, or a token beside another unknown flag.
+This is the one residual of the argv-redaction rule, pinned by
+`tests/test_cli_argv_secrets.py::DocumentedResidualBoundaryTests`. Do not
+put a password on the command line: the recovery flag reads it from
+stdin for exactly this reason. The running gateway picks
 the change up without a restart: the store
 re-reads the file when its fingerprint changes, so a stolen cookie dies
 at the moment of recovery rather than at the next reboot.
