@@ -42,15 +42,82 @@ RETIRED_SETUP_PORT = 8766
 RESET_OWNER_PASSWORD_FLAG = "--reset-owner-password"
 REDACTED_ARGV_VALUE = "<redacted>"
 _UNRECOGNIZED_PREFIX = "unrecognized arguments: "
+# Every long option build_parser() registers is `--` + lowercase
+# letters/digits/hyphens; tests/test_cli_argv_secrets.py pins this grammar to
+# the parser. An unknown long token outside it cannot be a typo of any option
+# this parser defines, so it is a value (or a secret), not a name.
+_FLAG_SHAPE = re.compile(r"--[a-z0-9][a-z0-9_-]*")
 
 
-def _reset_flag_in_play(argv: Sequence[str]) -> bool:
-    """True when the recovery flag is on the command line being parsed."""
-    return any(
-        token == RESET_OWNER_PASSWORD_FLAG
-        or token.startswith(RESET_OWNER_PASSWORD_FLAG + "=")
-        for token in argv
-    )
+def _flag_shaped(token: str) -> bool:
+    """True when an unknown long token could be an option name of this parser."""
+    return bool(_FLAG_SHAPE.fullmatch(token))
+
+
+def _within_two_edits(a: str, b: str) -> bool:
+    """True when ``a`` is within Levenshtein distance 2 of ``b``."""
+    if abs(len(a) - len(b)) > 2:
+        return False
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, 1):
+        current = [i]
+        for j, char_b in enumerate(b, 1):
+            current.append(
+                min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (char_a != char_b))
+            )
+        if min(current) > 2:
+            return False
+        previous = current
+    return previous[-1] <= 2
+
+
+def _resolves_to_reset(head: str, known: set[str]) -> bool:
+    """True when argparse resolves ``head`` to the recovery flag.
+
+    argparse matches a long option by exact string, then by unambiguous
+    prefix, so ``--reset`` and ``--reset-owner-p`` ARE the recovery flag on
+    the command line. The regime has to follow how the flag resolves, not
+    its literal spelling - otherwise the abbreviation of the reset flow is
+    redacted as an ordinary parse and its value comes back out.
+    """
+    if not head.startswith("--"):
+        return False
+    if head == RESET_OWNER_PASSWORD_FLAG:
+        return True
+    if head in known:
+        return False
+    matches = [option for option in known if option.startswith(head)]
+    return matches == [RESET_OWNER_PASSWORD_FLAG]
+
+
+def _is_recovery_typo(head: str, known: set[str]) -> bool:
+    """True when ``head`` is a close misspelling of the recovery flag.
+
+    ``--rest-owner-password`` is a recovery attempt, not an unknown flag:
+    entering the recovery regime withholds the rest of the line, and the
+    typo'd flag itself keeps its name (it is the diagnosis).
+    """
+    if not head.startswith("--") or head in known:
+        return False
+    return _within_two_edits(head, RESET_OWNER_PASSWORD_FLAG)
+
+
+def _reset_flag_in_play(argv: Sequence[str], known_options: Iterable[str] = ()) -> bool:
+    """True when the recovery flow is on the command line being parsed.
+
+    Counts every token argparse resolves to ``--reset-owner-password``
+    (exact, ``=``-attached, or an unambiguous abbreviation) and close
+    typos of it. The recovery regime withholds argv values, so it must
+    trigger on how the flag is used, not on its literal spelling.
+    """
+    known = set(known_options)
+    for token in argv:
+        if not token.startswith("-"):
+            continue
+        head, _sep, _value = token.partition("=")
+        if _resolves_to_reset(head, known) or _is_recovery_typo(head, known):
+            return True
+    return False
 
 
 def _hide_argv_value(message: str, value: str) -> str:
@@ -73,19 +140,28 @@ def _hide_argv_value(message: str, value: str) -> str:
     return message
 
 
-def _bare_value_needles(token: str) -> list[str]:
+def _bare_value_needles(token: str, *, post_separator: bool = False) -> list[str]:
     """The parts of one argv token argparse may interpolate as a value.
 
-    A token carrying ``=`` contributes only what followed the ``=`` - the
-    name stays, because that is how a typo is diagnosed. A ``--long`` token
-    contributes nothing: it is a name, not a value. Everything else (a bare
-    value, a single-dash token) is itself the value.
+    - After the ``--`` separator every token is a positional value, dashes
+      included: option parsing has stopped, so nothing there is a name.
+    - A long token this parser could have received as a flag
+      (``--long``, ``--long=value``) contributes only what followed the
+      ``=``: the name stays, because naming a typo'd flag is the
+      diagnosis.
+    - Everything else - a bare value, a positional carrying ``=``, a long
+      token that is not flag-shaped - is itself the value, so the whole
+      token is withheld. Rewriting ``secret=`` to ``secret=<redacted>``
+      would still print the secret, and a ``--``-leading token outside the
+      flag grammar cannot be an option name.
     """
-    _head, sep, value = token.partition("=")
-    if sep:
-        return [value] if value else []
-    if token.startswith("--"):
+    if post_separator:
+        return [token]
+    if token == "--":
         return []
+    head, sep, value = token.partition("=")
+    if head.startswith("--") and _flag_shaped(head):
+        return [value] if sep and value else []
     return [token]
 
 
@@ -106,47 +182,81 @@ def _redact_argv_values(message: str, argv: Sequence[str], known_options: Iterab
     stdin. A refused parse must not defeat that: argparse otherwise writes
     the very token it rejected straight back to stderr.
 
-    Two regimes. While the recovery flag is in play nothing else on the
-    line can be a legitimate value, so every token that is not a known
-    option is withheld wherever the message puts it. On an ordinary parse
-    only the shapes argparse itself interpolated are scrubbed - the tail of
-    ``unrecognized arguments: ...``, a ``%r``-quoted value, and the raw
-    token of an ambiguous abbreviation - so a refusal that deliberately
-    names a fixed value (``port 8766 is reserved``) keeps saying it. Option
-    *names* are never withheld: an operator who typo'd ``--hst`` still gets
-    told which flag was rejected.
+    Three rules, in order:
+
+    1. Recovery regime - any token argparse resolves to the recovery flag,
+       and close typos of it. Nothing else on the line can be a legitimate
+       value, so every token that is not a known option is withheld
+       wherever the message puts it. The typo'd flag itself keeps its name:
+       it is the diagnosis.
+    2. Ordinary regime, the ``unrecognized arguments: ...`` tail: only the
+       shapes argparse itself interpolated are scrubbed - a positional
+       value (whole token, so ``secret=`` cannot come back out), the tail
+       of an attached ``=``, and any token after the ``--`` separator,
+       dashes included - so a refusal that deliberately names a fixed value
+       (``port 8766 is reserved``) keeps saying it.
+    3. Everywhere: a raw token carrying ``=`` is rewritten to
+       ``head=<redacted>`` only when the head is flag-shaped - naming a
+       flag is the diagnosis. A head that cannot be a flag means the whole
+       token was a value, and the whole token is withheld.
+
+    The documented boundary (docs/OWNER_AUTH.md): an unknown flag-shaped
+    token is named verbatim, because that is the preserved diagnosis - a
+    leading-``--`` secret that is byte-identical to one, on a line with no
+    recovery signal, cannot be told apart from a typo'd flag.
     """
     known = set(known_options)
-    tokens = [token for token in argv if token and token not in known]
 
-    if _reset_flag_in_play(argv):
-        for token in tokens:
+    # argv tokens paired with whether argparse already stopped option
+    # parsing before them (everything after a bare ``--`` is a value).
+    entries: list[tuple[str, bool]] = []
+    after_separator = False
+    for token in argv:
+        if token and token not in known:
+            entries.append((token, after_separator))
+        if token == "--":
+            after_separator = True
+
+    if _reset_flag_in_play(argv, known):
+        for token, _post_separator in entries:
+            head, _sep, value = token.partition("=")
+            if _is_recovery_typo(head, known):
+                # The misspelled recovery flag stays named; an attached
+                # value is still a value.
+                if value:
+                    message = _hide_argv_value(message, value)
+                continue
             for needle in _whole_token_needles(token):
                 message = _hide_argv_value(message, needle)
         return message
 
     if message.startswith(_UNRECOGNIZED_PREFIX):
         prefix, separator, tail = message.partition(_UNRECOGNIZED_PREFIX)
-        for token in tokens:
-            for needle in _bare_value_needles(token):
+        for token, post_separator in entries:
+            for needle in _bare_value_needles(token, post_separator=post_separator):
                 tail = _hide_argv_value(tail, needle)
         message = prefix + separator + tail
 
-    for token in tokens:
+    for token, _post_separator in entries:
         for needle in _whole_token_needles(token):
             quoted = repr(needle)
             if quoted in message:
                 message = message.replace(quoted, f"'{REDACTED_ARGV_VALUE}'")
-        # An ambiguous abbreviation keeps the raw token with its attached
-        # value: ``--po=secret could match --port, --print-url``.
+        # An ambiguous abbreviation keeps its head with the attached value
+        # redacted: ``--po=secret`` could match --port, --print-url.
         if "=" in token and token in message:
             head, _sep, _value = token.partition("=")
-            message = message.replace(token, f"{head}={REDACTED_ARGV_VALUE}")
+            if head.startswith("--") and _flag_shaped(head):
+                message = message.replace(token, f"{head}={REDACTED_ARGV_VALUE}")
+            else:
+                # Not a flag-shaped head, so the token was a value: withhold
+                # all of it. ``secret=<redacted>`` still contains ``secret=``.
+                message = message.replace(token, REDACTED_ARGV_VALUE)
     return message
 
 
 class _RedactingArgumentParser(argparse.ArgumentParser):
-    """An argument parser that never writes an argv value back out.
+    """An argument parser that redacts argv values out of its refusals.
 
     ``error()`` is the single funnel every refused parse goes through -
     unknown flags, unexpected positionals, bad conversions - so redacting
@@ -169,7 +279,7 @@ class _RedactingArgumentParser(argparse.ArgumentParser):
         if argv is None:  # parser.error() called outside a parse
             argv = list(sys.argv[1:])
         safe = _redact_argv_values(message, argv, self._option_string_actions)
-        if _reset_flag_in_play(argv) and (
+        if _reset_flag_in_play(argv, self._option_string_actions) and (
             safe.startswith(_UNRECOGNIZED_PREFIX)
             or RESET_OWNER_PASSWORD_FLAG in safe
         ):
