@@ -28,11 +28,18 @@ runtime-verified here.
   atomically persisted; provider credential files are separate and intended to
   be owner-only.
 * Browser controls are layered: canonical Host, forwarded-header rejection,
-  and origin validation for browser mutations. There is no owner session and
-  no CSRF bootstrap, by product decision.
+  and origin validation for browser mutations. **Deployed:** there is no
+  owner session and no CSRF bootstrap, by product decision. **Owner-session
+  candidate:** one `HttpOnly`, `SameSite=Strict` session cookie guards every
+  `/owner/*` route except the console shell/assets and the three pre-auth
+  auth endpoints; there is still no CSRF bootstrap token — `SameSite=Strict`
+  plus the canonical `Origin`/`Host` checks carry that.
 * There is one listener. The owner console, the configuration API and the
-  OpenAI-compatible API share it, and any peer that can reach it is an
-  administrator by product decision.
+  OpenAI-compatible API share it. **Deployed:** any peer that can reach it is
+  an administrator by product decision. **Owner-session candidate:**
+  reaching `/owner/*` is no longer administration — a valid owner session is
+  required — while `/v1/*` stays keyless until the owner sets a client key,
+  so any reachable peer is still a caller on the model API.
 * Cross-provider fallback is opt-in and has hard stops for tools and unsafe
   classes. The test suite covers most of those safety decisions.
 * A capability and a preference are treated differently: dialect, streaming
@@ -46,7 +53,7 @@ container deployment has been exercised.
 
 ## Findings requiring implementation work
 
-### R0 — A LAN client can claim the first owner passphrase (superseded)
+### R0 — A LAN client can claim the first owner passphrase — **closed**
 **Severity: release blocker for LAN-reachable first boot.**
 
 Setup now binds to the private LAN address by default (`src/gateway/cli.py:159-
@@ -62,6 +69,39 @@ setup is LAN-reachable, or require an explicit out-of-band bootstrap secret.
 Add a LAN-peer refusal test for uninitialized setup plus a successful
 loopback/bootstrap test. Until then, bind setup to `127.0.0.1` for first boot
 and switch only after the passphrase exists.
+
+**Resolution.** Closed in two steps, taking the finding's second option
+(explicit out-of-band bootstrap secret) rather than the loopback-only one.
+First, the trusted-LAN admin-mode change removed passphrase creation and
+owner sessions altogether (see "Trusted LAN admin-mode candidate update"
+below), so the offending branch — an unauthenticated `handle_login` storing
+any submitted passphrase — no longer existed. Second, the owner-session
+candidate reintroduces first-run setup **gated by a one-time setup code**:
+`ensure_setup_code()` (`src/gateway/owner_auth.py`) mints a 128-bit
+`secrets.token_urlsafe(16)` code only while no account exists, returns the
+plaintext solely for server-side stdout, and writes it to `owner_setup_code`
+(`0600` inside a `0700` data directory); `POST /owner/api/auth/setup`
+re-derives its hash and compares with `hmac.compare_digest`, consumes it
+exactly once and deletes the file. No HTTP response, log line or access-log
+record ever carries the code, and there is no default credential — so a LAN
+peer that can reach the listener still cannot claim first ownership without
+reading the code off the gateway host, which is the privilege the finding
+was about.
+
+Regression evidence: `tests/test_owner_auth.py` —
+`test_a_fresh_gateway_has_no_account_and_no_default_credential`,
+`test_the_setup_code_lives_on_the_host_and_never_in_a_response`,
+`test_setup_is_single_use_and_a_wrong_code_is_refused`,
+`test_owner_endpoints_require_a_session_while_the_shell_does_not` — and
+`tests/live_owner_auth_smoke.py` (34 checks driving setup, sign-in,
+throttling, key set/rotate/clear and secret non-exposure over real HTTP
+against a throwaway gateway). Claimed by the security review of `154971e`
+(card `t_e4577180`, not re-run here): 8 concurrent setup attempts produced
+exactly one winner with the code single-use, and the code was absent from
+every public response and access-log record. The loopback-only variant of
+the required fix is deliberately not implemented: the approved policy keeps
+one listener on the private bind with no separate setup surface
+(`docs/TRUSTED_LAN_ADMIN_MODE.md`).
 
 ### R1 — ChatGPT/Codex device flow cannot complete in the current UI — **closed**
 **Severity: release blocker for the ChatGPT/Codex setup flow.** *(closed)*
@@ -539,6 +579,18 @@ limitations.
 
 The proxy topology is **not** advertised: forwarded and proxy headers are
 rejected outright, and the documentation says so.
+
+**Superseded by the owner-session candidate** (SEC-1 documentation
+reconciliation, card `t_bbea51dc`): for `/owner/*` there is now a password,
+so "no password or profile restricts administrative access" no longer
+describes the candidate. `docs/TRUSTED_LAN_ADMIN_MODE.md` and the new
+`docs/OWNER_AUTH.md` carry the current two-boundary statement, the README's
+known limitations name the still-keyless model API instead of
+"administration has no authentication boundary", and the console no longer
+carries that notice. The plain-HTTP half of R13 is untouched: the listener
+is still HTTP-only, the session cookie is still not `Secure`, and "trusted
+LAN" still means "no on-path observer". The deployed gateway keeps the
+boundary this Resolution recorded until the candidate ships.
 
 ### R14 — Configuration rollback instructions currently only make a copy — **closed**
 **Severity: medium operator-recovery defect.** *(closed)*
@@ -2253,3 +2305,26 @@ Full gates, run by me on this tree: `unittest` **1095 tests, 1 failure, 3 skippe
 **Fix.** One bound at every seam: `usable_token_count` (`src/gateway/bridge/streams.py`, `MAX_TOKEN_COUNTER = 10**9`; refuses bools, negatives, non-integers, over-bound ints) in response/stream counter parsing, the ledger write seam (`RequestLedger.amend`), rollup, statistics, persistence read, and the probe run body (`_usage_tokens`). A *reported* refusal is recorded, never erased: the ledger keeps the boolean `invalid_usage` marker beside the counters that survived, and the cost path answers *invalid* rather than *no usage* and never prices a refused counter as zero. The integrated candidate `d12d980` still had one lossy spot — security `t_8d1dc7fe`, finding "unintended information loss for huge reported token counters": the capability-probe run path dropped a refused count to exactly the `null`s absent usage produces, so neither the run body nor the persisted evidence could tell "the provider gave a number this gateway will not carry" from "the provider reported nothing". **Remediated on this card (the reconciliation security asked for, option "persist a bounded refusal marker"):** `_usage_tokens` now emits `invalid_usage: true` beside the nulls whenever `reported_counters_unusable()` reports a number the bound refuses — a bool, so it can never serialise into a number the console reads as `Infinity` — and `capability_discovery._usage_metadata` persists that marker (only when it is exactly `True`; a tampered non-bool value is dropped) while absent or non-numeric usage still produces the plain nulls and no `reported_usage` key, byte-identical to before. Cost accounting was unaffected throughout: a refused counter never downgrades a run, because `cost_accounting_ok` reads `usage.cost`, not token counts.
 
 **Regression evidence.** `tests/test_token_counter_bounds.py` (bounds at each seam, refusal recorded not dropped, owner state stays 200 over pre-bound `10**400` rows, run-body bound) plus this card's behavior-driven additions, each written from the security finding: `ProbeRunBodyBoundTests.test_a_refused_run_body_counter_is_recorded_not_erased` (401-digit, `inf`, float, bool and `total_tokens`-only refusals → marker, no number above the bound), `::test_absent_or_non_numeric_usage_reports_nulls_without_a_refusal` (absence/non-numeric is not a refusal — no marker, control green on the pre-fix tree), `DiscoveryBackendTests.test_reported_usage_refusal_is_persisted_and_absent_usage_is_not` (marker in the stored file; absent usage keeps no `reported_usage` key; tampered `"true"` string dropped), and `ProbeHttpTests.test_a_refused_huge_token_counter_is_recorded_not_carried` (401-digit `prompt_tokens` upstream → **200**, bytes survive `node JSON.parse`, the digit run absent from body and store, `invalid_usage: true` beside `input_tokens: null` in both, `Infinity` absent, claims stand because cost accounting was fine). RED on `d12d980` (the rejected candidate): 2 failures + 6 subtest errors across the three marker tests, control green; green on this tree. Security's three probe assertions that contradict this spec — `H9` (expects the 400-digit count to reach the body), `D1` (expects an overflowed total to stay finite/non-null), `E1` (expects an unbounded integer counter to be carried) — live in reviewer-owned harnesses outside this repo (`sec_probe_http.py`, `sec_probe_unit.py` under a security card's workspace, not repository files) and must be re-pointed at this register at re-review, exactly as `D1` was after R67; the in-repo tests above are the authoritative expectations. Prior independent numbers, reported in their own cards: QA `t_6142e3b2` R66-C state-contract probe **10/10** (huge-only and finite mixed-state), security `t_8d1dc7fe` live probe confirmed non-finite counters do not escape the run body.
+
+## Owner-session boundary — the security review's SEC-1 (documentation assurance, card `t_e4577180`) — closed
+
+*(Not to be confused with the earlier `### SEC-1` NaN-ceiling entry above; the security review of each candidate restarts its own SEC numbering.)*
+
+**Severity: Medium (assurance).** The security review of the owner-login candidate `154971e3a03386153a03aa238471b91ce849d0f7` (tree `ea11e7151de36fc2d44b5033ae3294869077e1ee`, branch `llm-gateway/t_ab975ac3`) passed the implementation — its 117 independent adversarial checks against isolated fixtures went 117/117 — and returned **CHANGES_REQUIRED** on one documentation item: `docs/RUNBOOK.md`, `docs/ARCHITECTURE.md` and `docs/REVIEW.md` still asserted the superseded no-login boundary ("any device that can reach this address can administer the gateway", "owner state is readable without a login", "no owner session and no CSRF bootstrap", the "login/bootstrap is not part of this product mode" troubleshooting row), R0 above was left without a Resolution although this candidate implements its required fix, and `src/gateway/owner_auth.py:561` pointed at a runbook recovery path that did not exist. `AGENTS.md` requires the README, runbook, architecture/contract docs and this register to change whenever a security boundary does. This entry records the boundary those documents now describe. **Documentation only — no code was touched**, per the constraint that the reviewed implementation must not be "improved" while the docs are reconciled.
+
+**The boundary, as now documented.**
+
+* **Owner console and configuration API (`/owner/*`).** The pre-auth surface is exactly the console shell and its assets, `GET /owner/api/auth/session`, `POST /owner/api/auth/setup` and `POST /owner/api/auth/login`. Every other `/owner/*` route requires the `gw_owner_session` cookie (`HttpOnly`, `SameSite=Strict`, `Path=/`, 12-hour TTL, validated server-side) and answers `401 authentication_required` before its handler runs. First run has no account and no default credential: a one-time setup code — printed to server stdout and kept in the `0600` `owner_setup_code` file, never an HTTP response — is consumed exactly once by setup. Sign-in, sign-out, password change and `--reset-owner-password` recovery (stdin only, revokes every session, picked up by a running gateway without a restart) are documented in `docs/RUNBOOK.md` §1.4, and the troubleshooting table now carries the real first-boot symptom, the `401`, and the throttle row.
+* **Model API (`/v1/*`).** Stays **keyless** until the owner sets a client key from Settings → Access; `/version`, `/health` and `/metrics` are unauthenticated either way. Until a key is set, any reachable peer is a caller — including a cross-origin browser POST, because the `Origin` check covers `/owner/` only.
+* **Transport caveat.** The listener is plain HTTP: the owner password, the session cookie and the client key cross the LAN in clear text and the cookie is not `Secure` unless the deployment says TLS. "Trusted LAN" therefore also means "no on-path observer".
+* **Deployed vs candidate.** The running gateway still serves the no-login boundary, where a reachable peer administers `/owner/*`; the owner session ships only with this candidate, and the release gate needs QA PASS and security PASS on the same exact SHA/tree before deployment.
+
+**Non-blocking observations recorded here, deliberately not fixed in this change:**
+
+* The one-time setup code never expires (`src/gateway/owner_auth.py:362-366` stores `created_at`; nothing reads it).
+* The client key is owner-supplied with no entropy floor (`src/gateway/owner_auth.py:152-166`, `validate_client_key` checks only length and printable ASCII) and is stored as an unsalted SHA-256 via `hash_caller_token` (`src/gateway/credentials.py:157-163`); a weak 32-character key is offline-dictionary-attackable if `owner_auth.json` leaks. The console generates a strong key (`crypto.getRandomValues`) and offers a *Generate* button.
+* `request.context["owner_session"]` holds the raw session token (`src/gateway/http/app.py:733`); nothing serialises `request.context` today.
+* The login throttle is in-memory and cleared by a restart (`owner_auth.py:176-184`) — now stated in `docs/RUNBOOK.md` §1.4 and in the troubleshooting table.
+* `describe_store()` (`owner_auth.py:686-692`) is dead code reaching into `store._data`.
+
+**Evidence for this change** (run by me on the tree of this commit; `git diff` touches only `docs/ARCHITECTURE.md`, `docs/REVIEW.md`, `docs/RUNBOOK.md`, so no Python or JavaScript line changed): `PYTHONPATH=src python3 -m unittest discover -s tests` → **1163 tests, OK (3 skipped)**; `PYTHONPATH=src python3 -m pytest tests/ -q` → **1161 passed, 3 skipped, 811 subtests passed**; `python3 -m compileall -q src tests`, `PYTHONPATH=src python3 -m gateway --help`, `node tests/console_dom_test.js`, `node tests/test_opencode_catalog.mjs` and `git diff --check` all clean. Because a fix-forward changes the SHA, the QA gate (`t_e6ac9132`) and the security gate (`t_e4577180`) must both be re-run on the new exact SHA/tree before any deployment.
