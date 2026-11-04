@@ -35,6 +35,7 @@ from gateway.http.core import Headers, Request
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
 from gateway.logging import RequestLogger
 from gateway.observability import LimitStore, RequestLedger
+from tests.owner_session import cookie_header
 
 
 class ScriptedUpstream:
@@ -247,7 +248,11 @@ class AdapterContractTests(unittest.TestCase):
             path="/owner/api/provider",
             raw_query="",
             headers=Headers(
-                [("Host", "127.0.0.1:8765"), ("Origin", "http://127.0.0.1:8765")]
+                [
+                    ("Host", "127.0.0.1:8765"),
+                    ("Origin", "http://127.0.0.1:8765"),
+                    ("Cookie", cookie_header(app)),
+                ]
             ),
             body=json.dumps({"action": "refresh", "provider_id": provider_id}).encode("utf-8"),
             client_address=("127.0.0.1", 40000),
@@ -273,7 +278,9 @@ class AdapterContractTests(unittest.TestCase):
                 method="GET",
                 path="/owner/api/state",
                 raw_query="",
-                headers=Headers([("Host", "127.0.0.1:8765")]),
+                headers=Headers(
+                    [("Host", "127.0.0.1:8765"), ("Cookie", cookie_header(app))]
+                ),
                 body=b"",
                 client_address=("127.0.0.1", 40000),
                 server_port=8765,

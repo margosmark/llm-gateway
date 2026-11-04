@@ -84,6 +84,7 @@ def profile_allows(profile: Profile, alias_name: str) -> bool:
 
 def access_mode_description(mode: str) -> str:
     return (
-        "Trusted LAN admin mode. API calls are anonymous, and any device that can reach this address can "
-        "configure and use this gateway. Profiles and caller tokens do not restrict LAN access."
+        "Owner sign-in protects this console and every configuration API. The model API stays keyless "
+        "by default: until an optional client API key is set, any device that can reach this address "
+        "can invoke it. Profiles and caller tokens do not restrict LAN access."
     )

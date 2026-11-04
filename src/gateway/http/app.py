@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import re
 import secrets
 import time
@@ -40,6 +41,12 @@ from gateway.costs import (
 )
 from gateway.ledger_persistence import ROLLUP_SCHEMA
 from gateway.leaderboard import build_leaderboard
+from gateway.owner_auth import (
+    COOKIE_NAME,
+    SESSION_TTL_SECONDS,
+    OwnerAuthError,
+    OwnerAuthStore,
+)
 from gateway.statistics import aggregate_statistics
 from gateway.provider_health import provider_health
 from gateway.stores import atomic_write_json
@@ -360,6 +367,8 @@ class GatewayApp:
         base_url: str = "",
         mounts: tuple[str, ...] = ("/owner",),
         logger: RequestLogger | None = None,
+        owner_auth: OwnerAuthStore | None = None,
+        cookie_secure: bool | None = None,
     ) -> None:
         self.config = config
         self.discovery = DiscoveryStore(config.path.parent / "capability_discovery.json")
@@ -376,6 +385,27 @@ class GatewayApp:
 
         self.profile_auth = profile_auth
         self.policy = policy
+        #: Owner authentication: the account, its sessions and the
+        #: optional model client key. Built from the data directory when a
+        #: caller does not inject one, so every construction path (CLI,
+        #: fixtures) gets the same boundary.
+        self.owner_auth = owner_auth if owner_auth is not None else OwnerAuthStore(config.path.parent)
+        #: The one-time setup code, generated here so it exists before the
+        #: first request. Only ``None`` when an account already exists or
+        #: the code was already issued; the plaintext is printed once at
+        #: startup (server-side) and kept in an owner-only host file.
+        self.setup_code_created = self.owner_auth.ensure_setup_code()
+        #: ``Secure`` on the session cookie when the deployment is served
+        #: over TLS. The gateway itself speaks plain HTTP on the private
+        #: LAN, so the attribute is derived from an explicitly https
+        #: canonical origin or ``GATEWAY_COOKIE_SECURE=1`` - never guessed
+        #: from a request header a client controls.
+        self.cookie_secure = (
+            bool(cookie_secure)
+            if cookie_secure is not None
+            else any(origin.lower().startswith("https://") for origin in policy.canonical_origins)
+            or os.environ.get("GATEWAY_COOKIE_SECURE", "") == "1"
+        )
         self.ledger = ledger
         self.limits = limits or LimitStore()
         self._release_identity = release_identity
@@ -453,6 +483,39 @@ class GatewayApp:
             r.add(["POST"], prefix + "/api/profile", self.handle_profile_action)
             r.add(["POST"], prefix + "/api/settings", self.handle_settings_action)
 
+            # Owner authentication. The first three are reachable without a
+            # session because they are how a session is obtained (first-run
+            # setup, sign-in, and the pre-auth probe the console uses to
+            # decide which of those two to render); everything else on this
+            # mount requires a valid session.
+            r.add(["GET"], prefix + "/api/auth/session", self.handle_auth_session)
+            r.add(["POST"], prefix + "/api/auth/setup", self.handle_auth_setup)
+            r.add(["POST"], prefix + "/api/auth/login", self.handle_auth_login)
+            r.add(["POST"], prefix + "/api/auth/logout", self.handle_auth_logout)
+            r.add(["POST"], prefix + "/api/auth/password", self.handle_auth_password)
+            r.add(["POST"], prefix + "/api/auth/client-key", self.handle_auth_client_key)
+
+        #: Owner paths that stay reachable without a session: the console
+        #: shell and its assets (the login view is rendered by them) plus
+        #: the three authentication endpoints above. Everything else under
+        #: a mount is owner surface and is gated.
+        self._public_owner_paths: frozenset[str] = frozenset(
+            {
+                path
+                for prefix in self.mounts
+                for path in (
+                    prefix,
+                    prefix + "/",
+                    prefix + "/index.html",
+                    prefix + "/app.js",
+                    prefix + "/style.css",
+                    prefix + "/api/auth/session",
+                    prefix + "/api/auth/setup",
+                    prefix + "/api/auth/login",
+                )
+            }
+        )
+
     def handle(self, request: Request) -> Any:
         """Entry point. Applies the security policy, then dispatches."""
         try:
@@ -481,6 +544,18 @@ class GatewayApp:
         request.params = params
         request.context["surface"] = SURFACE_OWNER
 
+        # Access control runs after routing and before any handler: a
+        # refused request never reaches the code it would have exercised,
+        # so a streaming endpoint cannot emit a frame before it is
+        # authenticated and a mutation cannot half-apply.
+        try:
+            denied = self._authorize(request)
+        except OwnerAuthError as exc:  # pragma: no cover - defensive
+            denied = self._owner_auth_error(exc)
+        if denied is not None:
+            self._log_request(request, denied, started)
+            return denied
+
         # CSRF applies to the cookie-authenticated browser surfaces only.
         # The API authenticates with bearer tokens, which a browser never
         # sends ambiently, so it is not CSRF-relevant there.
@@ -488,6 +563,10 @@ class GatewayApp:
             result = route.handler(request)
         except SecurityError as exc:
             result = exc.to_response()
+            self._log_request(request, result, started)
+            return result
+        except OwnerAuthError as exc:
+            result = self._owner_auth_error(exc)
             self._log_request(request, result, started)
             return result
         except RoutingError as exc:
@@ -561,15 +640,266 @@ class GatewayApp:
 
 
     def _can_mutate(self, request: Request) -> bool:
-        """Whether this request may change configuration."""
-        return True
+        """Whether this request may change configuration.
+
+        Owner mutations require a signed-in owner session; the reachability
+        that used to stand in for this is gone with the old boundary.
+        """
+        return bool(request.context.get("owner_authenticated"))
 
     def _can_enroll_credentials(self, request: Request) -> bool:
-        """Every reachable trusted-LAN peer is an administrator."""
-        return True
+        """Enrolling a provider credential is an owner action, so it needs
+        the same signed-in session as any other mutation."""
+        return bool(request.context.get("owner_authenticated"))
 
     def _require_mutation(self, request: Request) -> Any:
+        if not self._can_mutate(request):
+            return json_response(
+                {"error": {"message": "owner sign-in required", "type": "authentication_required"}},
+                401,
+                [("Cache-Control", "no-store")],
+            )
         return None
+
+    # --- access control -------------------------------------------------
+
+    def _session_token(self, request: Request) -> str | None:
+        """Read the owner session cookie. Nothing else authenticates an owner."""
+        raw = request.headers.get("cookie")
+        if not raw:
+            return None
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE_NAME:
+                return value or None
+        return None
+
+    def _session_cookie(self, token: str, max_age: int) -> str:
+        attributes = [
+            f"{COOKIE_NAME}={token}",
+            "Path=/",
+            f"Max-Age={max_age}",
+            "HttpOnly",
+            "SameSite=Strict",
+        ]
+        if self.cookie_secure:
+            # TLS-aware: only a deployment served over https (an https
+            # canonical origin, or GATEWAY_COOKIE_SECURE=1 in front of a
+            # TLS terminator) marks the cookie Secure, because a browser
+            # would otherwise drop it on the plain-HTTP LAN listener.
+            attributes.append("Secure")
+        return "; ".join(attributes)
+
+    def _owner_auth_error(self, exc: OwnerAuthError) -> Response:
+        headers: list[tuple[str, str]] = [("Cache-Control", "no-store")]
+        if exc.retry_after is not None:
+            headers.append(("Retry-After", str(int(math.ceil(exc.retry_after)))))
+        return json_response(exc.payload(), exc.status, headers)
+
+    def _authorize(self, request: Request) -> Response | None:
+        """The two access boundaries, kept apart on purpose.
+
+        ``/v1/...`` is the **model client** boundary: bearer key only when
+        the owner has configured one (off by default). Anything under a
+        console mount is the **owner** boundary: session cookie, always.
+        """
+        path = request.path
+        if path == "/v1" or path.startswith("/v1/"):
+            return self._require_client_key(request)
+        for prefix in self.mounts:
+            if path == prefix or path.startswith(prefix + "/"):
+                if path in self._public_owner_paths:
+                    return None
+                return self._require_owner_session(request)
+        return None
+
+    def _require_owner_session(self, request: Request) -> Response | None:
+        token = self._session_token(request)
+        info = self.owner_auth.session_info(token)
+        if info is None:
+            return json_response(
+                {
+                    "error": {
+                        "message": "owner sign-in required",
+                        "type": "authentication_required",
+                        "setup_required": self.owner_auth.setup_required,
+                    }
+                },
+                401,
+                [("Cache-Control", "no-store")],
+            )
+        request.context["owner_authenticated"] = True
+        request.context["owner_username"] = info["username"]
+        request.context["owner_session"] = token
+        request.context["owner_expires_at"] = info["expires_at"]
+        return None
+
+    def _require_client_key(self, request: Request) -> Response | None:
+        """Bearer check for the model-facing inventory.
+
+        Refusal happens before the handler, so every endpoint - including
+        the streaming ones - answers with the same JSON error and never
+        opens a stream, emits a frame, or calls a provider.
+        """
+        if not self.owner_auth.client_key_enabled:
+            return None
+        if self.owner_auth.check_client_key(request.headers.get("authorization")):
+            return None
+        return json_response(
+            {
+                "error": {
+                    "message": (
+                        "a client API key is configured for this gateway; "
+                        "send Authorization: Bearer <key> on model requests"
+                    ),
+                    "type": "invalid_api_key",
+                }
+            },
+            401,
+            [
+                ("WWW-Authenticate", 'Bearer realm="personal-llm-gateway", error="invalid_token"'),
+                ("Cache-Control", "no-store"),
+            ],
+        )
+
+    # --- owner authentication endpoints ---------------------------------
+
+    def handle_auth_session(self, request: Request) -> Response:
+        """Pre-auth probe: is there a session, and is first-run setup due?
+
+        Deliberately carries nothing but those facts before sign-in; the
+        client-key state and the username only appear with a session.
+        """
+        token = self._session_token(request)
+        info = self.owner_auth.session_info(token)
+        payload: dict[str, Any] = {
+            "authenticated": info is not None,
+            "setup_required": self.owner_auth.setup_required,
+            "username": None,
+        }
+        if info is not None:
+            payload["username"] = info.get("username")
+            payload["expires_at"] = info.get("expires_at")
+            payload["client_key"] = self.owner_auth.client_key_status()
+        return json_response(payload, 200, [("Cache-Control", "no-store")])
+
+    def handle_auth_setup(self, request: Request) -> Response:
+        """First-run account creation, gated by the one-time setup code."""
+        try:
+            payload = request.json() or {}
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        token = self.owner_auth.complete_setup(
+            payload.get("username"),
+            payload.get("password"),
+            payload.get("setup_code"),
+            client=request.client_address[0] if request.client_address else "",
+        )
+        return json_response(
+            {"ok": True, "username": payload.get("username"), "setup_required": False},
+            200,
+            [
+                ("Set-Cookie", self._session_cookie(token, SESSION_TTL_SECONDS)),
+                ("Cache-Control", "no-store"),
+            ],
+        )
+
+    def handle_auth_login(self, request: Request) -> Response:
+        try:
+            payload = request.json() or {}
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        token = self.owner_auth.login(
+            payload.get("username"),
+            payload.get("password"),
+            client=request.client_address[0] if request.client_address else "",
+        )
+        return json_response(
+            {"ok": True, "username": payload.get("username")},
+            200,
+            [
+                ("Set-Cookie", self._session_cookie(token, SESSION_TTL_SECONDS)),
+                ("Cache-Control", "no-store"),
+            ],
+        )
+
+    def handle_auth_logout(self, request: Request) -> Response:
+        token = self._session_token(request)
+        self.owner_auth.revoke_session(token)
+        # Max-Age=0 makes the browser drop the cookie immediately; the
+        # server-side revocation is what actually ends the session.
+        return json_response(
+            {"ok": True},
+            200,
+            [
+                ("Set-Cookie", self._session_cookie("", 0)),
+                ("Cache-Control", "no-store"),
+            ],
+        )
+
+    def handle_auth_password(self, request: Request) -> Response:
+        try:
+            payload = request.json() or {}
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        result = self.owner_auth.change_password(
+            request.context.get("owner_session"),
+            payload.get("current_password"),
+            payload.get("new_password"),
+        )
+        return json_response({"ok": True, **result}, 200, [("Cache-Control", "no-store")])
+
+    def handle_auth_client_key(self, request: Request) -> Response:
+        """Set, rotate or clear the optional model client key.
+
+        The response never contains the key - only a random display id and
+        the transition - and it states the client-visible impact in words,
+        because a key change silently breaking agents is exactly the
+        failure this endpoint exists to make loud.
+        """
+        try:
+            payload = request.json() or {}
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        action = str(payload.get("action") or "")
+        if action == "set":
+            status = self.owner_auth.set_client_key(payload.get("key"))
+            impact = (
+                "Model API access now requires Authorization: Bearer <key> on every /v1 request. "
+                "Clients without the header are refused until you update them; the gateway does "
+                "not modify any client configuration for you."
+            )
+        elif action == "rotate":
+            status = self.owner_auth.rotate_client_key(payload.get("key"))
+            grace = status.get("previous_key_valid_for_seconds")
+            impact = (
+                "The new key is required immediately; the previous key keeps working for "
+                f"{grace} more seconds so clients can be updated without downtime. The gateway "
+                "does not modify any client configuration for you."
+            )
+        elif action == "clear":
+            status = self.owner_auth.clear_client_key()
+            impact = (
+                "Model API access is keyless again: every client works without an "
+                "Authorization header, exactly as before a key was set."
+            )
+        else:
+            return json_response(
+                {"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400
+            )
+        return json_response(
+            {"ok": True, "action": action, "client_key": status, "impact": impact},
+            200,
+            [("Cache-Control", "no-store")],
+        )
 
     # --- metadata --------------------------------------------------------
 
@@ -953,12 +1283,13 @@ class GatewayApp:
         return Response(200, [("Content-Type", content_type), ("Content-Disposition", f'attachment; filename="{filename}"'), ("Cache-Control", "no-store")], body)
 
     def handle_public_status(self, request: Request) -> Response:
-        """Safe, unauthenticated status.
+        """Safe status: no secrets, no disclosure class.
 
-        This is the only console data reachable without a session. It
-        deliberately excludes profile records, the configuration revision,
-        routing detail, the request ledger and the credential store state,
-        because the live deployment's disclosure class was exactly that.
+        It is served behind the owner session like every other ``/owner``
+        endpoint (the pre-auth console only needs
+        ``/owner/api/auth/session``), and it still deliberately excludes
+        profile records, routing detail, the request ledger and the
+        credential store state.
         """
         config = self.config.snapshot()
         providers = [
@@ -1160,7 +1491,11 @@ class GatewayApp:
                 "surface": self._surface(request),
                 "can_mutate": may_mutate,
                 "can_enroll_credentials": self._can_enroll_credentials(request),
-                "authenticated": False,
+                "authenticated": bool(request.context.get("owner_authenticated")),
+                # The signed-in owner and the client-key state (presence and
+                # transition only - never a hash, never the value).
+                "owner": {"username": request.context.get("owner_username")},
+                "access": {"client_key": self.owner_auth.client_key_status()},
                 "providers": providers,
                 "aliases": aliases,
                 "profiles": profiles,

@@ -22,9 +22,10 @@ The runner never executes a returned tool call, never writes configuration,
 and never retries. It hands back sanitized evidence; persistence of that
 evidence lives in :mod:`gateway.capability_discovery`.
 
-Trusted-LAN boundary: "owner" below means an explicit action from the
-trusted console. There is no individual owner login in this product, and
-nothing here claims one — see ``docs/TRUSTED_LAN_ADMIN_MODE.md``.
+Owner boundary: "owner" below means an explicit action from the
+signed-in owner console. Owner sign-in gates the console; it does not
+gate the model API, which stays keyless until a client key is set — see
+``docs/TRUSTED_LAN_ADMIN_MODE.md``.
 """
 
 from __future__ import annotations

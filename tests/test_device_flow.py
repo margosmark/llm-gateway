@@ -39,6 +39,7 @@ from gateway.logging import RequestLogger
 from gateway.http.core import Headers, Request
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
 from gateway.observability import LimitStore, RequestLedger
+from tests.owner_session import cookie_header
 
 
 class FakeUpstream:
@@ -107,6 +108,7 @@ class DeviceFlowHarness:
             mounts=("/owner",),
             logger=RequestLogger(enabled=False),
         )
+        self.owner_cookie = cookie_header(self.app)
 
     def call(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         request = Request(
@@ -117,6 +119,7 @@ class DeviceFlowHarness:
                 [
                     ("Host", "127.0.0.1:8765"),
                     ("Origin", "http://127.0.0.1:8765"),
+                    ("Cookie", self.owner_cookie),
                 ]
             ),
             body=json.dumps(body).encode("utf-8") if body is not None else b"",

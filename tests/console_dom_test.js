@@ -496,8 +496,8 @@ check("capability evidence and proposal text render through text nodes, not HTML
   assert(panel.includes("Routing impact unknown; no automatic policy change"));
 });
 
-check("trusted-LAN boundary and non-guarantee are explicit in discovery UI", function () {
-  assert(source.includes("Any device that can reach this trusted-LAN console is an administrator; there is no individual owner login."));
+check("owner sign-in and the non-guarantee are explicit in discovery UI", function () {
+  assert(source.includes("Every signed-in owner can run these probes"));
   assert(source.includes("Probe results are evidence, not guarantees."));
   assert(source.includes("Unknown is not false."));
 });
@@ -510,10 +510,32 @@ check("empty states and model table remain mobile-contained", function () {
   assert(source.includes('class: "table-wrap"'));
 });
 
-check("the direct console does not bootstrap a session or CSRF cookie", function () {
-  assert(source.includes("Trusted LAN admin mode — any device that can reach this address can configure and use this gateway."));
+check("the console authenticates before it renders the shell", function () {
+  // Bootstrap asks the server whether a session exists and renders
+  // first-run setup or sign-in from that answer, never from a guess.
+  assert(source.includes('api(BASE + "/api/auth/session")'));
+  assert(source.includes("function renderAuthView"));
+  assert(source.includes("function submitAuthView"));
+  assert(source.includes("Owner sign-in"));
+  assert(source.includes("Set up the owner account"));
+  // SameSite=Strict is what replaces a CSRF token here: the cookie is
+  // never sent cross-site, so no anti-CSRF cookie is needed.
   assert(!source.includes("gw_csrf"));
-  assert(!source.includes("/api/session"));
+  assert(!source.includes('"/api/session"'));
+});
+
+check("the access card keeps owner auth and the client key apart", function () {
+  const access = source.slice(source.indexOf("function renderAccess"), source.indexOf("function buildAuthView"));
+  assert(access.includes("Owner account"));
+  assert(access.includes("Model client API key"));
+  assert(access.includes("Change password"));
+  assert(access.includes("Enable client key"));
+  assert(access.includes("Rotate key"));
+  assert(access.includes("Disable and restore keyless access"));
+  assert(access.includes("no client changes silently"));
+  // The console never echoes a key back or reads one from a URL.
+  assert(!access.includes("location.search"));
+  assert(!access.includes("gw_csrf"));
 });
 
 check("editing an alias reuses its existing route configuration", function () {

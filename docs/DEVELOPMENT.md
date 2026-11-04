@@ -106,7 +106,9 @@ The release gate is necessary but not enough: it runs a disposable container.
 Before a deployment can be approved, separately prove the Compose deployment
 with its **actual named state volume** can start as UID/GID `10001`, write
 `config.json` and credentials, expose only the intended explicit private
-listener, and serve `/owner/` directly with no login. Then verify externally:
+listener, and serve `/owner/` (the console requires an owner session;
+`/health`, `/version` and `/v1/models` stay anonymous and keyless by
+default). Then verify externally:
 
 ```sh
 curl -sS http://<private-ip>:<port>/health

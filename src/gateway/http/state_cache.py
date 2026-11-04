@@ -180,6 +180,10 @@ class StateCache:
             }],
             ["limits", app.limits.all()],
             ["request", [request.raw_query, app._surface(request), app._can_mutate(request), app._can_enroll_credentials(request)]],
+            # Owner-auth mutations (a client key set/rotated/cleared, a
+            # password change, a session issued or revoked) change what the
+            # snapshot reports, so the store's revision is part of the key.
+            ["access", [app.owner_auth.revision]],
             # The release identity's *result*, not the callable: the
             # callable object str()s to a per-process constant, while
             # release_identity() re-reads release.json on every call, so a

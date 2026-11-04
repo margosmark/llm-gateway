@@ -217,6 +217,42 @@
 
   // --- shell ------------------------------------------------------------
 
+  function ownerName() {
+    return (state && state.owner && state.owner.username) || "owner";
+  }
+
+  // The client-key state the server reports: presence and transition only,
+  // never a hash and never the value (the value is not stored in a form the
+  // server could give back).
+  function clientKeyState() {
+    return (state && state.access && state.access.client_key) || {};
+  }
+
+  // The two boundaries, stated plainly and separately: the console needs an
+  // owner sign-in; the model API is keyless unless a client key is set.
+  function accessNotice() {
+    var key = clientKeyState();
+    if (key.enabled) {
+      return "Owner sign-in protects this console (signed in as " + ownerName() + "). " +
+        "The model API requires the client API key" + (key.display_id ? " (id " + key.display_id + ")" : "") +
+        ", sent as an Authorization: Bearer header.";
+    }
+    return "Owner sign-in protects this console (signed in as " + ownerName() + "). " +
+      "The model API is keyless by default — any device on the LAN can call /v1 until you set " +
+      "a client API key in Settings → Access.";
+  }
+
+  function signOut() {
+    api(BASE + "/api/auth/logout", { method: "POST", body: {} })
+      .then(function () {
+        state = null;
+        renderAuthView({ authenticated: false });
+      })
+      .catch(function (error) {
+        toast(error.message || "sign-out failed", "bad");
+      });
+  }
+
   var TABS = [
     { id: "status", label: "Operate now" },
     { id: "providers", label: "Providers" },
@@ -244,11 +280,12 @@
     header.appendChild(nav);
     header.appendChild(el("span", { class: "spacer" }));
     if (state) {
-      header.appendChild(el("span", { class: "pill warn", text: "trusted LAN admin mode" }));
+      header.appendChild(el("span", { class: "pill warn", text: "signed in as " + ownerName() }));
       header.appendChild(el("span", { class: "small muted", text: "rev " + state.revision }));
+      header.appendChild(el("button", { type: "button", text: "Sign out", onclick: signOut }));
     }
     app.appendChild(header);
-    app.appendChild(el("aside", { class: "card", role: "note", text: "Trusted LAN admin mode — any device that can reach this address can configure and use this gateway." }));
+    app.appendChild(el("aside", { class: "card", role: "note", text: accessNotice() }));
     (state && state.fallback_policy_warnings || []).forEach(function (warning) {
       app.appendChild(el("aside", { class: "card warn", role: "alert", text: "Policy gap: " + warning }));
     });
@@ -1858,7 +1895,7 @@
   function renderCapabilityPanel(provider, model, panel) {
     var target = { provider_id: provider.provider_id, model_id: model.model_id };
     var readUrl = BASE + "/api/capabilities?provider_id=" + encodeURIComponent(target.provider_id) + "&model_id=" + encodeURIComponent(target.model_id);
-    panel.appendChild(el("p", { class: "small muted", text: "Optional synthetic capability discovery. No probes run on page load or catalogue refresh. Any device that can reach this trusted-LAN console is an administrator; there is no individual owner login." }));
+    panel.appendChild(el("p", { class: "small muted", text: "Optional synthetic capability discovery. No probes run on page load or catalogue refresh. Every signed-in owner can run these probes; their results are evidence about providers, not guarantees." }));
     panel.appendChild(el("p", { class: "small muted", text: "Probe results are evidence, not guarantees. Unknown price or unsupported probe protocol blocks execution; estimates are not a bill ceiling. Fixed suite mvp-1: exact bounded synthetic text marker; locally generated inline shape-count image; harmless forced function schema whose returned call is never executed." }));
     // Probe-registry coverage, rendered from the evidence read so the owner
     // sees the opt-in allowlist before clicking anything: a refusal on an
@@ -2747,7 +2784,7 @@
     ]));
 
     frag.appendChild(el("div", { class: "notice warn" }, [
-      el("strong", { text: "Profiles do not provide access control in trusted LAN admin mode. " }),
+      el("strong", { text: "Profiles do not provide access control. " }),
       el("span", { text: "All reachable LAN peers share the same published routes; caller tokens are retained only as configuration/future attribution data." })
     ]));
 
@@ -2888,12 +2925,7 @@
     var frag = document.createDocumentFragment();
 
     var release = state.release || {};
-    frag.appendChild(el("section", {}, [
-      el("div", { class: "card" }, [
-        el("h2", { text: "Trusted LAN access" }),
-        el("p", { class: "small", text: "Any device that can reach this address can configure and use the gateway. This product mode has no password, login, or per-client authorization." })
-      ])
-    ]));
+    frag.appendChild(renderAccess());
 
     frag.appendChild(el("section", {}, [
       el("div", { class: "card" }, [
@@ -2937,11 +2969,269 @@
     return frag;
   }
 
+  // --- access: owner account and client API key -------------------------
+
+  function inputValue(id) {
+    var node = global.document.getElementById(id);
+    return node ? String(node.value || "") : "";
+  }
+
+  function clearInputs(ids) {
+    ids.forEach(function (id) {
+      var node = global.document.getElementById(id);
+      if (node) node.value = "";
+    });
+  }
+
+  function field(id, label, type) {
+    return el("label", {}, [
+      el("span", { text: label }),
+      el("input", { id: id, type: type, autocomplete: "off" })
+    ]);
+  }
+
+  // The key is generated in the browser and posted once: the server stores
+  // only a hash plus a random id, so it has no value it could ever echo
+  // back in a response, a log line, or this UI.
+  function generateClientKey() {
+    var bytes = new Uint8Array(32);
+    global.crypto.getRandomValues(bytes);
+    var value = Array.prototype.map.call(bytes, function (byte) {
+      return ("0" + byte.toString(16)).slice(-2);
+    }).join("");
+    var node = global.document.getElementById("client-key-value");
+    if (node) node.value = value;
+    return value;
+  }
+
+  function changePassword() {
+    var current = inputValue("password-current");
+    var next = inputValue("password-next");
+    var confirmation = inputValue("password-confirm");
+    if (!next || next !== confirmation) {
+      toast("new password and its confirmation must match", "bad");
+      return;
+    }
+    run(
+      api(BASE + "/api/auth/password", {
+        method: "POST",
+        body: { current_password: current, new_password: next }
+      }).then(function (result) {
+        clearInputs(["password-current", "password-next", "password-confirm"]);
+        refresh();
+        return result;
+      }),
+      "Password changed — every other session was signed out"
+    );
+  }
+
+  function enableClientKey() {
+    var value = inputValue("client-key-value");
+    if (value.length < 32) {
+      toast("client key must be at least 32 characters — use Generate", "bad");
+      return;
+    }
+    var confirmed = global.confirm(
+      "Enable the client API key?\n\nFrom now on every model client must send an Authorization: Bearer header, " +
+      "and clients without it are refused. This console never edits an agent or client configuration for you — " +
+      "update each one yourself."
+    );
+    if (!confirmed) return;
+    api(BASE + "/api/auth/client-key", { method: "POST", body: { action: "set", key: value } })
+      .then(function (result) {
+        clearInputs(["client-key-value"]);
+        refresh();
+        toast(result.impact || "Client API key enabled", "ok");
+      })
+      .catch(function (error) { toast(error.message || "could not enable the key", "bad"); });
+  }
+
+  function rotateClientKey() {
+    var value = inputValue("client-key-value");
+    if (value.length < 32) {
+      toast("client key must be at least 32 characters — use Generate", "bad");
+      return;
+    }
+    var confirmed = global.confirm(
+      "Rotate the client API key?\n\nThe new key is required immediately. The previous key keeps working for " +
+      (CLIENT_KEY_GRACE_LABEL) +
+      " so you can update clients without downtime. This console never edits an agent or client configuration for you."
+    );
+    if (!confirmed) return;
+    api(BASE + "/api/auth/client-key", { method: "POST", body: { action: "rotate", key: value } })
+      .then(function (result) {
+        clearInputs(["client-key-value"]);
+        refresh();
+        toast(result.impact || "Client API key rotated", "ok");
+      })
+      .catch(function (error) { toast(error.message || "could not rotate the key", "bad"); });
+  }
+
+  function clearClientKey() {
+    var confirmed = global.confirm(
+      "Disable the client API key?\n\nThe model API becomes keyless again: any device that can reach this " +
+      "address can call it without a header, exactly as before a key was set."
+    );
+    if (!confirmed) return;
+    api(BASE + "/api/auth/client-key", { method: "POST", body: { action: "clear" } })
+      .then(function (result) {
+        refresh();
+        toast(result.impact || "Client API key cleared — keyless access restored", "ok");
+      })
+      .catch(function (error) { toast(error.message || "could not clear the key", "bad"); });
+  }
+
+  function renderAccess() {
+    var key = clientKeyState();
+    var accountRows = [
+      el("dt", { text: "Signed in as" }), el("dd", { text: ownerName() }),
+      el("dt", { text: "Console boundary" }),
+      el("dd", { text: "owner username and password, server-side session in an HttpOnly, SameSite=Strict cookie (Secure when served over HTTPS)" }),
+      el("dt", { text: "Password recovery" }),
+      el("dd", { text: "run python -m gateway --reset-owner-password on the gateway host; it reads the new password from stdin and revokes every session" })
+    ];
+    var keyRows = key.enabled
+      ? [
+          el("dt", { text: "Status" }), el("dd", { text: "enabled — every /v1 request must carry the key" }),
+          el("dt", { text: "Key id" }), el("dd", { text: key.display_id || "unknown" }),
+          el("dt", { text: "Set" }), el("dd", { text: when(key.created_at) }),
+          el("dt", { text: "Rotated" }), el("dd", { text: key.rotated_at ? when(key.rotated_at) : "never" }),
+          el("dt", { text: "Previous key" }),
+          el("dd", { text: key.previous_key_valid_for_seconds
+            ? "still accepted for " + key.previous_key_valid_for_seconds + " more seconds"
+            : "no grace window open" })
+        ]
+      : [
+          el("dt", { text: "Status" }),
+          el("dd", { text: "disabled — keyless: every client works without an Authorization header" })
+        ];
+    var actions = key.enabled
+      ? [
+          field("client-key-value", "New key value (or press Generate)", "text"),
+          el("div", { class: "row" }, [
+            el("button", { type: "button", text: "Generate", onclick: function () { generateClientKey(); } }),
+            el("button", { type: "button", text: "Rotate key", onclick: rotateClientKey })
+          ]),
+          el("button", { type: "button", class: "danger", text: "Disable and restore keyless access", onclick: clearClientKey })
+        ]
+      : [
+          field("client-key-value", "Key value (32+ characters)", "text"),
+          el("div", { class: "row" }, [
+            el("button", { type: "button", text: "Generate", onclick: function () { generateClientKey(); } }),
+            el("button", { type: "button", class: "primary", text: "Enable client key", onclick: enableClientKey })
+          ])
+        ];
+    return el("section", {}, [
+      el("div", { class: "card" }, [
+        el("h2", { text: "Access" }),
+        el("h3", { text: "Owner account" }),
+        el("dl", { class: "kv" }, accountRows),
+        el("div", { class: "row" }, [
+          field("password-current", "Current password", "password"),
+          field("password-next", "New password", "password"),
+          field("password-confirm", "Repeat new password", "password")
+        ]),
+        el("button", { type: "button", text: "Change password", onclick: changePassword }),
+        el("h3", { text: "Model client API key" }),
+        el("p", { class: "small muted", text: "Owner sign-in and this key are separate boundaries: the key only gates the model API, never this console." }),
+        el("dl", { class: "kv" }, keyRows),
+        el("div", {}, actions),
+        el("p", { class: "small muted", text: "Changing or clearing the key never edits an agent or client configuration — no client changes silently." })
+      ])
+    ]);
+  }
+
+  // --- sign-in and first-run setup --------------------------------------
+
+  var authSession = {};
+
+  // How long a rotated-out client key keeps working. Kept in step with
+  // gateway.owner_auth.CLIENT_KEY_GRACE_SECONDS (600s); the server sends
+  // the exact remaining window in every rotation response.
+  var CLIENT_KEY_GRACE_LABEL = "10 minutes";
+
+  function buildAuthView(session) {
+    session = session || {};
+    var setupRequired = !!session.setup_required;
+    var children = [];
+    children.push(el("aside", { class: "card", role: "note", text: setupRequired
+      ? "First-run setup: the one-time setup code is printed by the gateway at startup and kept in the owner_setup_code file on the gateway host. It is single-use and never shown in this console."
+      : "Owner sign-in for the console. The model API is a separate boundary: keyless by default, with an optional client API key you can set after signing in." }));
+    if (session.error) {
+      children.push(el("p", { class: "small bad", text: String(session.error) }));
+    }
+    var fields = [];
+    if (setupRequired) fields.push(field("setup-code", "One-time setup code", "text"));
+    fields.push(field("auth-username", "Username", "text"));
+    fields.push(field("auth-password", "Password", "password"));
+    if (setupRequired) fields.push(field("auth-password2", "Repeat password", "password"));
+    children.push(el("div", { class: "row" }, fields));
+    children.push(el("button", {
+      type: "button",
+      class: "primary",
+      text: setupRequired ? "Create owner account" : "Sign in",
+      onclick: submitAuthView
+    }));
+    var card = [el("h2", { text: setupRequired ? "Set up the owner account" : "Owner sign-in" })].concat(children);
+    return el("main", {}, [el("div", { class: "card" }, card)]);
+  }
+
+  function renderAuthView(session) {
+    authSession = session || {};
+    if (!app) return;
+    app.innerHTML = "";
+    app.appendChild(buildAuthView(authSession));
+  }
+
+  function submitAuthView() {
+    if (busy) return;
+    var setupRequired = !!authSession.setup_required;
+    var username = inputValue("auth-username");
+    var password = inputValue("auth-password");
+    var path;
+    var body;
+    if (setupRequired) {
+      if (password !== inputValue("auth-password2")) {
+        toast("passwords do not match", "bad");
+        return;
+      }
+      path = BASE + "/api/auth/setup";
+      body = { username: username, password: password, setup_code: inputValue("setup-code") };
+    } else {
+      path = BASE + "/api/auth/login";
+      body = { username: username, password: password };
+    }
+    busy = true;
+    api(path, { method: "POST", body: body })
+      .then(function () {
+        authSession = {};
+        return refresh();
+      })
+      .catch(function (error) {
+        // Show the server's own reason: throttled, wrong setup code, wrong
+        // password - never a client-side guess.
+        var payload = error.payload || {};
+        var detail = (payload.error && payload.error.message) || error.message || "sign-in failed";
+        renderAuthView({ setup_required: setupRequired, error: detail });
+      })
+      .finally(function () { busy = false; });
+  }
+
   // --- bootstrap --------------------------------------------------------
 
   function bootstrap() {
     app = document.getElementById("app");
-    refresh();
+    // Authentication first: the console decides between first-run setup,
+    // sign-in and the normal shell from the server's own answer, never
+    // from a client-side guess about whether an account exists.
+    api(BASE + "/api/auth/session").then(function (session) {
+      if (session && session.authenticated) return refresh();
+      renderAuthView(session || {});
+      return null;
+    }).catch(function (error) {
+      renderAuthView({ error: error.message || "cannot reach the gateway" });
+      return null;
+    });
     // The console is often left open. Refetch whenever the tab is shown
     // again, so the health cards never sit on a snapshot the owner cannot
     // The refetch is skipped while a mutation is in flight. Otherwise it
@@ -3006,6 +3296,18 @@
       }
       return full;
     }).catch(function (error) {
+      var payload = error.payload || {};
+      var errorType = payload.error && payload.error.type;
+      if (errorType === "authentication_required") {
+        // The session ended (expired or revoked): drop back to sign-in
+        // instead of claiming the console API is unreachable.
+        state = null;
+        renderAuthView({
+          setup_required: !!(payload.error && payload.error.setup_required),
+          error: "Your owner session ended. Sign in again."
+        });
+        return null;
+      }
       refreshUnavailable = true;
       if (options.preserveDraft && state) {
         // Keep the draft and preview intact, but fail closed on health.
