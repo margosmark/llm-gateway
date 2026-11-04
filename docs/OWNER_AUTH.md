@@ -57,7 +57,13 @@ python -m gateway --reset-owner-password   # prompts on stdin, twice
 Requires filesystem access to the data directory. The password is read
 from **stdin, never argv** (argv is visible in the process list and in
 shell history). It rewrites the stored hash and revokes every session.
-The running gateway picks the change up without a restart: the store
+Handing the flag a password anyway (`--reset-owner-password <password>`)
+is refused with exit 2, and the refusal does not echo the value: argument
+errors replace every argv-supplied value with `<redacted>`, so a secret
+that lands on the command line by mistake stays out of the terminal and
+out of anything capturing stderr. Option names stay in the message, so a
+plain typo is still diagnosable. The running gateway picks
+the change up without a restart: the store
 re-reads the file when its fingerprint changes, so a stolen cookie dies
 at the moment of recovery rather than at the next reboot.
 

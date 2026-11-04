@@ -4,10 +4,13 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import os
+import re
 import signal
 import sys
 import threading
+from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import Any, NoReturn
 
 from gateway.adapters.anthropic import AnthropicAdapter
 from gateway.adapters.chatgpt_codex import ChatGPTCodexAdapter
@@ -36,6 +39,146 @@ from gateway.observability import LimitStore, RequestLedger
 DEFAULT_DATA_DIR = "/var/lib/gateway"
 DEFAULT_PORT = 8765
 RETIRED_SETUP_PORT = 8766
+RESET_OWNER_PASSWORD_FLAG = "--reset-owner-password"
+REDACTED_ARGV_VALUE = "<redacted>"
+_UNRECOGNIZED_PREFIX = "unrecognized arguments: "
+
+
+def _reset_flag_in_play(argv: Sequence[str]) -> bool:
+    """True when the recovery flag is on the command line being parsed."""
+    return any(
+        token == RESET_OWNER_PASSWORD_FLAG
+        or token.startswith(RESET_OWNER_PASSWORD_FLAG + "=")
+        for token in argv
+    )
+
+
+def _hide_argv_value(message: str, value: str) -> str:
+    """Remove one argv-supplied value wherever it appears in ``message``.
+
+    The match is anchored to whole occurrences, so a value can never rewrite
+    part of a longer word (``abc`` leaves ``abcdef`` alone). A value that
+    happens to be a word argparse itself uses is still removed - losing a
+    word is the safe direction when the alternative is echoing a password.
+    The ``%r`` spelling is removed too: argparse quotes values, so a newline
+    arrives as the two characters ``\\n`` and the raw token alone misses it.
+    """
+    if not value:
+        return message
+    for spelling in (value, repr(value)[1:-1]):
+        if not spelling:
+            continue
+        pattern = r"(?<![A-Za-z0-9_])" + re.escape(spelling) + r"(?![A-Za-z0-9_])"
+        message = re.sub(pattern, REDACTED_ARGV_VALUE, message)
+    return message
+
+
+def _bare_value_needles(token: str) -> list[str]:
+    """The parts of one argv token argparse may interpolate as a value.
+
+    A token carrying ``=`` contributes only what followed the ``=`` - the
+    name stays, because that is how a typo is diagnosed. A ``--long`` token
+    contributes nothing: it is a name, not a value. Everything else (a bare
+    value, a single-dash token) is itself the value.
+    """
+    _head, sep, value = token.partition("=")
+    if sep:
+        return [value] if value else []
+    if token.startswith("--"):
+        return []
+    return [token]
+
+
+def _whole_token_needles(token: str) -> list[str]:
+    """Every spelling of one argv token that could carry a secret."""
+    needles = [token]
+    _head, sep, value = token.partition("=")
+    if sep and value:
+        needles.append(value)
+    return needles
+
+
+def _redact_argv_values(message: str, argv: Sequence[str], known_options: Iterable[str]) -> str:
+    """Strip argv-supplied values out of an argument-parsing error.
+
+    argv is visible in the process list and usually lands in shell history,
+    which is why ``--reset-owner-password`` takes the new password from
+    stdin. A refused parse must not defeat that: argparse otherwise writes
+    the very token it rejected straight back to stderr.
+
+    Two regimes. While the recovery flag is in play nothing else on the
+    line can be a legitimate value, so every token that is not a known
+    option is withheld wherever the message puts it. On an ordinary parse
+    only the shapes argparse itself interpolated are scrubbed - the tail of
+    ``unrecognized arguments: ...``, a ``%r``-quoted value, and the raw
+    token of an ambiguous abbreviation - so a refusal that deliberately
+    names a fixed value (``port 8766 is reserved``) keeps saying it. Option
+    *names* are never withheld: an operator who typo'd ``--hst`` still gets
+    told which flag was rejected.
+    """
+    known = set(known_options)
+    tokens = [token for token in argv if token and token not in known]
+
+    if _reset_flag_in_play(argv):
+        for token in tokens:
+            for needle in _whole_token_needles(token):
+                message = _hide_argv_value(message, needle)
+        return message
+
+    if message.startswith(_UNRECOGNIZED_PREFIX):
+        prefix, separator, tail = message.partition(_UNRECOGNIZED_PREFIX)
+        for token in tokens:
+            for needle in _bare_value_needles(token):
+                tail = _hide_argv_value(tail, needle)
+        message = prefix + separator + tail
+
+    for token in tokens:
+        for needle in _whole_token_needles(token):
+            quoted = repr(needle)
+            if quoted in message:
+                message = message.replace(quoted, f"'{REDACTED_ARGV_VALUE}'")
+        # An ambiguous abbreviation keeps the raw token with its attached
+        # value: ``--po=secret could match --port, --print-url``.
+        if "=" in token and token in message:
+            head, _sep, _value = token.partition("=")
+            message = message.replace(token, f"{head}={REDACTED_ARGV_VALUE}")
+    return message
+
+
+class _RedactingArgumentParser(argparse.ArgumentParser):
+    """An argument parser that never writes an argv value back out.
+
+    ``error()`` is the single funnel every refused parse goes through -
+    unknown flags, unexpected positionals, bad conversions - so redacting
+    there covers the whole parse-error surface rather than the one reported
+    invocation.
+    """
+
+    def parse_known_args(self, *args: Any, **kwargs: Any) -> Any:
+        # Capture the argv this parse is about, on the public entry point:
+        # error() must redact the tokens the caller actually supplied, which
+        # is not sys.argv when a test drives main([...]) with an explicit
+        # list. The base method carries an overload set, so this wrapper is
+        # typed loosely on purpose and forwards its arguments untouched.
+        argv = args[0] if args and args[0] is not None else kwargs.get("args")
+        self._active_argv = list(sys.argv[1:] if argv is None else argv)
+        return super().parse_known_args(*args, **kwargs)
+
+    def error(self, message: str) -> NoReturn:
+        argv = getattr(self, "_active_argv", None)
+        if argv is None:  # parser.error() called outside a parse
+            argv = list(sys.argv[1:])
+        safe = _redact_argv_values(message, argv, self._option_string_actions)
+        if _reset_flag_in_play(argv) and (
+            safe.startswith(_UNRECOGNIZED_PREFIX)
+            or RESET_OWNER_PASSWORD_FLAG in safe
+        ):
+            safe += (
+                f"; {RESET_OWNER_PASSWORD_FLAG} takes no value: "
+                "the new owner password is read from stdin"
+            )
+        super().error(safe)
+
 
 
 def _gateway_port(value: str) -> int:
@@ -132,7 +275,7 @@ def _cooldown_max_seconds(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="personal-llm-gateway", description="Trusted-LAN OpenAI-compatible LLM gateway.")
+    parser = _RedactingArgumentParser(prog="personal-llm-gateway", description="Trusted-LAN OpenAI-compatible LLM gateway.")
     parser.add_argument("--host", default=os.environ.get("GATEWAY_BIND", "127.0.0.1"), help="Explicit private address to bind; wildcard binds are refused.")
     parser.add_argument("--port", type=_gateway_port, default=os.environ.get("GATEWAY_PORT", str(DEFAULT_PORT)), help="Port for the gateway listener; 8766 is reserved.")
     parser.add_argument("--data-dir", default=os.environ.get("GATEWAY_DATA_DIR", DEFAULT_DATA_DIR), help="Directory holding configuration and credentials.")
@@ -239,6 +382,21 @@ def build_application(
     return app, config, credentials, router
 
 
+def _echo_bind_target(host: str) -> str:
+    """Name a refused bind target only when it is actually an address.
+
+    An address the operator typed is the useful part of that refusal, so a
+    syntactically valid IP is echoed as it always was. Anything else in the
+    slot was never a host - it is a misplaced argument, and possibly a
+    password - so it is withheld rather than printed back.
+    """
+    try:
+        ipaddress.ip_address(host.strip())
+    except ValueError:
+        return REDACTED_ARGV_VALUE
+    return host
+
+
 def _reset_owner_password(data_dir: Path) -> int:
     """Documented local recovery for a forgotten owner password.
 
@@ -285,10 +443,10 @@ def main(argv: list[str] | None = None) -> int:
         print("refusing to start: bind an explicit private LAN address; wildcard binds are refused.", file=sys.stderr)
         return 2
     if not _is_private_or_loopback(args.host):
-        print(f"refusing to start: '{args.host}' is not a private or loopback address.", file=sys.stderr)
+        print(f"refusing to start: '{_echo_bind_target(args.host)}' is not a private or loopback address.", file=sys.stderr)
         return 2
     if not _address_is_local(args.host):
-        print(f"refusing to start: '{args.host}' is not an address on this host. Set GATEWAY_BIND to an address this machine owns.", file=sys.stderr)
+        print(f"refusing to start: '{_echo_bind_target(args.host)}' is not an address on this host. Set GATEWAY_BIND to an address this machine owns.", file=sys.stderr)
         return 2
     if args.max_workers < 1 or args.rate_limit_requests < 1 or args.rate_limit_window_seconds <= 0:
         print("refusing to start: worker and rate-limit settings must be positive.", file=sys.stderr)

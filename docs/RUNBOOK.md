@@ -167,7 +167,10 @@ docker compose exec gateway python -m gateway --reset-owner-password
 ```
 
 The new password is read from **stdin, never argv** (argv is visible in the
-process list and in shell history). Every owner session is revoked, and the
+process list and in shell history). A password passed on the command line
+anyway is refused with exit 2 and is **not echoed back**: argument errors
+print `<redacted>` in place of any argv value, so the secret stays out of
+the terminal and of any captured stderr. Every owner session is revoked, and the
 running gateway picks the change up **without a restart** — the store
 re-reads the file when its fingerprint changes, so a stolen cookie stops
 working at the moment of recovery rather than at the next reboot. If no
