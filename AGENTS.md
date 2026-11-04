@@ -31,8 +31,9 @@ learned the hard way.
 
 A **single trusted-LAN appliance**. One explicit private LAN listener serves
 the owner console, the configuration API, the OpenAI-compatible API, and the
-release identity. There is no passphrase, no login, no session cookie and no
-second listener.
+release identity. The currently deployed version has no login or session.
+The owner has authorized implementing owner login and an optional client API
+key; these features are planned, not yet deployed. No second listener.
 
 ```text
 http://10.10.11.109:8765/owner/     owner console
@@ -40,19 +41,23 @@ http://10.10.11.109:8765/v1/        OpenAI-compatible API
 http://10.10.11.109:8765/version    release identity
 ```
 
-**Any device that can reach the configured address is an administrator and a
-caller, by product decision.** State this plainly in the console and in
-operator docs. Do not imply that a password or a profile restricts
-administrative access, and do not reintroduce one.
+**Current deployment:** any device that reaches the configured address is an
+administrator and caller. Do not imply protections exist before release.
+**Owner decision (superseding the earlier no-login policy):** implement owner
+username/password login, first-run setup, and authenticated sessions; retain
+keyless model API access by default with an optional client key to set, rotate,
+or clear. Document and test the two access boundaries separately.
 
 ## Non-negotiable constraints
 
 - This is private LAN infrastructure. Bind only explicit private or loopback
   addresses. Never add wildcard/public binds, router/firewall rules, or a
   public reverse proxy.
-- Do not restore an owner passphrase, login/session bootstrap, a separate
-  setup listener, `GATEWAY_SETUP_BIND`, an SSH-tunnel requirement, or the
-  `:8766` port. `8766` is reserved and rejected at argument parsing.
+- Owner login and session bootstrap are authorized under the new owner
+  decision above, subject to independent security and QA review. Do not use a
+  default admin/admin credential. Keep a separate setup listener,
+  `GATEWAY_SETUP_BIND`, an SSH-tunnel requirement, and port `:8766` prohibited;
+  `8766` remains reserved and rejected at argument parsing.
 - Preserve forwarded-header rejection and canonical `Host`/`Origin` checks.
   Cross-site browser mutations must still be refused; do not invent a
   proxy-trust model.
