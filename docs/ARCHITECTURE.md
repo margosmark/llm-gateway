@@ -10,7 +10,7 @@ The gateway starts one standard-library HTTP server from `gateway.cli`:
 
 | Listener | Default bind | Mounts | Purpose |
 |---|---|---|---|
-| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version`, `/metrics` | direct owner console/configuration, anonymous OpenAI-compatible API, and metadata-only Prometheus exposition |
+| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version`, `/metrics` | direct owner console/configuration behind the owner session, a keyless-by-default OpenAI-compatible API (optional client key), and metadata-only Prometheus exposition |
 
 The owner console, credential forms, provider actions, and client API share the
 same listener. `cli.py` refuses wildcard and unsupported binds. Supported classes are
@@ -230,13 +230,37 @@ the rest of the state.
 
 1. A browser reaches `/owner/` on the configured canonical listener.
 2. `GatewayApp.handle` rejects forwarded headers, invalid `Host`, and invalid
-   `Origin` on browser mutations. Direct requests from a reachable LAN peer are
-   administrators by product decision.
-3. Same-origin owner mutations require no password, session cookie, or CSRF
-   bootstrap token. Cross-origin browser mutations remain refused.
-4. The owner console may mutate configuration and enroll credentials on this
+   `Origin` on browser mutations — before authentication runs, so a hostile
+   cross-origin request never reaches a handler.
+3. The pre-auth surface is exactly: the console shell and its assets,
+   `GET /owner/api/auth/session`, `POST /owner/api/auth/setup` and
+   `POST /owner/api/auth/login`. Every other `/owner/*` route requires a
+   valid owner session cookie (`gw_owner_session`, `HttpOnly`,
+   `SameSite=Strict`, `Path=/`, 12-hour TTL, validated server-side) and
+   answers `401 authentication_required` before its handler runs — a
+   streaming endpoint cannot emit a frame and a mutation cannot half-apply
+   without one.
+4. First run has no account: `ensure_setup_code()` (`src/gateway/owner_auth.py`)
+   mints a random one-time setup code, prints it to server stdout and writes
+   it to `owner_setup_code` (`0600` inside a `0700` data directory);
+   `POST /owner/api/auth/setup` consumes it exactly once and deletes the
+   file. No HTTP surface ever returns the code, and there is no default
+   credential.
+5. CSRF has no bootstrap token: `SameSite=Strict` stops the cookie being
+   sent cross-site, and the canonical `Origin`/`Host` checks above still run
+   on every browser mutation. Sessions, the password and the setup code are
+   never serialised into responses, logs, exports or `/version`.
+6. The owner console may mutate configuration and enroll credentials on this
    listener. Provider tests and catalogue refreshes are explicit actions; no
    page load or ordinary configuration save calls a provider.
+7. `GET /version`, `GET /health` and `GET /metrics` remain unauthenticated;
+   `/v1/*` stays keyless until an owner sets a client API key
+   (`POST /owner/api/auth/client-key`, owner session required).
+
+**Deployed vs candidate.** The running gateway still serves the previous
+boundary — no login, and a reachable LAN peer administers `/owner/*`
+directly. The session boundary in steps 3-5 ships only with the
+owner-session candidate this document describes; see `docs/OWNER_AUTH.md`.
 
 ### Read-only request preview
 
@@ -255,8 +279,12 @@ fallbacks after an upstream error are explicitly not evaluated.
    `POST /v1/chat/completions`, or `POST /v1/responses`.
 2. `ProfileAuth` resolves every LAN request to a shared anonymous trusted-LAN
    profile. Legacy profile/token metadata does not provide access control.
-3. The request model must name a published alias; any reachable peer may invoke
-   each published route.
+   This profile resolution is not the model-API key boundary: `/v1/*` is
+   keyless until an owner sets a client key, and once one is set all seven
+   `/v1` routes require `Authorization: Bearer <key>` before the handler
+   runs (the owner session never substitutes for it).
+3. The request model must name a published alias; any reachable peer may
+   invoke each published route while the surface is keyless.
 4. `Router` evaluates the primary route followed by configured fallbacks. A
    candidate must have a configured adapter, an enabled known model, a known
    supported dialect, matching capabilities, and no active local cooldown.

@@ -90,13 +90,101 @@ peer IP observed by the socket, not a request header.
 
 The gateway binds one listener at `GATEWAY_BIND:GATEWAY_PORT` (default port
 `8765`), serving `/owner/`, `/v1/`, `/health`, and `/version`. It refuses
-wildcard binds. There is no setup listener, second port, owner passphrase, or
-login/bootstrap step.
+wildcard binds. There is no setup listener and no second port: first-run
+setup, sign-in and password recovery all happen on this one listener or on
+the gateway host itself (§1.4). Port `8766` stays reserved and refused.
 
-Open `http://10.10.11.109:8765/owner/` from a trusted LAN device. Any device
-that can reach this address can administer the gateway and invoke its models;
-this is an intentional product boundary, not authentication. Do not expose the
-address beyond a LAN you trust.
+Two access boundaries, deliberately separate:
+
+* **Owner console and configuration API** (`/owner/*`) are protected by one
+  owner account: username and password, verified server-side with PBKDF2,
+  delivered as an `HttpOnly`, `SameSite=Strict` session cookie with a
+  12-hour TTL. A fresh gateway has no account at all — you create the first
+  one in first-run setup (§1.4) using a one-time setup code read from the
+  gateway host. There is no default credential; `admin/admin` does not
+  exist.
+* **Model API** (`/v1/*`) is **keyless by default**: any device that can
+  reach this address is a caller until the owner sets an optional client
+  API key from Settings → Access. `/version`, `/health` and `/metrics` are
+  unauthenticated either way.
+
+Do not expose the address beyond a LAN you trust. The listener is plain
+HTTP, so the owner password, the session cookie and the client key cross
+the LAN in clear text and the cookie is not marked `Secure` (set
+`GATEWAY_COOKIE_SECURE=1` only when you terminate TLS in front of the
+gateway). "Trusted LAN" therefore also means "no on-path observer".
+
+### 1.4 First-boot setup, sign-in, and password recovery
+
+**First boot — create the owner account.** A fresh gateway has no owner
+account, so `http://10.10.11.109:8765/owner/` shows *Set up the owner
+account* instead of the console shell. The one-time setup code is
+server-side only; read it from the gateway host, never from HTTP:
+
+```sh
+docker compose logs -f gateway | grep "one-time setup code"   # server stdout
+# or, from the state volume (mode 0600 inside a 0700 directory):
+docker run --rm -v personal-llm-gateway-state:/state \
+  python:3.14-slim cat /state/owner_setup_code
+```
+
+* On the very first start the gateway prints the code itself:
+  `first-run owner setup required: one-time setup code ...: <code>`. On
+  every start after that, until setup is completed, it prints only the path
+  (`... the one-time setup code is at /var/lib/gateway/owner_setup_code`).
+* No endpoint, error body, log line or access-log record ever returns the
+  code. Anyone who can read it can create the owner account, so the gateway
+  host and its container logs are secrets.
+
+Enter the code, a username, and a password (8–1024 characters, not equal to
+the username), then **Create owner account**. The code is consumed exactly
+once and the file is deleted; setup attempts are throttled like sign-in.
+The console signs you in on success. There is no default account to fall
+back on. The code stays in `owner_setup_code` until it is consumed, so a
+lost copy is only a re-read; if that file is deleted while setup is still
+pending, no HTTP surface re-mints it — restore the file, or clear the
+`setup` field in `owner_auth.json` and restart, and the next start mints a
+fresh code.
+
+**Signing in.** Open `http://10.10.11.109:8765/owner/` from a trusted LAN
+device and enter the username and password. The session lives 12 hours,
+validated server-side; expiry, **Sign out**, a password change, and
+`--reset-owner-password` all revoke it server-side, so a browser that drops
+the cookie changes nothing.
+
+**Changing the password.** Settings → *Access* → *Owner account*: current
+password, new password, repeat, then **Change password**. It rewrites the
+stored hash and revokes every other session; the console you changed it
+from stays signed in.
+
+**Forgotten password — local recovery.** Requires filesystem access to the
+data directory, on the gateway host:
+
+```sh
+python -m gateway --reset-owner-password            # prompts on stdin, twice
+# inside the container:
+docker compose exec gateway python -m gateway --reset-owner-password
+```
+
+The new password is read from **stdin, never argv** (argv is visible in the
+process list and in shell history). Every owner session is revoked, and the
+running gateway picks the change up **without a restart** — the store
+re-reads the file when its fingerprint changes, so a stolen cookie stops
+working at the moment of recovery rather than at the next reboot. If no
+account exists yet it refuses and points you back to the one-time setup
+code.
+
+**Throttling.** Failed sign-ins and setup attempts are throttled in memory,
+per account and per client address: 5 failures inside a 300-second window
+return `429 login_throttled` with `Retry-After`, and the correct password is
+refused too while the window is open. The throttle is in process memory, so
+a gateway restart clears it.
+
+**Model API.** `/v1/*` needs no key until you set one (§1.3). To require
+one, use Settings → *Access* → *Model client API key* → *Generate*, then
+hand the key to your clients; rotation keeps the previous key valid for a
+10-minute grace window, and *Disable and restore keyless access* brings the
+keyless default back. The gateway never edits a client's own configuration.
 
 ---
 
@@ -271,8 +359,8 @@ The first command must list the published aliases with their context
 decision; the second must be greater than zero. An alias that is
 unpublished in the console disappears from the selector on the plugin's
 next refresh (60 seconds), so unpublishing is a real revocation for this
-client - it is not access control for the API itself, which stays
-anonymous.
+client - it is not access control for the API itself, which stays keyless
+until an owner sets a client key (§1.4).
 
 The snapshot uses a documented model window when Go's own endpoint table
 identifies the exact model and the model provider publishes its window:
@@ -293,10 +381,23 @@ failed refresh keeps the last complete inventory rather than deselecting the
 model in use.
 
 The console and setup path are not separate surfaces: `/owner/` is served on
-this listener, while `/setup/` is absent. Owner state is readable without a
-login. Browser mutations require the exact canonical `Origin`, but no session
-or CSRF bootstrap. Confirm there is no second listener on port `8766` through
-your normal host-level listener inspection.
+this listener, while `/setup/` is absent — confirm there is no second
+listener on port `8766` through your normal host-level listener inspection.
+On the owner-session candidate, owner state is **not** readable without a
+login: the pre-auth surface is exactly the console shell and its assets,
+`GET /owner/api/auth/session`, `POST /owner/api/auth/setup` and
+`POST /owner/api/auth/login`; every other `/owner/*` route answers `401
+authentication_required` before its handler runs until a valid session
+cookie is presented (§1.4). Browser mutations still require the exact
+canonical `Origin`; CSRF is carried by the `SameSite=Strict` cookie plus the
+existing `Origin`/`Host` checks, not by a bootstrap token. The OpenCode
+integration above calls `/v1`, which stays keyless until an owner sets a
+client key in Settings → Access — once one is set, every `/v1` request must
+send `Authorization: Bearer <key>`.
+
+The deployed gateway still serves the previous no-login boundary, where any
+reachable peer administers `/owner/*`; the session boundary above ships only
+with this candidate (see `docs/OWNER_AUTH.md`).
 
 ---
 
@@ -378,7 +479,10 @@ without editing this file by hand.
 | Symptom | Cause | Action |
 |---|---|---|
 | `refusing to start: a wildcard bind...` | `GATEWAY_BIND` is `0.0.0.0` | Set it to an explicit local RFC1918 IPv4, IPv6 ULA, or loopback address |
-| The owner console will not load | The configured private address is not assigned to the host, or the listener is unavailable | Use the configured private address and port; IPv6 URLs need brackets, e.g. `http://[fd12::1]:8765/owner/`; login/bootstrap is not part of this product mode |
+| The owner console will not load | The configured private address is not assigned to the host, or the listener is unavailable | Use the configured private address and port; IPv6 URLs need brackets, e.g. `http://[fd12::1]:8765/owner/` |
+| The console shows *Set up the owner account* instead of the shell | Fresh gateway: no owner account exists yet, so first-run setup is due | Read the one-time setup code from the gateway host — server stdout or the `0600` `owner_setup_code` file; it is never an HTTP response — and complete setup (§1.4). The code is single-use |
+| An owner API call answers `401 authentication_required` | The session cookie is absent or expired (12-hour TTL), or the caller is an unauthenticated LAN peer | Sign in again at `/owner/` (§1.4). On the deployed no-login gateway this response does not occur — that build has no owner session |
+| Sign-in returns `429 login_throttled` | Five failed attempts inside a 300-second window, per account and per client address | Wait for the `Retry-After` window; the correct password is refused while it is open. The throttle is in memory, so a gateway restart clears it |
 | A provider shows *Failed* | The credential was rejected or the provider is unreachable | **Test connection** and read the message; the stored credential is never displayed |
 | A model shows an empty dialect | The provider serves it but does not document the endpoint | Enter it manually and set the dialect, or use an OpenAI-dialect model |
 | A route says the dialect cannot be translated | The model is served over Google v1beta or includes a control that cannot be represented | Anthropic Messages models are bridged to/from OpenAI dialects; unsupported controls are refused rather than guessed. Google v1beta remains unsupported |
