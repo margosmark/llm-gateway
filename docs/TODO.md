@@ -45,9 +45,15 @@ below inherits them:
 These are product decisions, not gaps. Do not close an item below by
 adding one of them.
 
-* No owner passphrase, login page, session cookie, setup listener, or
-  reserved port `8766`. **Any device that can reach the configured address
-  is an administrator and a caller, by decision.**
+* Owner login and an optional model client API key are in scope by explicit
+  owner decision: one owner account with a server-side session cookie
+  (first run bootstraps from a one-time setup code, never `admin/admin`),
+  and a client key on `/v1` that stays **off by default** so existing
+  clients keep working. Still non-negotiable: no separate setup listener,
+  no reserved port `8766`, no default credential, and profiles remain
+  configuration/attribution objects rather than access control.
+  On the model API, until a key is set, **any device that can reach the
+  configured address is a caller, by decision.**
 * No TLS terminator, proxy trust model, forwarded-header acceptance,
   wildcard/public bind, firewall or router rule, or public exposure.
 * No implicit provider calls. Saving configuration, loading a page or

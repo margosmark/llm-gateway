@@ -1,15 +1,21 @@
 /* Browser check for the owner console.
  *
- * The spec requires: "A browser test verifies direct console use and the
- * visible trusted-LAN notice at desktop and 390 px viewport widths."
+ * The spec requires: "A browser test verifies the sign-in/first-run view
+ * and the signed-in console at desktop and 390 px viewport widths."
  *
  * This drives a real browser against a running gateway. It asserts that:
  *
- *   - the console opens directly, with no login, passphrase or setup
- *     interstitial;
- *   - the trusted-LAN notice is visible, and still visible at 390 px;
+ *   - the console asks for first-run setup (fresh runtime) or sign-in
+ *     before it renders the shell;
+ *   - after signing in, the signed-in console and its access notice are
+ *     visible, and still visible at 390 px;
  *   - the provider actions are enabled, not silently disabled;
  *   - the page raises no script errors.
+ *
+ * Credentials come from the environment, never from this file:
+ *   GATEWAY_OWNER_USERNAME   (default: owner)
+ *   GATEWAY_OWNER_PASSWORD   (required)
+ *   GATEWAY_SETUP_CODE       (required only on a runtime with no account)
  *
  * Usage: node tests/browser_console_test.js <base-url>
  */
@@ -23,6 +29,10 @@ if (!BASE) {
   process.exit(2);
 }
 
+const OWNER_USERNAME = process.env.GATEWAY_OWNER_USERNAME || "owner";
+const OWNER_PASSWORD = process.env.GATEWAY_OWNER_PASSWORD || "";
+const SETUP_CODE = process.env.GATEWAY_SETUP_CODE || "";
+
 const failures = [];
 function check(name, condition, detail) {
   if (condition) {
@@ -31,6 +41,34 @@ function check(name, condition, detail) {
     failures.push(name + (detail ? " - " + detail : ""));
     console.log("  FAIL " + name + (detail ? " - " + detail : ""));
   }
+}
+
+/* Sign in (or complete first-run setup) and wait for the shell. Returns
+ * "setup" or "login" so the caller can assert which view it saw. */
+async function signIn(page) {
+  await page.goto(BASE + "/owner/", { waitUntil: "load" });
+  await page.waitForTimeout(800);
+  const setupCode = page.locator("#setup-code");
+  if ((await setupCode.count()) > 0) {
+    if (!SETUP_CODE) {
+      throw new Error("the runtime needs first-run setup; set GATEWAY_SETUP_CODE");
+    }
+    await setupCode.fill(SETUP_CODE);
+    await page.locator("#auth-username").fill(OWNER_USERNAME);
+    await page.locator("#auth-password").fill(OWNER_PASSWORD);
+    await page.locator("#auth-password2").fill(OWNER_PASSWORD);
+    await page.getByRole("button", { name: "Create owner account" }).click();
+    await page.waitForTimeout(1200);
+    return "setup";
+  }
+  if (!OWNER_PASSWORD) {
+    throw new Error("set GATEWAY_OWNER_PASSWORD to run the browser check");
+  }
+  await page.locator("#auth-username").fill(OWNER_USERNAME);
+  await page.locator("#auth-password").fill(OWNER_PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.waitForTimeout(1200);
+  return "login";
 }
 
 (async () => {
@@ -51,17 +89,25 @@ function check(name, condition, detail) {
         if (message.type() === "error") errors.push("console: " + message.text());
       });
 
+      // Before sign-in there is no shell: the access view owns the page.
       await page.goto(BASE + "/owner/", { waitUntil: "load" });
-      await page.waitForTimeout(1200);
-
-      // Direct use: no login form, no passphrase prompt.
+      await page.waitForTimeout(800);
       const passwordInputs = await page.locator('input[type="password"]').count();
-      check("no passphrase prompt at " + viewport.name, passwordInputs === 0, passwordInputs + " password inputs");
-
-      // The trusted-LAN notice must be on screen.
-      const notice = page.locator("text=Trusted LAN admin mode").first();
       check(
-        "the trusted-LAN notice is visible at " + viewport.name,
+        "the console asks for credentials at " + viewport.name,
+        passwordInputs > 0,
+        passwordInputs + " password inputs"
+      );
+      const tabsBefore = await page.locator("nav.tabs button").count();
+      check("no shell is rendered before sign-in at " + viewport.name, tabsBefore === 0);
+
+      const view = await signIn(page);
+      console.log("  signed in via " + view);
+
+      // The access notice must be on screen once signed in.
+      const notice = page.locator("text=Owner sign-in protects this console").first();
+      check(
+        "the access notice is visible at " + viewport.name,
         (await notice.count()) > 0 && (await notice.isVisible())
       );
 
@@ -69,7 +115,7 @@ function check(name, condition, detail) {
       const tabs = await page.locator("nav.tabs button").allInnerTexts();
       check(
         "the console sections render at " + viewport.name,
-        ["Status", "Providers", "Models & Routes", "Profiles", "Settings"].every((t) =>
+        ["Operate now", "Providers", "Models & Routes", "Profiles", "Settings"].every((t) =>
           tabs.some((rendered) => rendered.trim() === t)
         ),
         JSON.stringify(tabs)
@@ -112,8 +158,7 @@ function check(name, condition, detail) {
   if (process.env.GATEWAY_ALLOW_MUTATION === "1") {
     console.log("removing a fallback from an alias");
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-    await page.goto(BASE + "/owner/", { waitUntil: "load" });
-    await page.waitForTimeout(1200);
+    await signIn(page);
     await page.getByRole("button", { name: "Models & Routes" }).click();
     await page.waitForTimeout(700);
 

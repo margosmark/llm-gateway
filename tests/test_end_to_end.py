@@ -38,6 +38,7 @@ from gateway.http.security import (
 )
 from gateway.logging import RequestLogger
 from gateway.observability import LimitStore, RequestEvent, RequestLedger, utc_now_iso
+from gateway.owner_auth import COOKIE_NAME
 
 FAKE_PROVIDER = "chatgpt_codex"
 
@@ -118,6 +119,15 @@ def free_port(host: str = "127.0.0.1") -> int:
     with socket.socket(family, socket.SOCK_STREAM) as sock:
         sock.bind(endpoint)
         return int(sock.getsockname()[1])
+
+
+def _session_cookie_from(headers: dict[str, Any]) -> str:
+    """Pull the owner session token out of a login/setup response."""
+    for cookie in headers.get("set-cookie") or []:
+        name, _, value = str(cookie).partition("=")
+        if name == COOKIE_NAME:
+            return value.split(";", 1)[0]
+    raise RuntimeError(f"response carried no {COOKIE_NAME} cookie: {headers!r}")
 
 
 class SystemOneAdapter:
@@ -215,6 +225,31 @@ class GatewayHarness:
 
         self.server = Server(self.host, self.port, self.app.handle)
         self.server.start_background()
+        #: The owner session this fixture signs in with. Every owner-surface
+        #: request carries it unless a test passes ``auth=False`` to probe
+        #: the unauthenticated boundary.
+        self.owner_cookie = self._establish_owner_session()
+
+    def _establish_owner_session(self) -> str:
+        """Complete first-run setup over HTTP and keep the session cookie.
+
+        The fixture goes through the real endpoints (one-time setup code,
+        PBKDF2 at the production work factor) instead of seeding the store
+        directly, so a defect in the bootstrap path fails here rather than
+        being papered over.
+        """
+        setup_code = self.app.owner_auth.read_setup_code()
+        if setup_code is None:
+            raise RuntimeError("fixture data directory has no one-time setup code")
+        status, payload, headers = self.request(
+            "POST",
+            "/owner/api/auth/setup",
+            {"username": "owner", "password": "fixture-owner-password", "setup_code": setup_code},
+            auth=False,
+        )
+        if status != 200:
+            raise RuntimeError(f"fixture owner setup failed: {status} {payload}")
+        return _session_cookie_from(headers)
 
     def close(self) -> None:
         self.server.stop()
@@ -230,6 +265,7 @@ class GatewayHarness:
         headers: dict[str, str] | None = None,
         port: int | None = None,
         raw: bool = False,
+        auth: bool = True,
     ):
         url = f"http://{self.authority}:{port or self.port}{path}"
         data = body if isinstance(body, bytes) else (json.dumps(body).encode("utf-8") if body is not None else None)
@@ -237,6 +273,10 @@ class GatewayHarness:
         request.add_header("Host", f"{self.authority}:{port or self.port}")
         if data is not None:
             request.add_header("Content-Type", "application/json")
+        # Owner surface needs the fixture's session cookie unless the test
+        # is explicitly probing the unauthenticated boundary.
+        if auth and self.owner_cookie:
+            request.add_header("Cookie", f"{COOKIE_NAME}={self.owner_cookie}")
         for key, value in (headers or {}).items():
             request.add_header(key, value)
         # A browser always sends Origin on a same-origin mutation, and the
@@ -507,14 +547,23 @@ class SecurityProbeTests(unittest.TestCase):
         status, payload, _ = self.harness.request("GET", "/setup/api/state")
         self.assertEqual(status, 404)
 
-    def test_full_state_is_available_without_a_session(self) -> None:
+    def test_full_state_requires_an_owner_session(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/owner/api/state", auth=False)
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"]["type"], "authentication_required")
+        # The fixture has an account, so this is "sign in", not "set up".
+        self.assertFalse(payload["error"]["setup_required"])
         status, payload, _ = self.harness.request("GET", "/owner/api/state")
         self.assertEqual(status, 200)
-        self.assertFalse(payload["authenticated"])
+        self.assertTrue(payload["authenticated"])
         self.assertTrue(payload["can_mutate"])
         self.assertTrue(payload["can_enroll_credentials"])
+        self.assertEqual(payload["owner"]["username"], "owner")
 
-    def test_safe_status_is_available_without_a_session(self) -> None:
+    def test_safe_status_is_session_gated_and_carries_no_disclosure_class(self) -> None:
+        status, payload, _ = self.harness.request("GET", "/owner/api/status", auth=False)
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"]["type"], "authentication_required")
         status, payload, _ = self.harness.request("GET", "/owner/api/status")
         self.assertEqual(status, 200)
         # The safe status must not carry the disclosure class: no profile
@@ -538,7 +587,7 @@ class SecurityProbeTests(unittest.TestCase):
         self.assertIn("text/html", headers.get("Content-Type", ""))
         status, script, _ = self.harness.request("GET", "/owner/app.js", raw=True)
         self.assertEqual(status, 200)
-        self.assertIn(b"Trusted LAN admin mode ", script)
+        self.assertIn(b"Owner sign-in protects this console", script)
         self.assertNotIn(b"/api/session", script)
 
     def test_console_html_carries_no_secret(self) -> None:
@@ -1035,10 +1084,6 @@ class ConsoleApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = GatewayHarness()
         self.addCleanup(self.harness.close)
-
-    def _login(self) -> dict[str, str]:
-        """Compatibility helper: trusted-LAN console needs no login headers."""
-        return {}
 
     def test_owner_console_mutates_same_origin_without_session_or_csrf(self) -> None:
         status, payload, _ = self.harness.request(

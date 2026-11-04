@@ -39,6 +39,7 @@ from gateway.logging import RequestLogger
 from gateway.http.core import Headers, Request
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
 from gateway.observability import LimitStore, RequestLedger
+from tests.owner_session import cookie_header
 
 
 class RecordingAdapter:
@@ -218,7 +219,11 @@ class AliasTestPathTests(unittest.TestCase):
             path="/owner/api/alias",
             raw_query="",
             headers=Headers(
-                [("Host", "127.0.0.1:8765"), ("Origin", "http://127.0.0.1:8765")]
+                [
+                    ("Host", "127.0.0.1:8765"),
+                    ("Origin", "http://127.0.0.1:8765"),
+                    ("Cookie", cookie_header(self.harness.app)),
+                ]
             ),
             body=json.dumps({"action": "test", "name": "coding"}).encode("utf-8"),
             client_address=("10.0.0.5", 40000),

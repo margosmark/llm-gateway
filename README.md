@@ -34,8 +34,8 @@ never breaks your client's configuration.
 
 | Surface | Address | Who can reach it | What it does |
 |---|---|---|---|
-| Owner console and configuration | `http://10.10.11.109:8765/owner/` | Trusted LAN | Full configuration, credential enrollment, provider actions, and status; no login |
-| API | `http://10.10.11.109:8765/v1/` | LAN | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/responses`, plus native Jev `GET /v1/systemone/models` and `POST /v1/systemone` |
+| Owner console and configuration | `http://10.10.11.109:8765/owner/` | Owner account (username + password) | Full configuration, credential enrollment, provider actions, and status; requires sign-in, except the first-run setup and sign-in endpoints themselves |
+| API | `http://10.10.11.109:8765/v1/` | LAN, keyless by default | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/messages`, `POST /v1/responses`, plus native Jev `GET /v1/systemone/models` and `POST /v1/systemone`. Keyless until the owner sets an optional client API key; with one set, every `/v1` request must send `Authorization: Bearer <key>` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
 | Request preview | `POST /owner/api/preview` | Trusted LAN | Shows the converted upstream request without calling a provider; Chat Completions body format |
 | Prometheus metrics | `http://10.10.11.109:8765/metrics` | Trusted LAN | Metadata-only operational metrics |
@@ -49,10 +49,29 @@ blocked. The endpoint uses the same single-listener trusted-LAN policy as the
 owner console and API: any device able to reach the configured private address
 can access it. It is not a public monitoring endpoint.
 
-Trusted LAN admin mode: any device that can reach this address can configure.
-and use the gateway, including replacing provider credentials. There is no
-owner password, login/session bootstrap, separate setup listener, or
-per-device administrative boundary. Use this only on a LAN you trust.
+Two access boundaries, deliberately separate:
+
+* **Owner authentication** protects the console and every `/owner/api/*`
+  endpoint. One username/password account, verified server-side with
+  PBKDF2, delivered as an `HttpOnly`, `SameSite=Strict` session cookie.
+  A fresh gateway has no account: first run creates one from a random
+  one-time setup code printed on the gateway host (server stdout and the
+  owner-only `owner_setup_code` file) - never a default credential, never
+  an HTTP response. Forgotten password: `python -m gateway
+  --reset-owner-password` on the host, which reads the new password from
+  stdin and revokes every session.
+* **Model client authentication** covers `/v1/*` only and is **off by
+  default**: with no key configured every existing client keeps working
+  unchanged. The owner can set, rotate or clear an optional client API
+  key from Settings → Access; rotation keeps the previous key valid for
+  an explicit 10-minute grace window, and clearing restores keyless
+  access. The gateway never edits any client configuration itself.
+
+The LAN/HTTPS boundary is unchanged: the listener binds an explicit
+private address over plain HTTP, so session cookies are not marked
+`Secure` unless the deployment is served over HTTPS (an `https`
+canonical origin or `GATEWAY_COOKIE_SECURE=1` in front of a TLS
+terminator). Use this only on a LAN you trust, or put it behind TLS.
 
 The owner API also provides a read-only `POST /owner/api/preview` endpoint.
 It returns the request shape for the first currently eligible route without
@@ -68,10 +87,13 @@ refused at startup. The gateway creates no firewall, router or NAT rule and
 cannot enforce one: the operator must ensure the listener is not
 port-forwarded or otherwise exposed beyond the trusted LAN. All owner
 configuration and client APIs share the one listener.
-Canonical same-origin browser mutations work without cookies, passwords,
-sessions, or CSRF bootstrap values; cross-origin browser mutations, hostile
-Host values, and forwarded headers remain rejected. Credentials are entered
-only into write-only form fields and are never read back.
+Canonical same-origin browser mutations still work without a CSRF
+bootstrap value - `SameSite=Strict` is what stops a cross-site request
+from carrying the session cookie - and cross-origin browser mutations,
+hostile Host values, and forwarded headers remain rejected before any
+handler runs. Credentials are entered only into write-only form fields
+and are never read back; no response, log line or export ever contains
+the password, the setup code, a session token or the client key value.
 
 The gateway port is configurable with `--port` or `GATEWAY_PORT`, except port
 `8766`, which is reserved and rejected because the retired setup listener must
@@ -97,7 +119,10 @@ gateway refuses to start on an address the host does not hold.
 
 Then, from a trusted LAN device:
 
-1. Open <http://10.10.11.109:8765/owner/>. No login or bootstrap step exists.
+1. Open <http://10.10.11.109:8765/owner/>. On a fresh gateway the console
+   asks for first-run setup: read the one-time setup code from the gateway
+   host (`owner_setup_code` in the state volume, or the process stdout) and
+   create the owner account. On later visits, sign in with that account.
 2. Connect a provider.
 3. Test the connection.
 4. Refresh the model catalogue.
@@ -820,10 +845,11 @@ them.
   require a trusted LAN. Do not place it behind a TLS terminator or proxy
   until an explicit proxy-trust/forwarded-header design is implemented; the
   current server rejects forwarded headers.
-* **Trusted LAN administration has no authentication boundary.** Any reachable
-  peer can configure the gateway, replace credentials, and invoke published
-  models. The network must be trusted; the gateway does not protect against an
-  on-path LAN attacker.
+* **The model API has no authentication boundary by default.** Until the owner
+  sets the optional client API key, any reachable peer can invoke published
+  models on `/v1`. Owner sign-in protects the console and the configuration
+  API, not the model API. The network must still be trusted: the gateway does
+  not protect against an on-path LAN attacker.
 * **The bridge is verified against a recorded corpus**, not yet against live
   provider captures. The corpus and its round-trip runner are in
   `tests/fixtures/bridge_corpus.json`.

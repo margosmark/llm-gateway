@@ -167,6 +167,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--print-url", action="store_true", help="Print gateway URLs and exit.")
+    parser.add_argument(
+        "--reset-owner-password",
+        action="store_true",
+        help=(
+            "Local recovery: read a new owner password from stdin (never from argv), "
+            "revoke every owner session, then exit. Requires access to the data directory."
+        ),
+    )
     return parser
 
 
@@ -231,8 +239,48 @@ def build_application(
     return app, config, credentials, router
 
 
+def _reset_owner_password(data_dir: Path) -> int:
+    """Documented local recovery for a forgotten owner password.
+
+    The password is read from stdin, never from ``argv``: argv is visible
+    in the process list and in shell history. The operation rewrites the
+    stored hash and revokes every session, so a cookie that was already
+    stolen stops working. It is reachable only with filesystem access to
+    the data directory - there is no HTTP surface for it.
+    """
+    import getpass
+
+    from gateway.owner_auth import OwnerAuthError, OwnerAuthStore
+
+    store = OwnerAuthStore(data_dir)
+    if store.setup_required:
+        print("no owner account exists yet; use the one-time setup code instead.", file=sys.stderr)
+        return 2
+    try:
+        new_password = getpass.getpass("new owner password: ")
+        confirmation = getpass.getpass("repeat new owner password: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\naborted; nothing was changed.", file=sys.stderr)
+        return 2
+    if new_password != confirmation:
+        print("passwords do not match; nothing was changed.", file=sys.stderr)
+        return 2
+    try:
+        result = store.reset_password(new_password)
+    except OwnerAuthError as exc:
+        print(f"refusing: {exc.message}", file=sys.stderr)
+        return 2
+    print(
+        f"owner password replaced for {result['username']}; every owner session was revoked.",
+        flush=True,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.reset_owner_password:
+        return _reset_owner_password(Path(args.data_dir))
     if _is_wildcard(args.host):
         print("refusing to start: bind an explicit private LAN address; wildcard binds are refused.", file=sys.stderr)
         return 2
@@ -251,6 +299,23 @@ def main(argv: list[str] | None = None) -> int:
         rate_limited_max_seconds=args.rate_limited_cooldown_max_seconds,
         transient_max_seconds=args.transient_cooldown_max_seconds,
     )
+    # ``--print-url`` paths in tests stub build_application with a None app;
+    # the setup banner is only meaningful when there is a real application.
+    if app is not None and app.setup_code_created:
+        # Server-side only: stdout of the gateway process and an owner-only
+        # file in the data directory. No HTTP surface ever returns it.
+        print(
+            "first-run owner setup required: one-time setup code "
+            f"(server-side only, also at {app.owner_auth.setup_code_path}): "
+            f"{app.setup_code_created}",
+            flush=True,
+        )
+    elif app is not None and app.owner_auth.setup_required:
+        print(
+            "first-run owner setup required: the one-time setup code is at "
+            f"{app.owner_auth.setup_code_path} (server-side only)",
+            flush=True,
+        )
     authority = format_authority_host(args.host)
     if args.print_url:
         print(f"console: http://{authority}:{args.port}/owner/\nAPI:     http://{authority}:{args.port}/v1/\nrelease: http://{authority}:{args.port}/version")

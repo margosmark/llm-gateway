@@ -26,6 +26,7 @@ from gateway.http.security import (
     build_canonical_origins,
 )
 from gateway.observability import LimitStore, RequestEvent, RequestLedger
+from tests.owner_session import cookie_header
 
 
 class MockAdapter:
@@ -86,6 +87,9 @@ class TrustedLanHarness:
             mounts=("/owner",),
             logger=RequestLogger(enabled=False),
         )
+        # Every owner endpoint sits behind a session cookie now, so the
+        # fixture signs in the same way a console browser would.
+        self.owner_cookie = cookie_header(self.app)
         self.server = Server(host, self.port, self.app.handle)
         self.server.start_background()
 
@@ -107,6 +111,7 @@ class TrustedLanHarness:
         headers: dict[str, str] | None = None,
         *,
         add_origin: bool = True,
+        auth: bool = True,
     ) -> tuple[int, bytes, dict[str, str]]:
         url = f"http://127.0.0.1:{self.port}{path}"
         data = json.dumps(body).encode() if body is not None else None
@@ -114,6 +119,8 @@ class TrustedLanHarness:
         request.add_header("Host", f"127.0.0.1:{self.port}")
         if data is not None:
             request.add_header("Content-Type", "application/json")
+        if auth:
+            request.add_header("Cookie", self.owner_cookie)
         if add_origin and path.startswith("/owner/") and method in {"POST", "PUT", "PATCH", "DELETE"}:
             request.add_header("Origin", f"http://127.0.0.1:{self.port}")
         for name, value in (headers or {}).items():
@@ -141,7 +148,19 @@ class TrustedLanAdminModeTests(unittest.TestCase):
         self.assertEqual(self.harness.app._routes.match("GET", "/setup/")[0], None)
         self.assertEqual(self.harness.app._routes.match("GET", "/owner/api/session")[0], None)
 
-    def test_canonical_same_origin_configuration_mutation_needs_no_bootstrap(self) -> None:
+    def test_canonical_same_origin_configuration_mutation_needs_an_owner_session(self) -> None:
+        # Same-origin checks are not the only boundary any more: a mutation
+        # without a session cookie never reaches its handler.
+        status, body, _ = self.harness.request(
+            "POST",
+            "/owner/api/profile",
+            {"action": "save", "profile_id": "unauthenticated", "name": "Blocked"},
+            auth=False,
+        )
+        self.assertEqual(status, 401, body)
+        self.assertIn(b"authentication_required", body)
+        self.assertNotIn("unauthenticated", self.harness.config.snapshot().profiles)
+
         status, body, headers = self.harness.request(
             "POST",
             "/owner/api/profile",
@@ -149,6 +168,7 @@ class TrustedLanAdminModeTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         self.assertEqual(json.loads(body), {"ok": True, "profile_id": "synthetic-profile"})
+        # A signed-in mutation does not mint or refresh a session cookie.
         self.assertNotIn("set-cookie", {key.lower() for key in headers})
         self.assertIn("synthetic-profile", self.harness.config.snapshot().profiles)
 
@@ -218,8 +238,8 @@ class TrustedLanAdminModeTests(unittest.TestCase):
         self.harness.credentials.provider_handle("opencode_go").write({"api_key": secret})
         status, console, _ = self.harness.request("GET", "/owner/app.js")
         self.assertEqual(status, 200)
-        self.assertIn(b"Trusted LAN admin mode", console)
-        self.assertIn(b"any device that can reach this address can configure and use this gateway", console)
+        self.assertIn(b"Owner sign-in protects this console", console)
+        self.assertIn(b"keyless by default", console)
 
         status, state, _ = self.harness.request("GET", "/owner/api/state")
         self.assertEqual(status, 200)
