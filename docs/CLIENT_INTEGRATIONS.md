@@ -2,7 +2,7 @@
 
 This guide connects Hermes Agent, Oh My Pi (`omp`), and the OpenCode **V2 CLI** to this gateway. It documents the OpenAI-compatible inference endpoints, not the gateway's owner API. The guide covers a basic Chat Completions text setup; its evidence section identifies which local client tests actually ran. Auxiliary and non-chat endpoint paths are not implied to work.
 
-The gateway does not require or inspect a client API key. Where a client requires one, use any clearly marked placeholder; it is not a security control.
+The gateway requires no client API key by default: while none is set, a client-supplied placeholder is accepted and is not a security control. The owner can set one from Settings → Access (`docs/OWNER_AUTH.md`); once set, `/v1` verifies it on every request.
 
 ## At a glance
 
@@ -20,7 +20,9 @@ The exact aliases are owner-defined: enable a model and publish its alias in the
 
 The gateway exposes one OpenAI-compatible base URL at `http://<gateway-private-ip>:8765/v1`. Preserve the `/v1` suffix. Chat Completions clients call `/v1/chat/completions`; a Responses client calls `/v1/responses`. The gateway also exposes `GET /v1/models` and the gateway-specific, read-only `GET /v1/alias-catalog`.
 
-**Trusted-LAN security boundary:** there is no API-key authentication or login boundary for callers. A reachable device can call every published model and administer the gateway, including replacing provider credentials. Client-side `api_key` values below are placeholders some SDKs require; the gateway does not verify them and they do not secure access. Do not expose or port-forward this HTTP listener, use an untrusted network, or send sensitive prompts over an untrusted LAN. The service is HTTP-only, not TLS.
+**Trusted-LAN security boundary:** for callers there is no API-key authentication on the model API until the owner sets one — a reachable device can call every published model, by decision. Administering the gateway, including replacing provider credentials, requires an owner sign-in (`docs/OWNER_AUTH.md`); the build currently deployed still has the pre-login boundary described in `docs/TRUSTED_LAN_ADMIN_MODE.md`. Client-side `api_key` values below are placeholders some SDKs require; with no client key set the gateway does not verify them and they do not secure access — once the owner sets one from Settings → Access, `/v1` verifies the bearer header on every request. Do not expose or port-forward this HTTP listener, use an untrusted network, or send sensitive prompts over an untrusted LAN. The service is HTTP-only, not TLS.
+
+**Machine keys are not for clients.** The gateway's third credential — the console-minted machine key (Settings → Machine keys) — is an owner-API credential for MCP and other automation: it never issues a session cookie (it is not an admin login), it is not the client API key above, and `/v1` refuses it with `401 invalid_api_key` even on the keyless default. Client integrations keep using no key (the default) or the client API key; a machine key never appears in client configuration.
 
 The examples below are for a trusted LAN. Replace `10.10.11.109` with the actual private address and `coding` with an alias actually published on your gateway.
 

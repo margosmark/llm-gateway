@@ -67,7 +67,7 @@ blocked. The endpoint uses the same single-listener trusted-LAN policy as the
 owner console and API: any device able to reach the configured private address
 can access it. It is not a public monitoring endpoint.
 
-Two access boundaries, deliberately separate:
+Three credentials, deliberately separate:
 
 * **Owner authentication** protects the console and every `/owner/api/*`
   endpoint. One username/password account, verified server-side with
@@ -84,6 +84,15 @@ Two access boundaries, deliberately separate:
   key from Settings → Access; rotation keeps the previous key valid for
   an explicit 10-minute grace window, and clearing restores keyless
   access. The gateway never edits any client configuration itself.
+* **Machine keys** are a third credential for MCP and other automation
+  against the owner API - console-minted from Settings → Machine keys,
+  the value shown exactly once, stored only as a hash under a separate
+  pepper, scoped `read` or `write`, revocable at once. A machine key is
+  not a login (it never issues a session cookie) and not the model
+  client key (`/v1` refuses it even on the keyless default): it reaches
+  an explicit allowlist of `/owner/api/*` paths only, and even a
+  write-scoped key can never enrol provider credentials or run a device
+  flow. Design and operator detail: `docs/OWNER_AUTH.md`.
 
 The LAN/HTTPS boundary is unchanged: the listener binds an explicit
 private address over plain HTTP, so session cookies are not marked
@@ -112,6 +121,9 @@ hostile Host values, and forwarded headers remain rejected before any
 handler runs. Credentials are entered only into write-only form fields
 and are never read back; no response, log line or export ever contains
 the password, the setup code, a session token or the client key value.
+Machine key values appear exactly once, in the create/rotate response
+that mints them; every later read shows only a display id, and the
+store keeps only a peppered hash.
 
 The gateway port is configurable with `--port` or `GATEWAY_PORT`, except port
 `8766`, which is reserved and rejected because the retired setup listener must

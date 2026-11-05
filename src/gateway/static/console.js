@@ -1848,7 +1848,7 @@
   var LOCAL_PRIVACY_TEXT =
     "Requests to this provider stay on this LAN. Falling back from it to a cloud " +
     "provider sends the prompt off this machine, and that switch is refused unless " +
-    "fallback is authorized and this provider is explicitly confirmed for the alias.";
+    "fallback is authorized and the provider being fallen back to is explicitly confirmed for the alias.";
 
   function renderLocalEndpoint(provider) {
     var input = el("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "http://127.0.0.1:11434" });

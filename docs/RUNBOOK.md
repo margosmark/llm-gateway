@@ -94,7 +94,7 @@ wildcard binds. There is no setup listener and no second port: first-run
 setup, sign-in and password recovery all happen on this one listener or on
 the gateway host itself (§1.4). Port `8766` stays reserved and refused.
 
-Two access boundaries, deliberately separate:
+Three credentials, deliberately separate:
 
 * **Owner console and configuration API** (`/owner/*`) are protected by one
   owner account: username and password, verified server-side with PBKDF2,
@@ -107,6 +107,12 @@ Two access boundaries, deliberately separate:
   reach this address is a caller until the owner sets an optional client
   API key from Settings → Access. `/version`, `/health` and `/metrics` are
   unauthenticated either way.
+* **Machine keys** are the third credential: console-minted automation
+  credentials for the owner API (Settings → Machine keys), scoped `read`
+  or `write`, stored only as a hash under a separate pepper. A machine
+  key is not a login — it never issues a session cookie — and not the
+  client API key; `/v1` refuses it. Procedures in §2, design in
+  `docs/OWNER_AUTH.md`.
 
 Do not expose the address beyond a LAN you trust. The listener is plain
 HTTP, so the owner password, the session cookie and the client key cross
@@ -210,6 +216,61 @@ For related aliases, assign the same optional tag in Models & Routes, then use P
 | Read the model leaderboard (rankings, date x model matrix, fallback rate) | Owner console → Leaderboard |
 | Make the aliases appear in OpenCode's `/models` | Install `integrations/opencode/` once (see §3.1) |
 | Preview a Chat Completions request without sending it | `POST /owner/api/preview` (JSON body, published alias in `model`) |
+| Manage machine keys for MCP/automation | Owner console → Settings → Machine keys (mint, list, rotate, revoke) |
+
+### Machine keys (MCP / automation)
+
+Machine keys are the gateway's third credential (§1.3): console-minted
+bearer tokens for automation against the owner API — the
+`gateway-owner-mcp` server and anything else that cannot sign in
+interactively. They are neither an owner login nor the model client
+key. Design, the exact allowlists and the F1 `clear_cooldowns`
+acceptance: `docs/OWNER_AUTH.md`; MCP contract: `docs/GATEWAY_MCP_SPEC.md`.
+
+- **Mint.** Owner console → Settings → Machine keys → name + scope →
+  **Create**. The value is shown **exactly once** — copy it before you
+  leave the row; the console never shows it again, and it never
+  appears in a log line, an export or `/version`. At most 100 active
+  keys.
+- **List.** The same tab shows display id, name, scope, created and
+  last use for every key — never the value.
+- **Rotate.** Same display id, new value shown once; the old value
+  stops working **immediately** — there is no rotation grace window
+  (unlike the model client key's 10-minute one).
+- **Revoke.** The record is removed and the key is dead on the very
+  next request: the store re-reads its file when the file changes, so
+  no restart and no cache delay.
+- **Scope.** `read` = status/state/leaderboard/capabilities/ledger
+  reads; `write` = those plus configuration mutations. Credential
+  enrolment, device flows, the machine-key endpoints and the
+  client-key endpoint are refused even to `write`; `/v1` refuses every
+  machine key; a key presented with a session cookie is refused with
+  `403 cookie_rejected`.
+- **Hand it to the MCP server** as its key (env/config per that
+  server's README). Never paste a key value into an issue, a log, a
+  chat or a shell that lands in shell history.
+
+**Pepper incident response (`machine_key_pepper`).** If every machine
+key suddenly answers `401 authentication_required` while owner sign-in
+still works, or minting and rotating answer `500
+machine_key_store_unavailable`, the pepper file is deleted, replaced
+or corrupt:
+
+1. The gateway fails **closed on purpose**: a live store re-stats the
+   pepper on every use, so a bad or missing pepper stops every key on
+   the very next request. Nothing keeps answering from a stale cache.
+2. **Restore** `machine_key_pepper` (`0600` in the data directory)
+   from backup, byte-for-byte — digests are keyed on it. Keys work
+   again on the next request; no restart (the same fail-closed rule,
+   forward: restored pepper → restored keys; `tests/test_machine_keys.py`
+   `PepperFailClosedTests`).
+3. If the pepper is unrecoverable: **revoke every dead key** (revoke
+   does not need the pepper), then mint new ones — with no keys left,
+   the next mint creates a fresh pepper. Every old value stays dead.
+4. Never hand-write a stand-in pepper file while old keys exist: their
+   digests were keyed on the original bytes, so they stay dead
+   (correct, but confusing). If a key value may have leaked, rotate it
+   — rotation kills the old value immediately, no grace.
 
 ### Configure a local model endpoint
 
@@ -524,6 +585,9 @@ without editing this file by hand.
 | The owner console will not load | The configured private address is not assigned to the host, or the listener is unavailable | Use the configured private address and port; IPv6 URLs need brackets, e.g. `http://[fd12::1]:8765/owner/` |
 | The console shows *Set up the owner account* instead of the shell | Fresh gateway: no owner account exists yet, so first-run setup is due | Read the one-time setup code from the gateway host — server stdout or the `0600` `owner_setup_code` file; it is never an HTTP response — and complete setup (§1.4). The code is single-use |
 | An owner API call answers `401 authentication_required` | The session cookie is absent or expired (12-hour TTL), or the caller is an unauthenticated LAN peer | Sign in again at `/owner/` (§1.4). On the deployed no-login gateway this response does not occur — that build has no owner session |
+| A machine key answers `401 authentication_required` while owner sign-in still works, or minting/rotating answers `500 machine_key_store_unavailable` | `machine_key_pepper` is missing, replaced or corrupt — the store fails closed on purpose | Pepper incident response, §2 *Machine keys*: restore the original file byte-for-byte, or revoke every dead key and re-mint |
+| A machine key answers `403 scope_required` or `403 machine_key_forbidden` | `scope: read` on a mutation, or the path is outside the read/write allowlists (or the action is a blocked provider action) | Re-mint with `write` scope for configuration paths. Credential enrolment, device flows, the machine-key and client-key endpoints, and `/v1` are refused to every machine key |
+| A machine key answers `403 cookie_rejected` | The request carries both a machine key and an owner session cookie | Send the key without the cookie — the two credentials never combine |
 | Sign-in returns `429 login_throttled` | Five failed attempts inside a 300-second window, per account and per client address | Wait for the `Retry-After` window; the correct password is refused while it is open. The throttle is in memory, so a gateway restart clears it |
 | A provider shows *Failed* | The credential was rejected or the provider is unreachable | **Test connection** and read the message; the stored credential is never displayed |
 | Saving a local endpoint answers `400` with *the endpoint host must be a private or loopback address* | The literal host is outside `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` — a public, link-local/metadata or otherwise-outside address. `[::1]` lands here too: the allowlist has no `::1/128`, so IPv6 loopback is refused on purpose (fail-closed) | Use `127.0.0.1` for a server on the gateway host, or the server's LAN address for one elsewhere. The console placeholder already suggests `http://127.0.0.1:11434` |

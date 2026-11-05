@@ -1,7 +1,9 @@
-# Owner authentication and the client API key
+# Owner authentication, the client API key, and machine keys
 
-Two boundaries, deliberately separate. This document is the design and
-operator reference for both; `docs/TRUSTED_LAN_ADMIN_MODE.md` keeps the
+Three boundaries, deliberately separate: the owner session, the client
+`/v1` API key, and the machine key. This document is the design and
+operator reference for all three - the same three `src/gateway/owner_auth.py`
+counts in its module docstring; `docs/TRUSTED_LAN_ADMIN_MODE.md` keeps the
 listener/trust-model invariants.
 
 > **Status:** implemented in this candidate, **not deployed**. The
@@ -45,8 +47,16 @@ One username/password account. It protects `GET /owner/` and every
   a streaming endpoint cannot emit a frame and a mutation cannot
   half-apply.
 - **CSRF.** No CSRF token: `SameSite=Strict` stops the cookie from being
-  sent cross-site, and the existing canonical `Origin`/`Host` checks
-  still run - before authentication - on every browser mutation.
+  sent cross-site. `check_forwarded_headers` and `check_host` run for
+  every request first - bearer included - and `check_origin` enforces
+  the exact canonical `Origin` on a browser-surface request **before
+  its authentication runs**, with one deliberate exception: it returns
+  early for any request that presents a bearer `Authorization` header
+  (a machine client has no browser Origin). That exception cannot open
+  a cookie-CSRF path: a hostile page cannot set `Authorization` (it is
+  not CORS-safelisted and this gateway serves no CORS headers), so a
+  cookie-carrying browser mutation still faces the exact-Origin check
+  before the session is consulted.
 
 ### Local recovery (forgotten password)
 
@@ -120,14 +130,101 @@ stream): `GET /v1/models`, `GET /v1/alias-catalog`,
 Refusal body: `401` with `type: invalid_api_key`, a
 `WWW-Authenticate: Bearer ...` header and `Cache-Control: no-store`.
 
+## Machine key (the third boundary: console-minted automation credential)
+
+An **automation credential for the owner API** - minted in the owner
+console (Settings → Machine keys), presented as a bearer
+`Authorization` header (`gwmk_` prefix), and nothing else: it is not a
+login (it never issues or satisfies a session cookie) and not the
+client API key (`/v1` refuses a valid machine key with
+`401 invalid_api_key`, even on the keyless default).
+
+- **Mint - shown once.** The value is generated server-side (`gwmk_` +
+  64 hex) and returned exactly once, in the create (and the rotate)
+  response; every later read returns only the random `display_id`,
+  name, scope, timestamps and last use. At most 100 active keys
+  (`MACHINE_KEY_MAX_ACTIVE`).
+- **Storage - hash only.** `machine_keys.json`, `0600` inside the
+  `0700` data directory, holds a SHA-256 digest per key keyed on a
+  **separate pepper** file `machine_key_pepper` (`0600`, independent
+  of `owner_auth.json` - machine-key state never touches the password
+  or sessions). The pepper is stat-keyed: a deleted, replaced or
+  corrupt pepper stops every key on the very next request of a live
+  store (fail-closed, not a latch - restore the file and the keys work
+  again; incident procedure in `docs/RUNBOOK.md` §2).
+- **Scopes.** `read` covers five owner-state reads; `write` covers
+  those plus nine configuration mutations. Both allowlists are
+  mount-relative frozensets in `src/gateway/http/app.py`:
+  - `MACHINE_KEY_READ_PATHS`: `/api/status`, `/api/state`,
+    `/api/leaderboard`, `/api/capabilities`, `/api/ledger/export`.
+  - `MACHINE_KEY_WRITE_PATHS`: `/api/alias`, `/api/alias-group`,
+    `/api/model`, `/api/provider`, `/api/settings`,
+    `/api/capabilities/preview`, `/api/capabilities/run`,
+    `/api/capabilities/decision`, `/api/capabilities/probe/cancel`.
+  - Everything else under `/owner/*` - the machine-key endpoints
+    themselves, `/api/auth/*` (including the client-key endpoint),
+    backup export/import, the console shell - answers `403
+    machine_key_forbidden`; a read-scoped key on a write path answers
+    `403 scope_required`.
+- **`MACHINE_KEY_BLOCKED_PROVIDER_ACTIONS`** - `enroll_key`,
+  `device_start`, `device_poll` - are refused (`403
+  machine_key_forbidden`) even to a write-scoped key: credential
+  enrolment and device flows stay human-session-only.
+- **`cookie_rejected`.** A machine key presented together with an
+  owner session cookie is refused with `403 cookie_rejected` rather
+  than resolved either way: the two credentials never combine.
+- **Origin/Host.** `check_origin` returns early for any bearer request
+  (CSRF bullet above), but `check_forwarded_headers` and `check_host`
+  run before it on every request, machine included.
+
+### `clear_cooldowns` at scope `all` - deliberate F1 acceptance (PM `t_e397267a`)
+
+A **write-scoped** machine key MAY run the cooldown-clear provider
+action (`POST /owner/api/provider` with `action: clear_cooldowns`) at
+`scope` `route`, `provider` **or `all`** and receives `200`. Recorded
+as a deliberate acceptance, not an oversight: the shipped
+`gateway-owner-mcp` server (`margosmark/gateway-owner-mcp` @ `1acc55b`,
+QA `t_cf3205a9` PASS + security `t_ce0945dd` PASS) exposes
+`gateway_clear_cooldowns` with an explicit `scope` of
+`route|provider|all` behind a dry-run and a single-use 120-second
+confirmation nonce, so refusing `all` here would break an automation
+credential the gateway has already shipped and re-gated (the old 401
+expectation was a pre-integration artifact, `t_e74eab5a`).
+
+Reach is bounded by the surface, not by scope - the write scope
+already reaches `POST /owner/api/settings` - and every other half is
+unchanged. Measured on this SHA with a real harness
+(`tests/test_machine_keys.py:MachineKeyHarness`):
+
+| Request | Answer |
+|---|---|
+| write key, `clear_cooldowns`, `scope=route` | `200`, `scope=route` |
+| write key, `clear_cooldowns`, `scope=provider` | `200`, `scope=provider` |
+| write key, `clear_cooldowns`, `scope=all` | `200`, `scope=all` |
+| read key, same call | `403 scope_required` |
+| anonymous, canonical `Origin` | `401 authentication_required` |
+| anonymous, no `Origin` | `403 origin_required` |
+| anonymous or session, hostile `Origin` | `403 origin_mismatch` |
+| machine key + session cookie | `403 cookie_rejected` |
+| `scope` = `ALL` / `" all"` / `"all "` / `everything` | `400 invalid_scope` |
+| non-string `scope` (e.g. a number) | `400 invalid_request` |
+| `clear_cooldowns` with no `scope` and no provider | `404 unknown_provider` |
+| write key on `enroll_key` / `device_start` | `403 machine_key_forbidden` |
+| write key on the machine-key or client-key endpoints | `403 machine_key_forbidden` |
+| read key, `GET /owner/api/state` | `200` |
+| valid machine key on `/v1` | `401 invalid_api_key` |
+
 ## What is never exposed
 
 No HTTP response, log line, export or `/version` body ever contains the
 password, the PBKDF2 hash, a session token, the setup code, or the
-client key value. Status reports presence and transition only
-(`client_key_status()`). The state snapshot cache keys on the auth
-store's revision, so a key or password change is visible on the very
-next read.
+client key value. A machine key value is the one credential with a
+single deliberate appearance: the create/rotate response that mints it,
+exactly once — every later response carries only its `display_id`, and
+the stored file holds only the peppered hash. Status reports presence
+and transition only (`client_key_status()`). The state snapshot cache
+keys on the auth store's revision, so a key or password change is
+visible on the very next read.
 
 ## Tests
 
@@ -142,8 +239,15 @@ next read.
   `app.handle` directly.
 - `tests/test_end_to_end.py` - the HTTP boundary (unauthenticated reads
   and mutations refused, authenticated ones work).
-- `tests/console_dom_test.js` - the sign-in view, the access card, and
-  the copy that keeps the two boundaries apart.
+- `tests/console_dom_test.js` - the sign-in view, the access card (the
+  copy that keeps owner auth and the client key apart), the machine-key
+  Settings UI, and the local-provider privacy copy (N2: the fallback
+  target named as the confirmation party).
+- `tests/test_machine_keys.py` - the machine-key boundary end to end:
+  mint/rotate/revoke, reveal-once, scopes and allowlists,
+  `cookie_rejected`, the `/v1` refusal, the F1 `clear_cooldowns`
+  acceptance at all three scopes, and pepper fail-closed on a live
+  store.
 - `tests/live_owner_auth_smoke.py` - spawns a real gateway on a
   throwaway data directory and a local port, then drives setup, sign-in,
   throttling, key set/rotate/clear and secret non-exposure over actual

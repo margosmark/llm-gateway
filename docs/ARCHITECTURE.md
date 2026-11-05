@@ -10,7 +10,7 @@ The gateway starts one standard-library HTTP server from `gateway.cli`:
 
 | Listener | Default bind | Mounts | Purpose |
 |---|---|---|---|
-| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version`, `/metrics` | direct owner console/configuration behind the owner session, a keyless-by-default OpenAI-compatible API (optional client key), and metadata-only Prometheus exposition |
+| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version`, `/metrics` | direct owner console/configuration behind the owner session, console-minted machine keys for automation on the same listener, a keyless-by-default OpenAI-compatible API (optional client key), and metadata-only Prometheus exposition |
 
 The owner console, credential forms, provider actions, and client API share the
 same listener. `cli.py` refuses wildcard and unsupported binds. Supported classes are
@@ -49,6 +49,18 @@ private `credentials/` directory. Provider adapters receive a handle scoped to
 one provider. Caller-token hashes also use that store. A read of a credential
 is available only to internal adapter/auth code; console state renders presence,
 not values.
+
+`gateway.owner_auth.MachineKeyStore` persists `machine_keys.json` (mode
+`0600` inside the `0700` data directory) beside a **separate**
+`machine_key_pepper` file (also `0600`, independent of `owner_auth.json`,
+so machine-key state never touches the password or sessions). The store
+file holds only a SHA-256 digest per key keyed on that pepper, plus
+metadata (display id, name, scope, created/last-used); the plaintext
+`gwmk_`-prefixed value exists only in the one create/rotate response
+that mints it. The pepper is stat-keyed, so a deleted, replaced or
+corrupt pepper stops every machine key on the very next request of a
+live store — fail-closed, and restored by restoring the file
+(`docs/RUNBOOK.md` §2 incident procedure).
 
 The following state is intentionally in-memory only and disappears on restart:
 
@@ -247,8 +259,11 @@ the rest of the state.
    file. No HTTP surface ever returns the code, and there is no default
    credential.
 5. CSRF has no bootstrap token: `SameSite=Strict` stops the cookie being
-   sent cross-site, and the canonical `Origin`/`Host` checks above still run
-   on every browser mutation. Sessions, the password and the setup code are
+   sent cross-site, and the canonical `Origin` check still runs on every
+   cookie-authenticated browser mutation before authentication (the Host
+   and forwarded-header checks run on every request, bearer included; a
+   machine-key request is exempt from the Origin comparison only — see
+   Machine-key automation). Sessions, the password and the setup code are
    never serialised into responses, logs, exports or `/version`.
 6. The owner console may mutate configuration and enroll credentials on this
    listener. Provider tests and catalogue refreshes are explicit actions; no
@@ -261,6 +276,51 @@ the rest of the state.
 boundary — no login, and a reachable LAN peer administers `/owner/*`
 directly. The session boundary in steps 3-5 ships only with the
 owner-session candidate this document describes; see `docs/OWNER_AUTH.md`.
+
+### Machine-key automation
+
+A machine key is the third credential (`docs/OWNER_AUTH.md`): a bearer
+token presented on `/owner/*` for MCP and other automation. The
+request path, in order:
+
+1. `check_forwarded_headers`, then `check_host` — every request,
+   machine included; there is no bearer exemption.
+2. `check_origin` — returns early for any request that carries a
+   bearer `Authorization` header, so a machine client (which has no
+   browser Origin) skips only the Origin comparison; browser cookie
+   mutations keep the exact-Origin check before authentication (the
+   CSRF step above).
+3. `_authorize` sees the bearer and dispatches to
+   `_authorize_machine_key` — **never** to the session fallback:
+   `MachineKeyStore.authenticate` resolves the key first (so every
+   later refusal is attributable to that key in the access log and no
+   refusal path can fall through to a cookie check), then a session
+   cookie on the same request → `403 cookie_rejected`, then the
+   surface check against `MACHINE_KEY_READ_PATHS` /
+   `MACHINE_KEY_WRITE_PATHS` (else `403 machine_key_forbidden`), then
+   the scope check (read key on a mutation → `403 scope_required`).
+   An unknown key → `401 authentication_required`.
+4. The handler sees a machine principal (`machine_key_authenticated`,
+   `machine_key_scope`), never an owner session: provider actions
+   `enroll_key`, `device_start` and `device_poll` answer `403
+   machine_key_forbidden` (credential enrolment stays
+   human-session-only), and the machine-key endpoints sit behind
+   `_require_signed_in_owner` as a second, handler-level gate (the
+   client-key endpoint is gated at the route level instead: without a
+   bearer it needs the owner session, and a machine key on it is
+   refused `403 machine_key_forbidden`).
+5. `/v1/*` is a different surface: `_authorize` routes it to the
+   client-key check first, where a *valid* machine key is refused
+   with `401 invalid_api_key` — an owner credential and a model
+   credential never cross.
+
+State lives in `MachineKeyStore` (state map above): hash-only file,
+separate stat-keyed pepper, re-read on change — so a revoke or a
+rotate takes effect on the very next request, and a bad pepper fails
+closed. The write scope reaches the nine mutation paths in
+`MACHINE_KEY_WRITE_PATHS`, which is what makes the deliberate F1
+`clear_cooldowns` acceptance (`docs/OWNER_AUTH.md`) reachable at
+`scope=all` while every credential-enrolment path stays shut.
 
 ### Read-only request preview
 
