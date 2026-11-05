@@ -458,6 +458,45 @@ backstop for a process that exits without it.
   monthly allowance and image verdict — each row naming the page it was
   transcribed from and the date it was read. An undocumented dialect is
   refused rather than guessed.
+* **Ollama, llama.cpp server and LM Studio** are one generic
+  `LocalOpenAIAdapter` (`adapters/local_openai.py`) behind three fixed
+  provider ids — `ollama`, `llama_cpp`, `lm_studio` — all speaking the same
+  OpenAI-compatible `/v1` surface. They are the gateway's **only
+  owner-configured outbound destination**, so they carry an egress boundary
+  none of the cloud adapters need (`adapters/local_policy.py`):
+
+  * the endpoint is **read from the config store on every request**, so a
+    saved URL takes effect without a restart and nothing is dialed at boot —
+    a fresh or endpointless provider is `not_configured` and is never
+    contacted;
+  * **save-time** normalisation (`normalize_base_url`) refuses anything that
+    is not a plain `http`/`https` origin with no userinfo, query or fragment
+    and a short plain path, whose host is an IP literal or resolves to
+    *nothing but* addresses inside `127.0.0.0/8`, `10/8`, `172.16/12`,
+    `192.168/16` or `fc00::/7` — public, link-local/metadata
+    (`169.254/16`, `fe80::/10`), multicast, unspecified and broadcast are
+    refused, and a mixed public/private DNS answer is refused rather than
+    averaged;
+  * **connect-time**, the socket's actual peer is read after the TCP
+    handshake and **before any byte of the request is written** — the check
+    is installed as the connection object's socket factory, which puts it
+    before the TLS handshake too, so a refusal on `https://` costs a TCP
+    connection and no SNI, no ClientHello and no credential — with a
+    second check after `connect()` as the backstop on a Python that does not
+    expose the factory hook. The save-time answer can go stale by design
+    (DNS changes); the peer check is what makes a rebound hostname safe;
+  * **redirects are never followed**, to a private or a public address, so a
+    credential is never replayed elsewhere;
+  * the endpoint is written only by the owner-only `set_base_url` provider
+    action (401 without a session), and its refusal reasons are fixed
+    strings that never echo the refused value;
+  * **keyless by default** — no `Authorization` header at all unless the
+    owner enrols an optional local token for a server that demands one — a
+    documented decision (`docs/TODO.md` T15);
+  * **capabilities and cost fail closed until evidenced**: `/v1/models`
+    publishes no capability evidence and no tariff, so tools and image input
+    start `False` and move only on owner approval (or Ollama's documented
+    `POST /api/show`), and cost is never a number.
 
 Adding a provider requires an adapter, model-capability handling, safe error
 classification, registry registration, UI/state treatment, tests, and an

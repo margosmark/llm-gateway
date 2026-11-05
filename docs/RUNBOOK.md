@@ -202,6 +202,7 @@ For related aliases, assign the same optional tag in Models & Routes, then use P
 | Connect a provider | Owner console → Providers |
 | Test a provider | Owner console → Providers → *Test connection* |
 | Refresh a catalogue | Owner console → Providers → *Refresh model catalog* |
+| Configure a local model endpoint | Owner console → Providers → *Ollama (local)* / *llama.cpp server (local)* / *LM Studio (local)* → **Server base URL** → **Save endpoint** (see below) |
 | Enable a model | Owner console → Models & Routes |
 | Create, edit, or publish an alias | Owner console → Models & Routes (use **Edit** on an existing alias; its name remains fixed while its route policy is changed) |
 | Manage profile metadata | Owner console → Profiles (does not restrict LAN invocation) |
@@ -209,6 +210,44 @@ For related aliases, assign the same optional tag in Models & Routes, then use P
 | Read the model leaderboard (rankings, date x model matrix, fallback rate) | Owner console → Leaderboard |
 | Make the aliases appear in OpenCode's `/models` | Install `integrations/opencode/` once (see §3.1) |
 | Preview a Chat Completions request without sending it | `POST /owner/api/preview` (JSON body, published alias in `model`) |
+
+### Configure a local model endpoint
+
+Ollama, `llama-server` and LM Studio all expose the same OpenAI-compatible
+`/v1` surface, so all three are configured the same way and need no key.
+
+1. Sign in at `/owner/` and open **Providers** → *Ollama (local)*,
+   *llama.cpp server (local)* or *LM Studio (local)*.
+2. Enter the **Server base URL** — a plain origin, e.g.
+   `http://127.0.0.1:11434` (Ollama) or `http://192.168.1.20:8080`. A
+   trailing `/v1` is stripped for you; nothing else belongs in the field.
+3. Choose **Save endpoint**. The URL is normalised and checked against the
+   private-destination policy on save, and refused with a fixed reason if it
+   fails — the value you typed is never echoed back (§6).
+4. **Refresh model catalog** to discover models, then enable the ones you
+   want in Models & Routes. Saving an endpoint itself makes **no**
+   connection, and neither does a page load: the gateway opens no
+   connection at boot and only ever dials the saved endpoint.
+
+**Keyless by default.** All three servers are keyless out of the box, so
+the gateway sends no `Authorization` header and you need to enter nothing
+here. Enrol a token in **Optional local token** only if you enabled
+authentication on the server itself (`llama-server --api-key`, LM Studio
+*Require Auth*) — otherwise **Test connection** fails with an
+authentication error.
+
+**The destination is bounded, and checked twice.** The host must be inside
+`127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16` or `fc00::/7`; public,
+link-local and metadata addresses are refused at save time **and again
+against the socket's actual peer after the TCP handshake, before any
+request byte is written** (before the TLS handshake on `https://`). So a
+hostname whose DNS answer changes between saving and requesting is refused
+with nothing sent, and redirects are never followed. Use `127.0.0.1` for a
+server on the gateway host: `[::1]` is outside the allowlist (there is no
+`::1/128`), and `localhost` is refused whenever its answer carries that
+IPv6 half — deliberately fail-closed.
+Capabilities and cost stay **Unknown** until the server or an owner approval
+evidences them, and the gateway never downloads a model.
 
 ### OpenCode Console Jev / System One
 
@@ -487,7 +526,12 @@ without editing this file by hand.
 | An owner API call answers `401 authentication_required` | The session cookie is absent or expired (12-hour TTL), or the caller is an unauthenticated LAN peer | Sign in again at `/owner/` (§1.4). On the deployed no-login gateway this response does not occur — that build has no owner session |
 | Sign-in returns `429 login_throttled` | Five failed attempts inside a 300-second window, per account and per client address | Wait for the `Retry-After` window; the correct password is refused while it is open. The throttle is in memory, so a gateway restart clears it |
 | A provider shows *Failed* | The credential was rejected or the provider is unreachable | **Test connection** and read the message; the stored credential is never displayed |
+| Saving a local endpoint answers `400` with *the endpoint host must be a private or loopback address* | The literal host is outside `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` — a public, link-local/metadata or otherwise-outside address. `[::1]` lands here too: the allowlist has no `::1/128`, so IPv6 loopback is refused on purpose (fail-closed) | Use `127.0.0.1` for a server on the gateway host, or the server's LAN address for one elsewhere. The console placeholder already suggests `http://127.0.0.1:11434` |
+| Saving a local endpoint answers `400` with *the endpoint host did not resolve only to private or loopback addresses* | The hostname resolved to at least one address outside the allowlist — a public or metadata answer, or a mixed one. `localhost` lands here when its `::1` half is in the answer | Point at an IP literal (`127.0.0.1`, `192.168.x.x`) or a hostname that resolves only into the allowlisted ranges |
+| A local endpoint save is refused with *the endpoint must be an http or https URL*, *must not carry a username, password, query or fragment*, *must include a host*, *the endpoint port must be between 1 and 65535*, *the endpoint path must be a short plain prefix such as / or /v1*, or *the endpoint host could not be resolved* | The URL shape, not the destination: a non-HTTP scheme, credentials or a query/fragment embedded in the URL, no host, an unparseable port, a path outside the short plain-prefix grammar (including percent-encoding or `.`/`..`), or a name DNS cannot answer | Paste a plain origin only — `http://127.0.0.1:11434`, `http://192.168.1.20:8080`, optionally with a short path such as `/v1`. A trailing `/v1` is stripped for you, and the refused value is never echoed back |
 | A model shows an empty dialect | The provider serves it but does not document the endpoint | Enter it manually and set the dialect, or use an OpenAI-dialect model |
+| A local request or **Test connection** fails with *the configured local endpoint did not resolve to a private address* | Connect-time peer check: the address the socket actually reached is outside the allowlist. The save-time answer went stale — DNS changed, or the name now rebinds to a public/metadata address | Fix the DNS answer or save an IP literal. This refusal happens after the TCP handshake and **before any request byte** (before the TLS handshake on `https://`), so nothing was sent; it is the boundary that makes a rebinding hostname safe |
+| A local provider answers with *no local endpoint is configured for this provider* | No endpoint has been saved, so the provider stays *not configured* and is never contacted | Save one: Owner console → provider card → **Save endpoint** (§2). Saving an endpoint makes no connection by itself; **Refresh model catalog** is what discovers models |
 | A route says the dialect cannot be translated | The model is served over Google v1beta or includes a control that cannot be represented | Anthropic Messages models are bridged to/from OpenAI dialects; unsupported controls are refused rather than guessed. Google v1beta remains unsupported |
 | Limits show *Unknown* | The provider publishes no machine-readable allowance for that plan | That is the truthful answer. Check the provider's own console |
 | A request failed with *no eligible route* | Every route was excluded | The error names each excluded route and why |
