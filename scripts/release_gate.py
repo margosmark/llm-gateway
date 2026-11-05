@@ -11,10 +11,13 @@ What it checks:
   image revision it reports is the digest of the candidate.
 * **Exposure.** The listener refuses a wildcard bind. The setup surface is
   not reachable from a non-loopback peer.
-* **Hostile probes.** A forwarded header, a wrong ``Host``, a cross-origin
-  mutation and a missing CSRF token are all rejected.
-* **Unauthenticated surface.** The LAN console does not expose the
-  configuration, the profiles, or the credential state without a session.
+* **Hostile probes.** A forwarded header, a wrong ``Host`` and a
+  cross-origin owner mutation are rejected - with or without a session.
+* **The owner-session boundary.** ``/owner/*`` answers ``401`` without a
+  session (state and mutations alike), and the same routes answer for a
+  session the gate establishes inside the candidate container through
+  first-run setup. Only status codes cross that boundary: no credential
+  is hard-coded in this script and none is printed.
 * **Secrets.** The image contains no credential file, and no layer contains
   anything that looks like credential material.
 
@@ -322,6 +325,264 @@ def wait_for(url: str, attempts: int = 40, delay: float = 0.5) -> bool:
     return False
 
 
+#: The Origin a hostile browser would send. The origin layer only judges
+#: mutations, so a *safe* route answers the session gate with this header
+#: attached - which is exactly the angle the checks below pin down.
+HOSTILE_ORIGIN = "http://evil.example.com"
+
+#: The owner routes the boundary checks probe from the host, and the shape
+#: of the mutation they send. The in-container probe below repeats these
+#: because it runs as a standalone program inside the candidate.
+OWNER_STATE_PATH = "/owner/api/state"
+OWNER_MUTATION_PATH = "/owner/api/model"
+OWNER_MUTATION_BODY = {"action": "enable", "provider_id": "unknown", "model_id": "unknown"}
+
+#: Runs **inside the candidate container** (``docker exec <c> python -c``).
+#: It completes first-run setup through the real endpoint - the one-time
+#: setup code is read from the gateway's own store, which is where
+#: ``docs/RUNBOOK.md`` §1.4 tells an operator to find it - then probes the
+#: routes a signed-in console reaches. It prints one JSON object of
+#: integer status codes and nothing else: the setup code, the generated
+#: password and the session token never leave the process, so no secret
+#: can reach the gate's report. ``__name__`` is ``__main__`` only under
+#: ``python -c``; the tests exec this source and call ``collect()``.
+OWNER_SESSION_PROBE_SOURCE = r'''"""Probe the owner-session boundary from inside the candidate container.
+
+Reads ``GATEWAY_DATA_DIR`` and ``GATEWAY_PORT`` (the container image sets
+both), prints one JSON object of integer status codes, and never prints
+the setup code, the password it generates, or the session token.
+"""
+import json
+import os
+import secrets
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, "/app/src")
+
+from gateway.owner_auth import COOKIE_NAME, OwnerAuthStore
+
+HOSTILE_ORIGIN = "http://evil.example.com"
+MUTATION_BODY = json.dumps(
+    {"action": "enable", "provider_id": "unknown", "model_id": "unknown"}
+).encode("utf-8")
+REPORT_KEYS = (
+    "setup",
+    "state",
+    "state_hostile_origin",
+    "mutation",
+    "mutation_hostile_origin",
+)
+
+
+def call(base, method, path, body=None, cookie=None, hostile_origin=False):
+    """One request: ``(status, Set-Cookie or None)``. A transport failure
+    is status 0, never a success."""
+    request = urllib.request.Request(url=base + path, data=body, method=method)
+    if body is not None:
+        request.add_header("Content-Type", "application/json")
+    request.add_header("Origin", HOSTILE_ORIGIN if hostile_origin else base)
+    if cookie:
+        request.add_header("Cookie", "%s=%s" % (COOKIE_NAME, cookie))
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.headers.get("Set-Cookie")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers.get("Set-Cookie")
+    except (urllib.error.URLError, OSError):
+        return 0, None
+
+
+def establish_session(base, data_dir):
+    """``(setup status, session token)``; ``(0, None)`` when there is no
+    pending setup code. Never guesses a credential."""
+    code = OwnerAuthStore(Path(data_dir)).read_setup_code()
+    if not code:
+        return 0, None
+    body = json.dumps(
+        {
+            "username": "release-gate",
+            "password": secrets.token_urlsafe(24),
+            "setup_code": code,
+        }
+    ).encode("utf-8")
+    status, set_cookie = call(base, "POST", "/owner/api/auth/setup", body)
+    if status != 200 or not set_cookie:
+        return status, None
+    name, _, token = set_cookie.partition(";")[0].partition("=")
+    return status, (token if name == COOKIE_NAME else None)
+
+
+def collect(base, data_dir):
+    """Every status this probe reports: a fixed key set of integers."""
+    statuses = {key: 0 for key in REPORT_KEYS}
+    statuses["setup"], cookie = establish_session(base, data_dir)
+    if not cookie:
+        return statuses
+    statuses["state"] = call(base, "GET", "/owner/api/state", cookie=cookie)[0]
+    statuses["state_hostile_origin"] = call(
+        base, "GET", "/owner/api/state", cookie=cookie, hostile_origin=True
+    )[0]
+    statuses["mutation"] = call(
+        base, "POST", "/owner/api/model", body=MUTATION_BODY, cookie=cookie
+    )[0]
+    statuses["mutation_hostile_origin"] = call(
+        base,
+        "POST",
+        "/owner/api/model",
+        body=MUTATION_BODY,
+        cookie=cookie,
+        hostile_origin=True,
+    )[0]
+    return statuses
+
+
+if __name__ == "__main__":
+    print(
+        json.dumps(
+            collect(
+                "http://127.0.0.1:" + os.environ.get("GATEWAY_PORT", "8765"),
+                os.environ.get("GATEWAY_DATA_DIR", "/var/lib/gateway"),
+            )
+        )
+    )
+'''
+
+
+def run_owner_session_probe(
+    container: str, run_fn: Any = None
+) -> tuple[dict[str, int], str]:
+    """Run the session probe inside the candidate container.
+
+    The source travels from **this checkout** into the container, so the
+    artifact under test cannot substitute its own answers. What comes back
+    must be a JSON object of integers; anything else yields no statuses at
+    all (every signed-in check fails) plus a short, secret-free note for
+    the report.
+    """
+    runner = run if run_fn is None else run_fn
+    try:
+        result = runner(
+            ["docker", "exec", container, "python", "-c", OWNER_SESSION_PROBE_SOURCE],
+            timeout=90,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        return {}, f"the probe could not run: {type(exc).__name__}"
+    stdout = (getattr(result, "stdout", "") or "").strip()
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        stderr = (getattr(result, "stderr", "") or "").strip().splitlines()
+        note = stderr[-1][:160] if stderr else "the probe printed no status report"
+        return {}, note
+    statuses = {
+        key: value
+        for key, value in data.items()
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    return statuses, ""
+
+
+def record_pre_auth_checks(gate: Gate, base: str, http_fn: Any = None) -> None:
+    """The unauthenticated half of the owner-session boundary.
+
+    These are the two checks that used to demand the superseded no-session
+    behaviour (a 200 state GET, a mutation dispatched with no session) and
+    therefore failed every release against the owner-auth lineage. The
+    contract now is ``401`` for both, plus ``403`` for a cross-origin
+    mutation - the origin layer answers before the session gate does.
+    """
+    request = http if http_fn is None else http_fn
+
+    status, _ = request(base + OWNER_STATE_PATH)
+    gate.record(
+        "the console state is refused without an owner session",
+        status == 401,
+        f"status={status}",
+    )
+
+    status, _ = request(base + OWNER_STATE_PATH, headers={"Origin": HOSTILE_ORIGIN})
+    gate.record(
+        "a hostile Origin does not open the owner state",
+        status == 401,
+        f"status={status}",
+    )
+
+    status, _ = request(
+        base + OWNER_MUTATION_PATH,
+        method="POST",
+        headers={"Origin": base},
+        body=dict(OWNER_MUTATION_BODY),
+    )
+    gate.record(
+        "an owner mutation is refused without a session",
+        status == 401,
+        f"status={status}",
+    )
+
+    status, _ = request(
+        base + OWNER_MUTATION_PATH,
+        method="POST",
+        headers={"Origin": HOSTILE_ORIGIN},
+        body=dict(OWNER_MUTATION_BODY),
+    )
+    gate.record(
+        "a cross-origin owner mutation is refused",
+        status == 403,
+        f"status={status}",
+    )
+
+
+def record_signed_in_checks(
+    gate: Gate, statuses: dict[str, int], note: str = ""
+) -> None:
+    """The signed-in half: the same routes must answer for a session.
+
+    Without it a gateway that refused *every* request would satisfy the
+    unauthenticated checks. ``note`` explains a probe that produced no
+    statuses at all, so it is attached to the first check - the one whose
+    failure explains the rest.
+    """
+    setup = statuses.get("setup", 0)
+    gate.record(
+        "first-run setup issues an owner session",
+        setup == 200,
+        f"status={setup}" + (f" ({note})" if note else ""),
+    )
+
+    state = statuses.get("state", 0)
+    gate.record(
+        "the console state answers a signed-in session",
+        state == 200,
+        f"status={state}",
+    )
+
+    hostile = statuses.get("state_hostile_origin", 0)
+    gate.record(
+        "a hostile Origin does not block a signed-in safe GET",
+        hostile == 200,
+        f"status={hostile}",
+    )
+
+    mutation = statuses.get("mutation", 0)
+    gate.record(
+        "a signed-in same-origin owner mutation is dispatched",
+        mutation not in (0, 401, 403),
+        f"status={mutation}",
+    )
+
+    cross = statuses.get("mutation_hostile_origin", 0)
+    gate.record(
+        "a signed-in cross-origin owner mutation is refused",
+        cross == 403,
+        f"status={cross}",
+    )
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: release_gate.py <image-reference>", file=sys.stderr)
@@ -476,16 +737,6 @@ def main(argv: list[str]) -> int:
         status, payload = http(base + "/version", headers={"Host": "evil.example.com"})
         gate.record("a mismatched Host is rejected", status == 403, f"status={status}")
 
-        status, payload = http(
-            base + "/owner/api/state",
-            headers={"Origin": "http://evil.example.com"},
-        )
-        gate.record(
-            "the console exposes state directly (safe GET ignores Origin)",
-            status == 200,
-            f"status={status}",
-        )
-
         status, payload = http(base + "/setup/api/state")
         gate.record(
             "the retired setup path is not served",
@@ -493,17 +744,12 @@ def main(argv: list[str]) -> int:
             f"status={status}",
         )
 
-        status, payload = http(
-            base + "/owner/api/model",
-            method="POST",
-            headers={"Origin": base},
-            body={"action": "enable", "provider_id": "unknown", "model_id": "unknown"},
-        )
-        gate.record(
-            "same-origin owner mutation is dispatched without session or CSRF",
-            status != 401 and status != 403,
-            f"status={status}",
-        )
+        # The owner-session boundary, asserted in both directions: the
+        # routes refuse a caller with no session, and they answer for a
+        # session the gate establishes inside the candidate container.
+        record_pre_auth_checks(gate, base)
+        statuses, note = run_owner_session_probe(container)
+        record_signed_in_checks(gate, statuses, note)
 
         listeners = run(
             [
