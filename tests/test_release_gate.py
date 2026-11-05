@@ -1,4 +1,4 @@
-"""Tests for the release gate's listener inspection.
+"""Tests for the release gate.
 
 Regression cover for **R3**: the gate read ``/proc/net/tcp`` as raw strings
 and compared them to ``0.0.0.0``, but the kernel writes hexadecimal
@@ -12,18 +12,45 @@ The parser must:
 * recognise a **wildcard** bind in both families;
 * recognise the explicit loopback binds;
 * ignore sockets that are not listening.
+
+The owner-session boundary checks are covered in the other half of this
+file: the gate must refuse the superseded no-session answers (a ``200``
+state GET, a mutation dispatched with no session) that made it fail every
+release against the owner-auth lineage, and it must demand the documented
+``401``/``403`` refusals without a session and the real answers with one.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
-GATE = Path(__file__).resolve().parent.parent / "scripts" / "release_gate.py"
+from gateway.adapters.registry import AdapterRegistry
+from gateway.auth import ProfileAuth
+from gateway.config import ConfigStore
+from gateway.core.routing import Router
+from gateway.credentials import CredentialStore
+from gateway.http.app import GatewayApp
+from gateway.http.core import Server
+from gateway.http.security import (
+    SecurityPolicy,
+    build_allowed_hosts,
+    build_canonical_origins,
+)
+from gateway.logging import RequestLogger
+from gateway.observability import LimitStore, RequestLedger
+from tests.test_end_to_end import free_port
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_ROOT = REPO_ROOT / "src"
+GATE = REPO_ROOT / "scripts" / "release_gate.py"
 _spec = importlib.util.spec_from_file_location("release_gate_under_test", GATE)
 assert _spec and _spec.loader
 release_gate = importlib.util.module_from_spec(_spec)
@@ -32,6 +59,17 @@ sys.modules[_spec.name] = release_gate
 _spec.loader.exec_module(release_gate)
 
 TCP_HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode"
+
+#: What the boundary checks expect from a gateway that enforces the owner
+#: session: refusal without one, service with one.
+PRE_AUTH_ANSWERS = [401, 401, 401, 403]
+SIGNED_IN_ANSWERS = {
+    "setup": 200,
+    "state": 200,
+    "state_hostile_origin": 200,
+    "mutation": 404,
+    "mutation_hostile_origin": 403,
+}
 
 
 class DigestResolutionTests(unittest.TestCase):
@@ -314,6 +352,331 @@ class ExpectedListenerTests(unittest.TestCase):
                 [("127.0.0.1", 18775), ("127.0.0.1", 8766)]
             )
         )
+
+
+class PreAuthBoundaryTests(unittest.TestCase):
+    """Without a session: ``401`` on state and mutation, ``403`` cross-origin.
+
+    The two checks rewritten here used to demand the **superseded**
+    no-session answers - a ``200`` state GET and a mutation dispatched
+    with no session - so every release against the owner-auth lineage
+    failed the gate on a false positive.
+    """
+
+    BASE = "http://127.0.0.1:18775"
+
+    def _record(self, answers: list[int]):
+        """Run the checks against an ``http()`` stand-in that answers in order."""
+        gate = release_gate.Gate()
+        queue = list(answers)
+        calls: list[dict[str, Any]] = []
+
+        def fake(url, method="GET", headers=None, body=None, timeout=10.0):
+            calls.append(
+                {"url": url, "method": method, "headers": dict(headers or {}), "body": body}
+            )
+            # An exhausted queue behaves like a gateway that answers
+            # nothing, so a missing answer fails a check instead of
+            # raising out of the gate.
+            return (queue.pop(0) if queue else 500), {}
+
+        release_gate.record_pre_auth_checks(gate, self.BASE, http_fn=fake)
+        return gate, calls
+
+    def test_the_documented_refusals_pass(self) -> None:
+        gate, _ = self._record(list(PRE_AUTH_ANSWERS))
+        self.assertTrue(gate.ok, [check.to_dict() for check in gate.checks])
+        self.assertEqual(len(gate.checks), 4)
+
+    def test_the_superseded_no_session_answers_fail(self) -> None:
+        """A 200 state GET and a dispatched mutation are now failures."""
+        gate, _ = self._record([200, 200, 404, 403])
+        self.assertFalse(gate.ok)
+        failed = [check.name for check in gate.checks if not check.passed]
+        self.assertEqual(
+            failed,
+            [
+                "the console state is refused without an owner session",
+                "a hostile Origin does not open the owner state",
+                "an owner mutation is refused without a session",
+            ],
+        )
+
+    def test_only_401_counts_as_the_session_refusal(self) -> None:
+        """A 403 on state means the origin layer answered, not the session gate."""
+        gate, _ = self._record([403, 401, 401, 403])
+        self.assertFalse(gate.ok)
+        self.assertFalse(gate.checks[0].passed)
+        self.assertTrue(gate.checks[1].passed)
+
+    def test_a_gateway_that_answers_nothing_fails_every_check(self) -> None:
+        gate, _ = self._record([])
+        self.assertFalse(gate.ok)
+        self.assertEqual([check.passed for check in gate.checks], [False] * 4)
+
+    def test_the_probes_hit_the_documented_routes(self) -> None:
+        gate, calls = self._record(list(PRE_AUTH_ANSWERS))
+        self.assertTrue(gate.ok)
+        self.assertEqual(len(calls), 4)
+
+        state, hostile_state, mutation, cross_origin = calls
+        self.assertEqual(state["method"], "GET")
+        self.assertTrue(str(state["url"]).endswith(release_gate.OWNER_STATE_PATH))
+        self.assertNotIn("Origin", state["headers"])
+
+        self.assertEqual(hostile_state["method"], "GET")
+        self.assertEqual(str(hostile_state["url"]), str(state["url"]))
+        self.assertEqual(hostile_state["headers"].get("Origin"), release_gate.HOSTILE_ORIGIN)
+
+        self.assertEqual(mutation["method"], "POST")
+        self.assertTrue(str(mutation["url"]).endswith(release_gate.OWNER_MUTATION_PATH))
+        self.assertEqual(mutation["headers"].get("Origin"), self.BASE)
+        self.assertEqual(mutation["body"], dict(release_gate.OWNER_MUTATION_BODY))
+
+        self.assertEqual(cross_origin["method"], "POST")
+        self.assertEqual(str(cross_origin["url"]), str(mutation["url"]))
+        self.assertEqual(cross_origin["headers"].get("Origin"), release_gate.HOSTILE_ORIGIN)
+        self.assertEqual(cross_origin["body"], dict(release_gate.OWNER_MUTATION_BODY))
+
+
+class SignedInBoundaryTests(unittest.TestCase):
+    """With a session: the same routes must answer, or the gate is blind.
+
+    Without this half a gateway that refused *every* request would satisfy
+    the unauthenticated checks.
+    """
+
+    def test_the_documented_statuses_pass(self) -> None:
+        gate = release_gate.Gate()
+        release_gate.record_signed_in_checks(gate, dict(SIGNED_IN_ANSWERS))
+        self.assertTrue(gate.ok, [check.to_dict() for check in gate.checks])
+        self.assertEqual(len(gate.checks), 5)
+
+    def test_a_session_that_opens_nothing_fails(self) -> None:
+        statuses = dict(SIGNED_IN_ANSWERS, state=401, state_hostile_origin=401, mutation=401)
+        gate = release_gate.Gate()
+        release_gate.record_signed_in_checks(gate, statuses)
+        self.assertFalse(gate.ok)
+        failed = [check.name for check in gate.checks if not check.passed]
+        self.assertEqual(
+            failed,
+            [
+                "the console state answers a signed-in session",
+                "a hostile Origin does not block a signed-in safe GET",
+                "a signed-in same-origin owner mutation is dispatched",
+            ],
+        )
+
+    def test_a_probe_that_reported_nothing_fails_every_check(self) -> None:
+        gate = release_gate.Gate()
+        release_gate.record_signed_in_checks(gate, {})
+        self.assertFalse(gate.ok)
+        self.assertEqual([check.passed for check in gate.checks], [False] * 5)
+
+    def test_a_transport_failure_is_not_read_as_a_dispatch(self) -> None:
+        """Status 0 is the probe's transport failure, never a success."""
+        statuses = dict(SIGNED_IN_ANSWERS, mutation=0)
+        gate = release_gate.Gate()
+        release_gate.record_signed_in_checks(gate, statuses)
+        self.assertFalse(gate.ok)
+        dispatch = next(c for c in gate.checks if c.name.endswith("is dispatched"))
+        self.assertFalse(dispatch.passed)
+        self.assertEqual(dispatch.detail, "status=0")
+
+    def test_a_probe_failure_is_explained_on_the_first_check(self) -> None:
+        gate = release_gate.Gate()
+        release_gate.record_signed_in_checks(gate, {}, note="exec failed")
+        self.assertIn("exec failed", gate.checks[0].detail)
+        # The note belongs to the check whose failure explains the rest.
+        self.assertNotIn("exec failed", gate.checks[-1].detail)
+
+
+class OwnerSessionProbeSourceTests(unittest.TestCase):
+    """The probe the gate ships into the candidate container."""
+
+    def test_the_probe_source_compiles(self) -> None:
+        compile(release_gate.OWNER_SESSION_PROBE_SOURCE, "<owner-session-probe>", "exec")
+
+    def test_the_probe_source_is_sent_verbatim(self) -> None:
+        """The artifact under test cannot substitute its own answers."""
+        seen: list[list[str]] = []
+
+        def fake_run(args, timeout=120):
+            seen.append(list(args))
+            return subprocess.CompletedProcess(args, 0, '{"setup": 200}', "")
+
+        statuses, note = release_gate.run_owner_session_probe("a-container", run_fn=fake_run)
+        self.assertEqual(note, "")
+        self.assertEqual(statuses, {"setup": 200})
+        self.assertEqual(seen[0][:5], ["docker", "exec", "a-container", "python", "-c"])
+        self.assertEqual(seen[0][5], release_gate.OWNER_SESSION_PROBE_SOURCE)
+
+    def test_a_probe_that_prints_nothing_fails_closed(self) -> None:
+        def fake_run(args, timeout=120):
+            return subprocess.CompletedProcess(args, 1, "", "python: can't open file")
+
+        statuses, note = release_gate.run_owner_session_probe("a-container", run_fn=fake_run)
+        self.assertEqual(statuses, {})
+        self.assertIn("can't open file", note)
+
+    def test_a_non_object_report_is_rejected(self) -> None:
+        for stdout in ("[200, 200]", '"200"', "not json", ""):
+            with self.subTest(stdout=stdout):
+                def fake_run(args, timeout=120, stdout=stdout):
+                    return subprocess.CompletedProcess(args, 0, stdout, "")
+
+                statuses, note = release_gate.run_owner_session_probe(
+                    "a-container", run_fn=fake_run
+                )
+                self.assertEqual(statuses, {})
+                self.assertTrue(note)
+
+    def test_non_integer_values_are_dropped(self) -> None:
+        stdout = json.dumps({"setup": "200", "state": True, "mutation": 404})
+
+        def fake_run(args, timeout=120):
+            return subprocess.CompletedProcess(args, 0, stdout, "")
+
+        statuses, note = release_gate.run_owner_session_probe("a-container", run_fn=fake_run)
+        self.assertEqual(statuses, {"mutation": 404})
+        self.assertEqual(note, "")
+
+    def test_a_runner_that_raises_is_reported_not_raised(self) -> None:
+        def fake_run(args, timeout=120):
+            raise subprocess.TimeoutExpired(args, 90)
+
+        statuses, note = release_gate.run_owner_session_probe("a-container", run_fn=fake_run)
+        self.assertEqual(statuses, {})
+        self.assertIn("TimeoutExpired", note)
+
+
+def _no_release_identity() -> dict[str, str]:
+    """The fixture reports no release identity; the boundary checks do not read one."""
+    return {}
+
+
+class _LiveGateway:
+    """A live gateway on a free loopback port with a pending first-run
+    setup code - the state the release gate's disposable container is
+    always in when the probe runs."""
+
+    def __init__(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.host = "127.0.0.1"
+        self.port = free_port(self.host)
+        config = ConfigStore(self.data_dir / "config.json")
+        credentials = CredentialStore(self.data_dir)
+        registry = AdapterRegistry()
+        policy = SecurityPolicy(
+            allowed_hosts=build_allowed_hosts(self.host, self.port),
+            canonical_origins=build_canonical_origins(self.host, self.port),
+        )
+        self.app = GatewayApp(
+            config=config,
+            credentials=credentials,
+            router=Router(config, registry, ledger=RequestLedger()),
+            registry=registry,
+            profile_auth=ProfileAuth(config, credentials),
+            policy=policy,
+            ledger=RequestLedger(),
+            limits=LimitStore(),
+            release_identity=_no_release_identity,
+            base_url=f"http://{self.host}:{self.port}",
+            mounts=("/owner",),
+            logger=RequestLogger(enabled=False),
+        )
+        self.server = Server(self.host, self.port, self.app.handle)
+        self.server.start_background()
+
+    @property
+    def base(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    def collect(self) -> dict[str, int]:
+        """Run the exact source the gate ships, the way the container runs it.
+
+        ``python -c`` with ``GATEWAY_DATA_DIR``/``GATEWAY_PORT`` in the
+        environment - the same entry point ``docker exec`` uses - so the
+        ``__main__`` block, the imports and the printed report are all
+        exercised, not just ``collect()``.
+        """
+        env = dict(
+            os.environ,
+            GATEWAY_DATA_DIR=str(self.data_dir),
+            GATEWAY_PORT=str(self.port),
+            PYTHONPATH=str(SRC_ROOT),
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", release_gate.OWNER_SESSION_PROBE_SOURCE],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise AssertionError(f"the probe exited {result.returncode}: {result.stderr[-500:]}")
+        return json.loads(result.stdout)
+
+    def close(self) -> None:
+        self.server.stop()
+        self._tmp.cleanup()
+
+
+class OwnerSessionProbeLiveTests(unittest.TestCase):
+    """The probe source against a real gateway over a real socket."""
+
+    def setUp(self) -> None:
+        self.gateway = _LiveGateway()
+        self.addCleanup(self.gateway.close)
+
+    def test_it_completes_first_run_setup_and_reports_the_documented_statuses(self) -> None:
+        statuses = self.gateway.collect()
+        self.assertEqual(statuses, SIGNED_IN_ANSWERS)
+        # Only integers cross the boundary, so no secret can ride along.
+        self.assertTrue(all(isinstance(value, int) for value in statuses.values()))
+
+    def test_the_statuses_satisfy_the_gate_checks(self) -> None:
+        gate = release_gate.Gate()
+        release_gate.record_signed_in_checks(gate, self.gateway.collect())
+        self.assertTrue(gate.ok, [check.to_dict() for check in gate.checks])
+
+    def test_a_second_run_never_guesses_a_credential(self) -> None:
+        """The setup code is single-use; a later run reports no session."""
+        self.assertEqual(self.gateway.collect()["setup"], 200)
+        statuses = self.gateway.collect()
+        self.assertEqual(statuses, dict.fromkeys(statuses, 0))
+        gate = release_gate.Gate()
+        release_gate.record_signed_in_checks(gate, statuses)
+        self.assertFalse(gate.ok)
+
+
+class PreAuthBoundaryLiveTests(unittest.TestCase):
+    """The host-side refusal checks against a real gateway."""
+
+    def setUp(self) -> None:
+        self.gateway = _LiveGateway()
+        self.addCleanup(self.gateway.close)
+
+    def test_the_unauthenticated_boundary_is_401_and_403(self) -> None:
+        gate = release_gate.Gate()
+        release_gate.record_pre_auth_checks(gate, self.gateway.base)
+        self.assertTrue(gate.ok, [check.to_dict() for check in gate.checks])
+        self.assertEqual([check.detail for check in gate.checks], ["status=401"] * 3 + ["status=403"])
+
+    def test_the_superseded_answers_are_not_what_the_gateway_gives(self) -> None:
+        """Guard the expectation itself: the old checks wanted 200 and a
+        dispatched mutation, and neither is what this boundary serves."""
+        status, _ = release_gate.http(self.gateway.base + release_gate.OWNER_STATE_PATH)
+        self.assertEqual(status, 401)
+        status, _ = release_gate.http(
+            self.gateway.base + release_gate.OWNER_MUTATION_PATH,
+            method="POST",
+            headers={"Origin": self.gateway.base},
+            body=dict(release_gate.OWNER_MUTATION_BODY),
+        )
+        self.assertEqual(status, 401)
 
 
 if __name__ == "__main__":
