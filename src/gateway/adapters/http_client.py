@@ -98,6 +98,36 @@ def close_all_clients() -> None:
 atexit.register(close_all_clients)
 
 
+def _install_peer_check(
+    connection: http.client.HTTPConnection,
+    peer_check: Callable[[Any], None],
+) -> None:
+    """Put the destination check in front of every byte this connection sends.
+
+    ``http.client`` keeps its socket factory on the *instance* as
+    ``_create_connection`` (normally ``socket.create_connection``), so
+    replacing it here is what makes the check run after the TCP handshake
+    and **before the TLS handshake**: ``HTTPSConnection.connect`` calls the
+    factory first and only then wraps whatever socket it returned. A refusal
+    therefore costs a TCP connection and nothing else - no SNI, no handshake,
+    no request line, no credential.
+
+    The replacement keeps the original factory's exact contract (positional
+    ``(address, timeout, source_address)``) so connection setup behaves
+    identically for a peer that passes.
+    """
+    def create(address, timeout=None, source_address=None):  # noqa: ANN001 - mirrors socket.create_connection
+        sock = socket.create_connection(address, timeout, source_address)
+        try:
+            peer_check(sock)
+        except BaseException:
+            sock.close()
+            raise
+        return sock
+
+    connection._create_connection = create  # type: ignore[attr-defined]
+
+
 class _ConnectionPool:
     """Bounded idle keep-alive connections, keyed by origin.
 
@@ -106,12 +136,20 @@ class _ConnectionPool:
     itself is only touched under the lock.
     """
 
-    def __init__(self, max_idle: int = DEFAULT_IDLE_CONNECTIONS) -> None:
+    def __init__(
+        self,
+        max_idle: int = DEFAULT_IDLE_CONNECTIONS,
+        peer_check: Callable[[Any], None] | None = None,
+    ) -> None:
         self.max_idle = max_idle
         self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
         self._lock = threading.Lock()
         self._closed = False
         self._ssl_context: ssl.SSLContext | None = None
+        #: The connect-time destination check, installed on every connection
+        #: this pool creates. ``None`` for every public provider, so their
+        #: connections are byte-for-byte what they were before.
+        self.peer_check = peer_check
 
     @property
     def closed(self) -> bool:
@@ -186,8 +224,14 @@ class _ConnectionPool:
     def _new(self, key: tuple[str, str, int], timeout: float) -> http.client.HTTPConnection:
         scheme, host, port = key
         if scheme == "https":
-            return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._context())
-        return http.client.HTTPConnection(host, port, timeout=timeout)
+            connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+                host, port, timeout=timeout, context=self._context()
+            )
+        else:
+            connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        if self.peer_check is not None:
+            _install_peer_check(connection, self.peer_check)
+        return connection
 
     def release(self, key: tuple[str, str, int], connection: http.client.HTTPConnection, reusable: bool) -> None:
         """Return *connection* to the pool, or close it."""
@@ -276,6 +320,7 @@ class UpstreamClient:
         timeout: float = DEFAULT_TIMEOUT,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         user_agent: str = "personal-llm-gateway/2.0",
+        peer_check: Callable[[Any], None] | None = None,
     ) -> None:
         #: The read budget: one wait for the provider's own bytes.
         self.timeout = timeout
@@ -284,7 +329,10 @@ class UpstreamClient:
         #: judged differently).
         self.connect_timeout = connect_timeout
         self.user_agent = user_agent
-        self._pool = _ConnectionPool()
+        #: The connect-time destination check. ``None`` for every public
+        #: provider: they keep exactly the behaviour they had.
+        self.peer_check = peer_check
+        self._pool = _ConnectionPool(peer_check=peer_check)
         self._active_lock = threading.Lock()
         self._active: set[http.client.HTTPConnection] = set()
         _LIVE_CLIENTS.add(self)
@@ -397,6 +445,14 @@ class UpstreamClient:
                         provider_id=provider_id,
                     ) from None
                 self._arm(connection, effective_timeout)
+            if self._pool.peer_check is not None and connection.sock is not None:
+                # Backstop for the pre-TLS hook in _install_peer_check:
+                # whatever the socket factory did, the address actually
+                # reached is re-read here - after the connect, before any
+                # request byte - so a refusal still happens with nothing
+                # written even on a Python whose connection object does not
+                # expose the factory hook.
+                self._pool.peer_check(connection.sock)
             try:
                 # --- read budget: writing the request. Sending is the
                 # gateway's own bytes; a provider that never reads them is

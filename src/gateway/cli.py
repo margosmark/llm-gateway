@@ -14,6 +14,8 @@ from typing import Any, NoReturn
 
 from gateway.adapters.anthropic import AnthropicAdapter
 from gateway.adapters.chatgpt_codex import ChatGPTCodexAdapter
+from gateway.adapters.local_openai import FLAVORS as LOCAL_FLAVORS
+from gateway.adapters.local_openai import LocalOpenAIAdapter
 from gateway.adapters.opencode_go import OpenCodeGoAdapter
 from gateway.adapters.opencode_console import OpenCodeConsoleAdapter
 from gateway.adapters.registry import AdapterRegistry
@@ -448,6 +450,13 @@ def build_application(
     registry.register(ChatGPTCodexAdapter(credentials.provider_handle("chatgpt_codex")))
     registry.register(OpenCodeGoAdapter(credentials.provider_handle("opencode_go")))
     registry.register(OpenCodeConsoleAdapter(credentials.provider_handle("opencode_console")))
+    # The three local servers share one adapter. Each reads its own saved
+    # endpoint from the config store on every request, so registering one
+    # makes no outbound call and a saved URL takes effect without a restart.
+    for provider_id in LOCAL_FLAVORS:
+        registry.register(
+            LocalOpenAIAdapter(provider_id, credentials.provider_handle(provider_id), config)
+        )
     reconciled: list[tuple[str, str]] = []
     with config.mutate() as snapshot:
         for provider_id in registry.provider_ids():
