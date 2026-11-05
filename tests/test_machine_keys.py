@@ -9,9 +9,9 @@ Three credentials, asserted apart on purpose:
   hash-only on disk, scoped ``read`` or ``write``, revocable at once.
 
 Everything here runs against an in-process harness: no server, no
-provider call, no production data directory, no lifecycle command. The
-cases map to the acceptance matrix in ``gateway-mcp-spec.md``
-(t_2fce4e14): A2, A3, A6, A7, A7a, A7b, A7c, A21 and A23.
+provider call, no production data directory, no lifecycle command.
+The cases map to the acceptance matrix in ``docs/GATEWAY_MCP_SPEC.md``
+(vendored from t_2fce4e14): A2, A3, A6, A7, A7a, A7b, A7c, A21 and A23.
 """
 from __future__ import annotations
 

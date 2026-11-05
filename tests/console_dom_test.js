@@ -1564,6 +1564,12 @@ check("a local provider card asks for an endpoint and states the privacy rule", 
   // The privacy warning the owner has to see next to the field.
   assert(text.includes("stay on this LAN"), "the local privacy rule must be stated");
   assert(text.includes("explicitly confirmed for the alias"), "the fallback consent rule must be stated");
+  // N2 reword: the confirmation party is the fallback target, never the
+  // card's own (local) provider. The old party name must be gone.
+  assert(
+    !text.includes("this provider is explicitly confirmed"),
+    "the confirmation party must be the fallback target, not this provider"
+  );
   // The loopback/bridge-mode caveat, and the no-download rule.
   assert(text.includes("127.0.0.1 reaches a server"), "the host-networking caveat must be stated");
   assert(text.includes("bridge-networked"), "the bridge-mode caveat must be stated");

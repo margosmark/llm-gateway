@@ -8,7 +8,9 @@ device that can reach the configured address is an administrator, there
 is no password, login or session cookie" - described the release that is
 running today. The owner has explicitly reversed that decision for the
 console: this candidate adds an owner account, a server-side session
-cookie, and an optional model client API key. Independent QA and
+cookie, an optional model client API key, and console-minted machine
+keys for automation (the third credential — `docs/OWNER_AUTH.md`).
+Independent QA and
 security review must pass on the same SHA before any deployment, so the
 running gateway keeps the old boundary until then.
 
@@ -44,6 +46,14 @@ What changed in this candidate:
   `Authorization: Bearer <key>`; rotation keeps the previous key valid
   for an explicit 10-minute grace window; clearing restores keyless
   access. The gateway never edits a client configuration itself.
+- **Machine keys** are a third credential, separate from both of the
+  above: console-minted from Settings → Machine keys for MCP and other
+  automation, shown exactly once, stored only as a hash under a
+  separate pepper, scoped `read` or `write`. They are neither an admin
+  login (no session cookie is ever issued for one) nor the model client
+  API key (`/v1` refuses a machine key), and they reach only an
+  explicit allowlist of owner-API paths: even a write-scoped key can
+  never enrol provider credentials or run a device flow.
 
 ## Trust boundary
 
