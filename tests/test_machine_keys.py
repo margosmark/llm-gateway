@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -672,6 +673,62 @@ class AuditAndLeakageTests(unittest.TestCase):
             self.assertEqual(record["method"], "POST")
             self.assertEqual(record["path"], "/owner/api/settings")
 
+    def test_lifecycle_rows_name_the_target_display_id_and_never_the_value(self) -> None:
+        """F3: create, rotate and revoke are attributable from the log.
+
+        Revocation deletes the record outright, so the access-log row is
+        the only durable trace of which key went away.
+        """
+        display_id, first_value, _ = self.harness.create_key(WRITE_KEY_NAME, "write")
+        status, payload, _ = self.harness.browser(
+            "POST", "/owner/api/machine-keys", {"action": "rotate", "display_id": display_id}
+        )
+        self.assertEqual(status, 200, payload)
+        second_value = payload["machine_key"]["key"]
+        status, payload, _ = self.harness.browser(
+            "POST", "/owner/api/machine-keys", {"action": "revoke", "display_id": display_id}
+        )
+        self.assertEqual(status, 200, payload)
+
+        rows = [
+            record
+            for record in self.harness.logs()
+            if record.get("method") == "POST" and record.get("path") == "/owner/api/machine-keys"
+        ]
+        self.assertEqual(
+            [record.get("action") for record in rows],
+            ["machine_key.create"] * 3 + ["machine_key.rotate", "machine_key.revoke"],
+        )
+        # Every row names the key it acted on - the two setUp keys, the
+        # new one, and the revoke, whose record no longer exists anywhere.
+        self.assertEqual(
+            [record.get("machine_key_target") for record in rows],
+            [self.read_id, self.write_id, display_id, display_id, display_id],
+        )
+        self.assertNotIn(
+            display_id,
+            read_json(self.harness.data_dir / MACHINE_KEY_FILE_NAME, {}).get("keys", {}),
+        )
+        # Target and principal stay separate fields: these rows were
+        # driven by the console session, so no bearer identity is claimed.
+        for record in rows:
+            self.assertNotIn("machine_key_id", record)
+
+        # A refused attempt names no target - only what the store acted on.
+        status, payload, _ = self.harness.browser(
+            "POST", "/owner/api/machine-keys", {"action": "rotate", "display_id": "mk_00000000"}
+        )
+        self.assertEqual(status, 404, payload)
+        refused = self.harness.logs()[-1]
+        self.assertEqual(refused.get("action"), "machine_key.rotate")
+        self.assertNotIn("machine_key_target", refused)
+
+        # And never the value: not the original, not the rotated one, not
+        # the two keys setUp created.
+        text = self.harness.log_stream.getvalue()
+        for value in (self.read_key, self.write_key, first_value, second_value):
+            self.assertNotIn(value, text)
+
     def test_reads_do_not_carry_an_audit_identity_and_nothing_carries_the_value(self) -> None:
         status, _, _ = self.harness.machine("GET", "/owner/api/state", self.read_key)
         self.assertEqual(status, 200)
@@ -765,6 +822,150 @@ class CompatibilityTests(unittest.TestCase):
         _, payload, _ = self.harness.browser("GET", "/owner/api/state")
         self.assertIn("client_key", payload["access"])
         self.assertNotIn("machine_keys", json.dumps(payload))
+
+
+class PepperFailClosedTests(unittest.TestCase):
+    """F4: a pepper removed or changed under a *live* store stops keys at once.
+
+    The store object is never rebuilt between the steps - the point is
+    that an operator's incident-response move (delete the pepper) takes
+    effect on the very next request, not after a gateway restart.
+    """
+
+    def setUp(self) -> None:
+        self.harness = MachineKeyHarness()
+        self.addCleanup(self.harness.close)
+        self.harness.sign_in()
+        self.display_id, self.value, _ = self.harness.create_key(WRITE_KEY_NAME, "write")
+        self.pepper_path = self.harness.data_dir / MACHINE_KEY_PEPPER_FILE_NAME
+        self.original_pepper = self.pepper_path.read_bytes()
+
+    def restore_pepper(self) -> None:
+        """Put the original pepper back, with a fingerprint that moves."""
+        self.pepper_path.write_bytes(self.original_pepper)
+        stat = self.pepper_path.stat()
+        # The store caches a stat, so push the mtime forward explicitly:
+        # a same-size rewrite must not be able to alias an older
+        # fingerprint and hand back a pepper that is no longer the one
+        # on disk.
+        os.utime(
+            self.pepper_path,
+            ns=(stat.st_atime_ns + 1_000_000_000, stat.st_mtime_ns + 1_000_000_000),
+        )
+        self.pepper_path.chmod(0o600)
+
+    def test_deleting_the_pepper_stops_every_key_on_the_very_next_request(self) -> None:
+        status, _, _ = self.harness.machine("GET", "/owner/api/state", self.value)
+        self.assertEqual(status, 200, "the key works before the pepper goes")
+
+        self.pepper_path.unlink()
+        status, payload, _ = self.harness.machine("GET", "/owner/api/state", self.value)
+        self.assertEqual(status, 401, payload)
+        self.assertEqual(payload["error"]["type"], "authentication_required")
+
+        # Minting a replacement would pretend the old keys still work:
+        # the store refuses instead of inventing a working set.
+        status, payload, _ = self.harness.browser(
+            "POST", "/owner/api/machine-keys", {"action": "create", "name": "x", "scope": "read"}
+        )
+        self.assertEqual(status, 500, payload)
+        self.assertEqual(payload["error"]["type"], "machine_key_store_unavailable")
+        self.assertFalse(self.pepper_path.exists())
+
+        # Fail-closed, not a latch: the original pepper back, key back.
+        self.restore_pepper()
+        status, _, _ = self.harness.machine("GET", "/owner/api/state", self.value)
+        self.assertEqual(status, 200)
+
+    def test_a_corrupt_or_replaced_pepper_under_a_live_store_also_stops_keys(self) -> None:
+        status, _, _ = self.harness.machine("GET", "/owner/api/state", self.value)
+        self.assertEqual(status, 200)
+
+        broken = (
+            b"not json at all",
+            b'{"pepper": "zz"}',  # not hex
+            b'{"pepper": "abcd"}',  # far too short to be ours
+            b'{"pepper": "' + b"00" * 32 + b'"}',  # well-formed, but a different pepper
+        )
+        for pepper_bytes in broken:
+            self.pepper_path.write_bytes(pepper_bytes)
+            status, payload, _ = self.harness.machine("GET", "/owner/api/state", self.value)
+            self.assertEqual(status, 401, (pepper_bytes, payload))
+
+        self.restore_pepper()
+        status, _, _ = self.harness.machine("GET", "/owner/api/state", self.value)
+        self.assertEqual(status, 200)
+
+
+class _ForeignWriteStore(MachineKeyStore):
+    """A store whose next digest runs *after* a foreign write lands.
+
+    F4's window: ``_reload_if_changed`` has already run and released the
+    lock, the ``last_used_at`` flush has not happened yet. There is no
+    in-product cross-process writer for ``machine_keys.json`` today, so
+    the test creates the window directly instead of pretending one
+    exists.
+    """
+
+    def __init__(self, data_dir, *, on_digest=None, **kwargs):
+        super().__init__(data_dir, **kwargs)
+        self._on_digest = on_digest
+
+    def _digest(self, token):
+        digest = super()._digest(token)
+        if self._on_digest is not None:
+            callback, self._on_digest = self._on_digest, None
+            callback()
+        return digest
+
+
+class CrossProcessFlushTests(unittest.TestCase):
+    """F4 (defence in depth): a flush never writes a stale copy over a foreign write."""
+
+    def test_a_revoke_landing_after_the_reload_is_not_resurrected_by_the_flush(self) -> None:
+        harness = MachineKeyHarness()
+        self.addCleanup(harness.close)
+        harness.sign_in()
+        display_id, value, _ = harness.create_key(WRITE_KEY_NAME, "write")
+        # A second store on the same file plays the part of another process.
+        foreign = MachineKeyStore(harness.data_dir, clock=lambda: harness.now)
+
+        def revoke_elsewhere() -> None:
+            foreign.revoke(display_id)
+
+        store = _ForeignWriteStore(
+            harness.data_dir, on_digest=revoke_elsewhere, clock=lambda: harness.now
+        )
+        record = store.authenticate(value)
+        self.assertIsNotNone(
+            record, "the stale in-memory copy still matched; the flush is what is under test"
+        )
+
+        # The flush must not have written that stale copy back over the
+        # revoke: the record stays gone from disk...
+        stored = read_json(harness.data_dir / MACHINE_KEY_FILE_NAME, {})
+        self.assertNotIn(
+            display_id, stored.get("keys", {}), "the flush resurrected a revoked key"
+        )
+        # ... and a store built from what is actually on disk refuses it.
+        self.assertIsNone(MachineKeyStore(harness.data_dir).authenticate(value))
+
+    def test_a_normal_flush_still_persists_last_used(self) -> None:
+        # The guard must not have disabled the ordinary write path.
+        harness = MachineKeyHarness()
+        self.addCleanup(harness.close)
+        harness.sign_in()
+        display_id, value, _ = harness.create_key(READ_KEY_NAME, "read")
+        harness.now += 120.0
+        status, _, _ = harness.machine("GET", "/owner/api/state", value)
+        self.assertEqual(status, 200)
+        _, payload, _ = harness.browser("GET", "/owner/api/machine-keys")
+        self.assertEqual(payload["machine_keys"][0]["display_id"], display_id)
+        self.assertEqual(payload["machine_keys"][0]["last_used_at"], harness.now)
+        stored = read_json(harness.data_dir / MACHINE_KEY_FILE_NAME, {})
+        self.assertEqual(
+            stored["keys"][display_id]["last_used_at"], harness.now, "the flush was skipped"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

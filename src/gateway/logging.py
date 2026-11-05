@@ -49,6 +49,7 @@ class RequestLogger:
         streamed: bool = False,
         action: str | None = None,
         machine_key_id: str | None = None,
+        machine_key_target: str | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -66,6 +67,11 @@ class RequestLogger:
         # line - and no redaction miss - can carry it.
         if machine_key_id:
             record["machine_key_id"] = machine_key_id
+        # The key a create/rotate/revoke *acted on*, so a revocation
+        # stays attributable after the store deletes the record. Also a
+        # display id only: the value is not a field here either.
+        if machine_key_target:
+            record["machine_key_target"] = machine_key_target
         if alias:
             record["alias"] = alias
         if provider:

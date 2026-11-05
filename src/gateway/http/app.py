@@ -690,6 +690,13 @@ class GatewayApp:
             # can carry it.
             machine_key_id = str(request.context["machine_key_id"])
             action = action or f"{request.method} {request.path}"
+        # The *target* of a machine-key lifecycle action (create, rotate,
+        # revoke): the display id the store acted on, set by the handler
+        # after the store call. It keeps a revocation attributable once
+        # the record is deleted. It is a display id and nothing else -
+        # the key value never enters this context.
+        target = request.context.get("machine_key_target")
+        machine_key_target = target if isinstance(target, str) and target else None
         self.logger.log(
             method=request.method,
             path=request.path,
@@ -702,6 +709,7 @@ class GatewayApp:
             streamed=bool(request.context.get("streamed")),
             action=action,
             machine_key_id=machine_key_id,
+            machine_key_target=machine_key_target,
         )
 
     # --- surface helpers -------------------------------------------------
@@ -1109,6 +1117,22 @@ class GatewayApp:
             [("Cache-Control", "no-store")],
         )
 
+    @staticmethod
+    def _record_machine_key_target(request: Request, record: Any) -> None:
+        """Name the key a lifecycle action acted on, for the access log.
+
+        The display id only, taken from the store's own return value -
+        so the logged id is one the store actually acted on, never a
+        value invented by the caller. Called *after* the store call on
+        purpose: revocation deletes the record outright, and this is
+        what keeps a revoked key attributable afterwards. The plaintext
+        key travels in the same response dict and is never copied into
+        the request context, so no log line can carry it.
+        """
+        target = record.get("display_id") if isinstance(record, dict) else None
+        if isinstance(target, str) and target:
+            request.context["machine_key_target"] = target
+
     def handle_machine_keys_action(self, request: Request) -> Response:
         """Create, rotate or revoke a machine key. Human session only.
 
@@ -1133,6 +1157,7 @@ class GatewayApp:
         request.context["action"] = f"machine_key.{action}" if action else "machine_key"
         if action == "create":
             created = self.machine_keys.create(payload.get("name"), payload.get("scope"))
+            self._record_machine_key_target(request, created)
             return json_response(
                 {
                     "ok": True,
@@ -1149,6 +1174,7 @@ class GatewayApp:
             )
         if action == "rotate":
             rotated = self.machine_keys.rotate(payload.get("display_id"))
+            self._record_machine_key_target(request, rotated)
             return json_response(
                 {
                     "ok": True,
@@ -1165,6 +1191,7 @@ class GatewayApp:
             )
         if action == "revoke":
             result = self.machine_keys.revoke(payload.get("display_id"))
+            self._record_machine_key_target(request, result)
             return json_response(
                 {"ok": True, "action": "revoke", **result},
                 200,
