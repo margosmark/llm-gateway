@@ -236,6 +236,13 @@ class ProviderState:
     last_error: str | None = None
     models: dict[str, ModelEntry] = field(default_factory=dict)
     catalog_observed_at: str | None = None
+    #: The owner-configured destination for a local provider (Ollama,
+    #: llama.cpp server, LM Studio). Non-secret by design: it is a host the
+    #: owner typed, it is only ever rendered on the owner-authenticated
+    #: state endpoint, and credentials are never allowed to live in it. It
+    #: stays ``None`` until the owner saves one, which is what keeps a local
+    #: provider fail-closed at boot with no outbound call.
+    base_url: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -245,6 +252,7 @@ class ProviderState:
             "last_test_at": self.last_test_at,
             "last_error": self.last_error,
             "catalog_observed_at": self.catalog_observed_at,
+            "base_url": self.base_url,
             "models": {key: value.to_dict() for key, value in sorted(self.models.items())},
         }
 
@@ -276,6 +284,10 @@ class ProviderState:
             catalog_observed_at=(
                 data.get("catalog_observed_at") if isinstance(data.get("catalog_observed_at"), str) else None
             ),
+            # Tolerant: a config written before this field existed simply
+            # has no endpoint, and a non-string value is treated as absent
+            # rather than passed downstream to a URL parser.
+            base_url=data.get("base_url") if isinstance(data.get("base_url"), str) and data.get("base_url") else None,
         )
 
     def enabled_models(self) -> list[ModelEntry]:
@@ -728,7 +740,18 @@ class _ConfigTransaction:
 
 
 def default_provider_ids() -> tuple[str, ...]:
-    return ("anthropic", "chatgpt_codex", "opencode_console", "opencode_go")
+    return (
+        "anthropic",
+        "chatgpt_codex",
+        "opencode_console",
+        "opencode_go",
+        # Local servers. They are registered like every other provider, stay
+        # ``not_configured`` until the owner saves an endpoint, and are never
+        # called at boot.
+        "llama_cpp",
+        "lm_studio",
+        "ollama",
+    )
 
 
 def provider_kind(provider_id: str) -> str:

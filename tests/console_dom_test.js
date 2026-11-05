@@ -1553,6 +1553,55 @@ check("the leaderboard payload is metadata only", function () {
   assert(!/\bsk-[A-Za-z0-9_\-]{16,}/.test(lbText));
 });
 
+// --- local providers -----------------------------------------------------
+
+check("a local provider card asks for an endpoint and states the privacy rule", function () {
+  const card = helpers.renderProviderForTest({
+    provider_id: "ollama", kind: "ollama", state: "not_configured", models: 0, base_url: ""
+  });
+  const text = collectText(card).join("\n");
+  assert(text.includes("Save endpoint"), "the card must offer the endpoint field");
+  // The privacy warning the owner has to see next to the field.
+  assert(text.includes("stay on this LAN"), "the local privacy rule must be stated");
+  assert(text.includes("explicitly confirmed for the alias"), "the fallback consent rule must be stated");
+  // The loopback/bridge-mode caveat, and the no-download rule.
+  assert(text.includes("127.0.0.1 reaches a server"), "the host-networking caveat must be stated");
+  assert(text.includes("bridge-networked"), "the bridge-mode caveat must be stated");
+  assert(text.includes("never downloads a model"), "no automatic model downloads must be stated");
+  const endpointInputs = findAll(card, function (node) {
+    return node.tag === "input" && String(node.attributes.placeholder || "").includes("11434");
+  });
+  assert.strictEqual(endpointInputs.length, 1, "exactly one endpoint input");
+});
+
+check("a saved endpoint is pre-filled in the owner's own card", function () {
+  const card = helpers.renderProviderForTest({
+    provider_id: "lm_studio", kind: "lm_studio", state: "configured_untested",
+    models: 0, base_url: "http://192.168.1.77:1234"
+  });
+  const inputs = findAll(card, function (node) {
+    return node.tag === "input" && String(node.attributes.placeholder || "").includes("11434");
+  });
+  assert.strictEqual(inputs.length, 1);
+  assert.strictEqual(inputs[0].value, "http://192.168.1.77:1234");
+  const text = collectText(card).join("\n");
+  assert(text.includes("keyless by default"), "keyless must be the stated default");
+});
+
+check("a public provider card has no endpoint field and no local privacy text", function () {
+  const card = helpers.renderProviderForTest({
+    provider_id: "anthropic", kind: "anthropic", state: "connected", models: 3, base_url: null
+  });
+  const text = collectText(card).join("\n");
+  assert(!text.includes("Save endpoint"), "only local providers configure an endpoint");
+  assert(!text.includes("stay on this LAN"));
+  assert(!text.includes("11434"));
+  const endpointInputs = findAll(card, function (node) {
+    return node.tag === "input" && String(node.attributes.placeholder || "").includes("11434");
+  });
+  assert.strictEqual(endpointInputs.length, 0);
+});
+
 if (failures.length) {
   console.error("\n" + failures.length + " check(s) failed");
   process.exit(1);

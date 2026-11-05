@@ -187,7 +187,19 @@
     if (providerId === "chatgpt_codex") return "ChatGPT / Codex";
     if (providerId === "opencode_go") return "OpenCode Go";
     if (providerId === "opencode_console") return "OpenCode Console Jev / System One";
+    if (providerId === "ollama") return "Ollama (local)";
+    if (providerId === "llama_cpp") return "llama.cpp server (local)";
+    if (providerId === "lm_studio") return "LM Studio (local)";
     return providerId;
+  }
+
+  // The three providers whose destination the owner types themselves. They
+  // share one card layout: an endpoint field, an optional token, and the
+  // local-only warnings that a cloud provider card has no reason to carry.
+  var LOCAL_PROVIDER_IDS = { ollama: true, llama_cpp: true, lm_studio: true };
+
+  function isLocalProvider(providerId) {
+    return Object.prototype.hasOwnProperty.call(LOCAL_PROVIDER_IDS, providerId);
   }
 
   function statePill(value) {
@@ -1730,6 +1742,10 @@
 
     if (provider.provider_id === "chatgpt_codex") {
       card.appendChild(renderDeviceCode(provider));
+    } else if (isLocalProvider(provider.provider_id)) {
+      card.appendChild(renderLocalEndpoint(provider));
+      card.appendChild(renderKeyForm(provider, "Optional local token"));
+      card.appendChild(el("p", { class: "small muted", text: LOCAL_PRIVACY_TEXT }));
     } else {
       card.appendChild(renderKeyForm(provider));
       if (provider.provider_id === "opencode_console") {
@@ -1739,7 +1755,68 @@
     return card;
   }
 
-  function renderKeyForm(provider) {
+  // What a local endpoint means, stated where the owner types it: which
+  // addresses are accepted, what loopback means under this deployment's
+  // host networking, and what enrolling a token does.
+  var LOCAL_ENDPOINT_HELP =
+    "Requests go only to this address. It must be a private or loopback address " +
+    "(127.0.0.0/8, 10/8, 172.16/12, 192.168/16, fc00::/7); public addresses and " +
+    "link-local addresses such as 169.254.169.254 are refused, and the address is " +
+    "checked again against the actual connection before any request byte is sent. " +
+    "This deployment uses host networking, so 127.0.0.1 reaches a server on this " +
+    "machine's own loopback and a LAN address such as 192.168.x.x reaches another " +
+    "machine; run bridge-networked instead and 127.0.0.1 would be the container itself. " +
+    "Saving a different endpoint clears the models discovered from the previous one, " +
+    "so refresh the catalogue afterwards. The gateway never downloads a model.";
+
+  var LOCAL_AUTH_TEXT =
+    "All three local servers are keyless by default, so no token is needed. If you " +
+    "enabled one on the server itself (llama-server --api-key, LM Studio Require " +
+    "Auth), enrol it here or the connection test fails with an authentication error.";
+
+  var LOCAL_PRIVACY_TEXT =
+    "Requests to this provider stay on this LAN. Falling back from it to a cloud " +
+    "provider sends the prompt off this machine, and that switch is refused unless " +
+    "fallback is authorized and this provider is explicitly confirmed for the alias.";
+
+  function renderLocalEndpoint(provider) {
+    var input = el("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "http://127.0.0.1:11434" });
+    input.value = provider.base_url || "";
+    var save = el("button", {
+      class: "primary", type: "button", text: "Save endpoint",
+      onclick: function () {
+        var url = input.value.trim();
+        run(api(BASE + "/api/provider", { method: "POST", body: { action: "set_base_url", provider_id: provider.provider_id, base_url: url } }))
+          .then(function (result) {
+            toast(url ? "Endpoint saved: " + (result.base_url || url) : "Endpoint cleared.", "ok");
+            return refresh();
+          })
+          .catch(function () {});
+      }
+    });
+    var clear = el("button", {
+      type: "button", text: "Clear endpoint",
+      onclick: function () {
+        if (!window.confirm("Clear the saved endpoint for " + providerLabel(provider.provider_id) + "?\n\nModels discovered from it are removed, and the provider returns to not configured.")) return;
+        run(api(BASE + "/api/provider", { method: "POST", body: { action: "set_base_url", provider_id: provider.provider_id, base_url: "" } }))
+          .then(function () {
+            input.value = "";
+            toast("Endpoint cleared.", "ok");
+            return refresh();
+          })
+          .catch(function () {});
+      }
+    });
+    return el("div", {}, [
+      el("h3", { text: "Local endpoint" }),
+      el("p", { class: "small", text: provider.base_url ? "Saved endpoint: " + provider.base_url : "No endpoint saved. This provider stays not configured until one is saved." }),
+      el("div", { class: "row" }, [el("label", {}, [el("span", { text: "Server base URL" }), input]), el("div", { class: "narrow" }, [save]), el("div", { class: "narrow" }, [clear])]),
+      el("p", { class: "small muted", text: LOCAL_ENDPOINT_HELP }),
+      el("p", { class: "small muted", text: LOCAL_AUTH_TEXT })
+    ]);
+  }
+
+  function renderKeyForm(provider, heading) {
     var input = el("input", { type: "password", autocomplete: "off", placeholder: "provider API key" });
     var wrap = el("div", { class: "row" }, [
       el("label", {}, [el("span", { text: "API key" }), input]),
@@ -1770,7 +1847,7 @@
       ])
     ]);
     var block = el("div", {}, [
-      el("h3", { text: "Connect OpenCode Go" }),
+      el("h3", { text: heading || "Connect OpenCode Go" }),
       el("p", { class: "small muted", text: "The key is stored in an owner-only credential store, separately from any other provider, and is never displayed again." }),
       wrap
     ]);
@@ -3401,6 +3478,17 @@
         // The preview price line, exercised directly on real payloads so a
         // priced model can never render as "no published price".
         return probePriceText(price);
+      },
+      renderProviderForTest: function (provider, view) {
+        // One provider card, so a test can assert what an owner is told
+        // about a local endpoint without a whole console state.
+        var previous = state;
+        if (view !== undefined) state = view;
+        try {
+          return renderProvider(provider);
+        } finally {
+          state = previous;
+        }
       },
       renderLeaderboardForTest: function (payload, view) {
         // A test hands the tab a payload directly; the phase is forced to

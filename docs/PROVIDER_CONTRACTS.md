@@ -530,3 +530,43 @@ paste a real credential into a chat message, a card, a file or a commit.
 ### Local budget accounting
 
 Budgets are local estimates, not provider allowance measurements. The gateway uses only published prices and recorded token counters; unsupported prices or missing counters make aggregate spend Unknown. Unknown spend never becomes zero, and an alias cannot be capped while the month total is unknown. The reset boundary is UTC calendar-month start.
+
+
+## Local providers (Ollama, llama.cpp server, LM Studio): verification status
+
+Three fixed provider ids — `ollama`, `llama_cpp`, `lm_studio` — share one
+generic `LocalOpenAIAdapter` (`src/gateway/adapters/local_openai.py`) with a
+save-time **and** connect-time private-destination policy
+(`src/gateway/adapters/local_policy.py`): private/loopback addresses only,
+metadata and link-local ranges refused, mixed public/private DNS refused, no
+credentials in the URL, redirects refused, and no local bytes written before
+the connected peer address is checked.
+
+**What the tests prove.** `tests/test_local_policy.py`,
+`tests/test_local_openai.py` and `tests/test_local_provider_routes.py`
+exercise the adapter, the routing/capability rules, the credential isolation,
+the access-log redaction and the boot-no-call guarantee against *scripted
+loopback fixtures* (`tests/local_fixture.py`). The console card is covered by
+`tests/console_dom_test.js`.
+
+**What has not been verified, and must not be read as verified.** No real
+Ollama, llama-server or LM Studio instance was reachable from this
+environment, so the following remain **untested** and are deliberately left
+unclaimed:
+
+- any specific server version (Ollama release, llama-server build,
+  LM Studio release) — no version number has been proven compatible;
+- real token-usage counters and `stream_options.include_usage` behaviour per
+  server (the fixtures script usage, so honesty about absent/invalid counters
+  is proven, not the servers' actual output);
+- real tool-call and function-call dialects, real context limits, and real
+  cold-load timings — the 60s stream-head budget is asserted against a
+  deliberately stalled fixture, not against a cold model load;
+- `https://` local endpoints (TLS is accepted by policy but has never been
+  exercised end to end);
+- real image-input behaviour on any of the three servers.
+
+Fixture tests are contract tests, not server proof. Until a card runs against
+the actual servers and records versions plus results here, treat every local
+provider version claim as unverified. Nothing in the gateway downloads a
+model or makes an implicit cloud call for a local provider.

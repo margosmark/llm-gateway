@@ -32,8 +32,19 @@ from gateway.stores import atomic_write_json, ensure_private_dir, read_json, rem
 CREDENTIAL_DIR_NAME = "credentials"
 
 #: Providers that may hold a credential. Anything else is rejected so a
-#: crafted provider id cannot escape the credential directory.
-KNOWN_PROVIDERS = ("anthropic", "chatgpt_codex", "opencode_console", "opencode_go")
+#: crafted provider id cannot escape the credential directory. The three
+#: local servers are here because they *may* hold an optional token (a
+#: llama-server started with ``--api-key``, LM Studio with Require Auth);
+#: keyless remains the default and no credential is ever required.
+KNOWN_PROVIDERS = (
+    "anthropic",
+    "chatgpt_codex",
+    "llama_cpp",
+    "lm_studio",
+    "opencode_console",
+    "opencode_go",
+    "ollama",
+)
 
 
 class CredentialError(Exception):

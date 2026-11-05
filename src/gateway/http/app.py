@@ -20,6 +20,8 @@ from gateway.adapters.chatgpt_codex import (
     PREREQUISITE,
     ChatGPTCodexAdapter,
 )
+from gateway.adapters.local_openai import LocalOpenAIAdapter
+from gateway.adapters.local_policy import LocalEndpointError, normalize_base_url
 from gateway.auth import ProfileAuth, access_mode_description, profile_allows
 from gateway.bridge.anthropic import aggregate_stream_any, convert_buffered_bytes, convert_stream_bytes
 from gateway.bridge.model import ConversionError
@@ -1403,6 +1405,10 @@ class GatewayApp:
                     "last_test_at": provider.last_test_at,
                     "last_error": provider.last_error,
                     "catalog_observed_at": provider.catalog_observed_at,
+                    # Owner state only: this is the destination the owner
+                    # typed. It is deliberately absent from the unauthenticated
+                    # status payload, the access log, the ledger and errors.
+                    "base_url": provider.base_url,
                     "credential_present": self.credentials.describe(provider.provider_id)["present"],
                     "models": models,
                 }
@@ -2046,6 +2052,60 @@ class GatewayApp:
             # can show them with their source and an as-of time.
             self._publish_limits(provider_id, now)
             return json_response({"ok": True, "model_count": len(models), "observed_at": now})
+
+        if action == "set_base_url":
+            # The one action where the owner supplies a destination the
+            # gateway will connect to. It is refused unless it is a plain
+            # http(s) URL addressing a private/loopback address, it is
+            # re-checked against the socket's actual peer before any request
+            # byte is written, and it is stored on the provider row rather
+            # than in a credential - so it can never carry a secret.
+            if not isinstance(adapter, LocalOpenAIAdapter):
+                return json_response(
+                    {"error": {"message": "this provider has no configurable endpoint", "type": "unsupported_action"}},
+                    400,
+                )
+            raw_url = payload.get("base_url")
+            if raw_url is None or (isinstance(raw_url, str) and not raw_url.strip()):
+                # An empty value clears the endpoint. Discovered rows came
+                # from the server being removed, so they go with it.
+                normalized = None
+            elif isinstance(raw_url, str):
+                try:
+                    normalized = normalize_base_url(raw_url)
+                except LocalEndpointError as exc:
+                    # Fixed reason, never the value that was refused: a URL
+                    # can carry a password-shaped string.
+                    return json_response(
+                        {"error": {"message": exc.reason, "type": "invalid_endpoint"}}, 400
+                    )
+            else:
+                return json_response(
+                    {"error": {"message": "the endpoint must be a string", "type": "invalid_endpoint"}}, 400
+                )
+            with self.config.mutate() as config:
+                provider = config.providers.get(provider_id)
+                if provider is None:
+                    provider = _new_provider_state(provider_id, adapter.kind)
+                    config.providers[provider_id] = provider
+                changed = (provider.base_url or None) != normalized
+                provider.base_url = normalized
+                if changed:
+                    # Capability truth: a row discovered from the previous
+                    # server is not evidence about this one. Manual entries
+                    # are the owner's own and survive.
+                    provider.models = {
+                        key: entry
+                        for key, entry in provider.models.items()
+                        if entry.source != "discovered"
+                    }
+                    provider.catalog_observed_at = None
+                    if normalized is None:
+                        provider.state = STATE_NOT_CONFIGURED
+                    else:
+                        provider.state = STATE_CONFIGURED_UNTESTED
+                    provider.last_error = None
+            return json_response({"ok": True, "base_url": normalized})
 
         if action == "disconnect":
             handle = self.credentials.provider_handle(provider_id)
