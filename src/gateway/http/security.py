@@ -5,6 +5,16 @@ headers are rejected, `Host` must match the configured bind address, and
 browser mutations must carry the exact canonical `Origin`. The Origin check is
 a cross-site safeguard, not authentication: reachable LAN peers are
 administrators and callers by product decision.
+
+There are two request shapes on the browser surface and they are routed
+explicitly, never blended:
+
+* a **browser** request authenticates with the owner session cookie and
+  therefore must carry the canonical `Origin` on every mutation;
+* a **machine** request (MCP, automation) authenticates with
+  ``Authorization: Bearer <machine key>`` and carries no browser Origin,
+  so it is exempted from the Origin requirement only - never from the
+  forwarded-header or `Host` checks, which run first for every request.
 """
 
 from __future__ import annotations
@@ -88,10 +98,21 @@ def check_host(request: Request, policy: SecurityPolicy) -> None:
 
 
 def check_origin(request: Request, policy: SecurityPolicy) -> None:
-    """Reject a cross-origin mutation on a browser surface."""
+    """Reject a cross-site mutation on a browser surface."""
     if request.method not in MUTATING_METHODS:
         return
     if not policy.is_browser_surface(request.path):
+        return
+    # A machine client (MCP, automation) presents ``Authorization: Bearer``
+    # and has no browser Origin, so it is exempted here - and only here.
+    # This does not open a cookie CSRF path: a cross-site page cannot set
+    # the Authorization header (it is not a CORS-safelisted header and
+    # this gateway serves no CORS), so any request that reaches this
+    # exemption is one the caller authenticated with a machine key, and
+    # the forwarded-header and Host checks above have already run for it.
+    # Every cookie-authenticated browser request keeps the exact Origin
+    # requirement below, unchanged.
+    if bearer_authorization(request) is not None:
         return
     origin = request.origin
     if origin is None:
@@ -107,6 +128,33 @@ def check_origin(request: Request, policy: SecurityPolicy) -> None:
             "request rejected: Origin does not match this gateway's configured address",
         )
 
+
+def bearer_authorization(request: Request) -> str | None:
+    """The bearer credential a non-browser (machine) client presents.
+
+    This defines the accepted machine-client request shape, in full:
+
+    * ``Authorization: Bearer TOKEN`` - exactly two whitespace-separated
+      fields, scheme compared case-insensitively, nothing else on the
+      header (a third field, a scheme other than bearer, or an empty
+      token all return ``None``);
+    * no ``Cookie`` header - refused by the owner authoriser, because a
+      machine principal must never ride a browser session;
+    * no ``Origin`` requirement - see :func:`check_origin`;
+    * the canonical ``Host`` and forwarded-header rejection that every
+     request gets, applied before anything else.
+
+    Returns ``None`` when there is no usable bearer credential, so a
+    request without the header, or with any other auth scheme, keeps
+    following the ordinary cookie/session path unchanged.
+    """
+    raw = request.headers.get("authorization")
+    if not raw:
+        return None
+    fields = raw.split()
+    if len(fields) != 2 or fields[0].lower() != "bearer":
+        return None
+    return fields[1] or None
 
 
 def format_authority_host(host: str) -> str:

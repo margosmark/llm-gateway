@@ -46,6 +46,7 @@ from gateway.leaderboard import build_leaderboard
 from gateway.owner_auth import (
     COOKIE_NAME,
     SESSION_TTL_SECONDS,
+    MachineKeyStore,
     OwnerAuthError,
     OwnerAuthStore,
 )
@@ -98,7 +99,15 @@ from gateway.credentials import CredentialStore
 from gateway.fallback_reasons import fallback_reason_class
 from gateway.http import messages as messages_surface
 from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
-from gateway.http.security import SecurityError, SecurityPolicy, check_forwarded_headers, check_host, check_origin
+from gateway.http.security import (
+    MUTATING_METHODS,
+    SecurityError,
+    SecurityPolicy,
+    bearer_authorization,
+    check_forwarded_headers,
+    check_host,
+    check_origin,
+)
 from gateway.http.state_cache import StateCache
 from gateway.identifiers import ValidationError, validate_alias_name, validate_identifier, validate_profile_id
 from gateway.logging import RequestLogger
@@ -352,6 +361,44 @@ def _series_entry(day: str, entry: dict[str, Any], status: str) -> dict[str, Any
 
 
 
+#: The owner API surface a machine key may reach. **Deny by default**:
+#: anything not listed stays human-session-only, which is what keeps the
+#: console shell, every ``/api/auth/*`` endpoint, backup export/import,
+#: the request preview and the profile token mint out of an automation
+#: credential's hands. Paths are mount-relative (``/api/...``), so they
+#: hold for every console mount.
+MACHINE_KEY_READ_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/status",
+        "/api/state",
+        "/api/leaderboard",
+        "/api/capabilities",
+        "/api/ledger/export",
+    }
+)
+MACHINE_KEY_WRITE_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/alias",
+        "/api/alias-group",
+        "/api/model",
+        "/api/provider",
+        "/api/settings",
+        "/api/capabilities/preview",
+        "/api/capabilities/run",
+        "/api/capabilities/decision",
+        "/api/capabilities/probe/cancel",
+    }
+)
+
+#: Provider actions a machine key may never invoke, even with a write
+#: scope: they enrol or acquire a *credential* (a provider API key, a
+#: device-authorisation flow). Credential minting stays human-session-
+#: only, exactly like the machine-key endpoints themselves.
+MACHINE_KEY_BLOCKED_PROVIDER_ACTIONS: frozenset[str] = frozenset(
+    {"enroll_key", "device_start", "device_poll"}
+)
+
+
 class GatewayApp:
     """The HTTP application."""
 
@@ -370,6 +417,7 @@ class GatewayApp:
         mounts: tuple[str, ...] = ("/owner",),
         logger: RequestLogger | None = None,
         owner_auth: OwnerAuthStore | None = None,
+        machine_keys: MachineKeyStore | None = None,
         cookie_secure: bool | None = None,
     ) -> None:
         self.config = config
@@ -392,6 +440,10 @@ class GatewayApp:
         #: caller does not inject one, so every construction path (CLI,
         #: fixtures) gets the same boundary.
         self.owner_auth = owner_auth if owner_auth is not None else OwnerAuthStore(config.path.parent)
+        #: Machine keys: the third credential, in its own owner-only file
+        #: next to the account store. Same data directory, same
+        #: ``0600``-inside-``0700`` rule, separate record on purpose.
+        self.machine_keys = machine_keys if machine_keys is not None else MachineKeyStore(config.path.parent)
         #: The one-time setup code, generated here so it exists before the
         #: first request. Only ``None`` when an account already exists or
         #: the code was already issued; the plaintext is printed once at
@@ -496,6 +548,13 @@ class GatewayApp:
             r.add(["POST"], prefix + "/api/auth/logout", self.handle_auth_logout)
             r.add(["POST"], prefix + "/api/auth/password", self.handle_auth_password)
             r.add(["POST"], prefix + "/api/auth/client-key", self.handle_auth_client_key)
+
+            # Machine keys (MCP/automation). Both routes are human-session
+            # only by construction: the list is owner console data and
+            # create/rotate/revoke mint or destroy a credential, so a
+            # machine key must never reach them (see _authorize).
+            r.add(["GET"], prefix + "/api/machine-keys", self.handle_machine_keys_list)
+            r.add(["POST"], prefix + "/api/machine-keys", self.handle_machine_keys_action)
 
         #: Owner paths that stay reachable without a session: the console
         #: shell and its assets (the login view is rendered by them) plus
@@ -621,6 +680,16 @@ class GatewayApp:
             alias = attribution.get("requested_alias")
             provider = attribution.get("serving_provider")
             model = attribution.get("serving_model")
+        machine_key_id: str | None = None
+        if request.context.get("machine_key_id") and request.method in MUTATING_METHODS:
+            # Audit rule for machine keys: every mutation - allowed or
+            # refused - is logged with the display id of the key that
+            # attempted it and the action. The handler names the action
+            # when it has one; otherwise method + path identifies it.
+            # The key value is in no field of this record, so no log line
+            # can carry it.
+            machine_key_id = str(request.context["machine_key_id"])
+            action = action or f"{request.method} {request.path}"
         self.logger.log(
             method=request.method,
             path=request.path,
@@ -632,6 +701,7 @@ class GatewayApp:
             error_class=error_class,
             streamed=bool(request.context.get("streamed")),
             action=action,
+            machine_key_id=machine_key_id,
         )
 
     # --- surface helpers -------------------------------------------------
@@ -644,14 +714,29 @@ class GatewayApp:
     def _can_mutate(self, request: Request) -> bool:
         """Whether this request may change configuration.
 
-        Owner mutations require a signed-in owner session; the reachability
-        that used to stand in for this is gone with the old boundary.
+        Owner mutations require a signed-in owner session, or a
+        **write-scoped** machine key on the machine-writable surface
+        (``MACHINE_KEY_WRITE_PATHS``). A read-scoped key never reaches
+        this: ``_authorize`` refuses it with ``scope_required`` before
+        the handler runs.
         """
-        return bool(request.context.get("owner_authenticated"))
+        if request.context.get("owner_authenticated"):
+            return True
+        return bool(request.context.get("machine_key_authenticated")) and (
+            request.context.get("machine_key_scope") == "write"
+        )
 
     def _can_enroll_credentials(self, request: Request) -> bool:
         """Enrolling a provider credential is an owner action, so it needs
-        the same signed-in session as any other mutation."""
+        the same signed-in session as any other mutation.
+
+        Deliberately *not* widened to machine keys: a machine key may
+        change configuration but may never mint or store a credential.
+        It also keeps this verdict true only for sessions, which is what
+        separates a machine key's ``/owner/api/state`` cache entry from a
+        session's (see ``gateway.http.state_cache``: the token includes
+        both verdicts).
+        """
         return bool(request.context.get("owner_authenticated"))
 
     def _require_mutation(self, request: Request) -> Any:
@@ -699,21 +784,103 @@ class GatewayApp:
         return json_response(exc.payload(), exc.status, headers)
 
     def _authorize(self, request: Request) -> Response | None:
-        """The two access boundaries, kept apart on purpose.
+        """The access boundaries, kept apart on purpose.
 
         ``/v1/...`` is the **model client** boundary: bearer key only when
-        the owner has configured one (off by default). Anything under a
-        console mount is the **owner** boundary: session cookie, always.
+        the owner has configured one (off by default), and never a machine
+        key. Anything under a console mount is the **owner** boundary:
+        a request carrying ``Authorization: Bearer`` is a machine request
+        and goes to :meth:`_authorize_machine_key` (which decides by
+        surface and scope, and never falls back to the cookie); every
+        other request needs the session cookie, always - or nothing at
+        all for the pre-auth console paths.
         """
         path = request.path
         if path == "/v1" or path.startswith("/v1/"):
             return self._require_client_key(request)
         for prefix in self.mounts:
             if path == prefix or path.startswith(prefix + "/"):
+                suffix = path[len(prefix):] or "/"
+                bearer = bearer_authorization(request)
+                if bearer is not None:
+                    return self._authorize_machine_key(request, suffix, bearer)
                 if path in self._public_owner_paths:
                     return None
                 return self._require_owner_session(request)
         return None
+
+    def _machine_denied(self, code: str, message: str) -> Response:
+        return json_response(
+            {"error": {"message": message, "type": code}},
+            403,
+            [("Cache-Control", "no-store")],
+        )
+
+    def _authorize_machine_key(self, request: Request, suffix: str, bearer: str) -> Response | None:
+        """Authorise a machine-key request: credential, then shape, then scope.
+
+        Order matters. The key is resolved **first**, so every refusal
+        below - a session cookie, an endpoint outside the machine surface,
+        a read scope on a mutation - is attributable to the key that
+        attempted it in the access log, and no refusal path can fall
+        through to a session check. Nothing here is cached: the store
+        re-reads its file when it changed, so a revoke or a rotate is in
+        effect on the very next request.
+        """
+        record = self.machine_keys.authenticate(bearer)
+        if record is None:
+            return json_response(
+                {
+                    "error": {
+                        "message": "a valid machine key is required for this request",
+                        "type": "authentication_required",
+                    }
+                },
+                401,
+                [
+                    ("Cache-Control", "no-store"),
+                    ("WWW-Authenticate", 'Bearer realm="personal-llm-gateway", error="invalid_token"'),
+                ],
+            )
+        request.context["machine_key_authenticated"] = True
+        request.context["machine_key_id"] = str(record["display_id"])
+        request.context["machine_key_scope"] = str(record["scope"])
+        # A machine principal never rides a browser session: a request
+        # that carries both is refused rather than "resolved" either way.
+        if request.headers.get("cookie"):
+            return self._machine_denied(
+                "cookie_rejected",
+                "machine-key requests must not carry a session cookie",
+            )
+        mutating = request.method in MUTATING_METHODS
+        allowed = MACHINE_KEY_WRITE_PATHS if mutating else MACHINE_KEY_READ_PATHS
+        if suffix not in allowed:
+            return self._machine_denied(
+                "machine_key_forbidden",
+                "machine keys cannot reach this endpoint; sign in to the owner console instead",
+            )
+        if mutating and str(record["scope"]) != "write":
+            return self._machine_denied(
+                "scope_required",
+                "this machine key is read-only; a write-scoped machine key is required for this action",
+            )
+        return None
+
+    def _require_signed_in_owner(self, request: Request) -> Response | None:
+        """Owner-console-only endpoints: a machine key must never satisfy this.
+
+        The route-level authoriser already refuses a machine key on these
+        paths; this is the second, handler-level gate so a future route
+        wired to the wrong handler still cannot serve credential or
+        console operations to an automation client.
+        """
+        if request.context.get("owner_authenticated"):
+            return None
+        return json_response(
+            {"error": {"message": "owner sign-in required", "type": "authentication_required"}},
+            401,
+            [("Cache-Control", "no-store")],
+        )
 
     def _require_owner_session(self, request: Request) -> Response | None:
         token = self._session_token(request)
@@ -743,9 +910,28 @@ class GatewayApp:
         the streaming ones - answers with the same JSON error and never
         opens a stream, emits a frame, or calls a provider.
         """
+        authorization = request.headers.get("authorization")
+        machine = bearer_authorization(request)
+        if machine is not None and self.machine_keys.authenticate(machine, touch=False) is not None:
+            # A machine key is an owner-API credential and never a model
+            # key - not even on the keyless default, where anything else
+            # is accepted. Two credentials, two surfaces, no crossover.
+            return json_response(
+                {
+                    "error": {
+                        "message": "machine keys authorize the owner API only; send them to /owner, not /v1",
+                        "type": "invalid_api_key",
+                    }
+                },
+                401,
+                [
+                    ("WWW-Authenticate", 'Bearer realm="personal-llm-gateway", error="invalid_token"'),
+                    ("Cache-Control", "no-store"),
+                ],
+            )
         if not self.owner_auth.client_key_enabled:
             return None
-        if self.owner_auth.check_client_key(request.headers.get("authorization")):
+        if self.owner_auth.check_client_key(authorization):
             return None
         return json_response(
             {
@@ -901,6 +1087,91 @@ class GatewayApp:
             {"ok": True, "action": action, "client_key": status, "impact": impact},
             200,
             [("Cache-Control", "no-store")],
+        )
+
+    # --- machine keys (MCP / automation) --------------------------------
+
+    def handle_machine_keys_list(self, request: Request) -> Response:
+        """The console's machine-key list: display id, name, scope, last used.
+
+        Exactly those four fields - the store holds a hash and nothing
+        that could be handed back, and no other record (name aside) is
+        part of the contract. Session-only: a machine key cannot
+        enumerate itself (see the route table).
+        """
+        denied = self._require_signed_in_owner(request)
+        if denied is not None:
+            return denied
+        rows = self.machine_keys.list()
+        return json_response(
+            {"machine_keys": rows, "count": len(rows)},
+            200,
+            [("Cache-Control", "no-store")],
+        )
+
+    def handle_machine_keys_action(self, request: Request) -> Response:
+        """Create, rotate or revoke a machine key. Human session only.
+
+        The plaintext key is in this response and nowhere else: it is
+        never stored, never logged, and no later request can read it
+        back. Rotation replaces the secret immediately (same display id,
+        previous value dead on the next request) and revocation deletes
+        the record outright, so nothing can keep honouring it.
+        """
+        denied = self._require_signed_in_owner(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = request.json() or {}
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        action = str(payload.get("action") or "")
+        # The access log names which machine-key action ran, keyed by the
+        # console operator's session - never by a key, which is not here.
+        request.context["action"] = f"machine_key.{action}" if action else "machine_key"
+        if action == "create":
+            created = self.machine_keys.create(payload.get("name"), payload.get("scope"))
+            return json_response(
+                {
+                    "ok": True,
+                    "action": "create",
+                    "shown_once": True,
+                    "machine_key": created,
+                    "notice": (
+                        "Copy this key now: it is shown exactly once and cannot be "
+                        "retrieved again. Store it wherever the automation runs."
+                    ),
+                },
+                200,
+                [("Cache-Control", "no-store")],
+            )
+        if action == "rotate":
+            rotated = self.machine_keys.rotate(payload.get("display_id"))
+            return json_response(
+                {
+                    "ok": True,
+                    "action": "rotate",
+                    "shown_once": True,
+                    "machine_key": rotated,
+                    "notice": (
+                        "Copy this key now: it is shown exactly once. The previous "
+                        "value stopped working the moment it was issued."
+                    ),
+                },
+                200,
+                [("Cache-Control", "no-store")],
+            )
+        if action == "revoke":
+            result = self.machine_keys.revoke(payload.get("display_id"))
+            return json_response(
+                {"ok": True, "action": "revoke", **result},
+                200,
+                [("Cache-Control", "no-store")],
+            )
+        return json_response(
+            {"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400
         )
 
     # --- metadata --------------------------------------------------------
@@ -1989,6 +2260,18 @@ class GatewayApp:
         # failure cannot be told apart from the others.
         request.context["action"] = action
         request.context["provider_id"] = provider_id
+        # Credential enrolment and device flows stay human-session-only
+        # even for a write-scoped machine key: an automation credential
+        # must not be able to store a provider secret or run an
+        # authorisation flow. Checked here, after the action is known and
+        # before anything is contacted or written.
+        if request.context.get("machine_key_authenticated") and (
+            action in MACHINE_KEY_BLOCKED_PROVIDER_ACTIONS
+        ):
+            return self._machine_denied(
+                "machine_key_forbidden",
+                "machine keys cannot enrol or acquire credentials; sign in to the owner console instead",
+            )
         # The cooldown-clear action is dispatched before the provider
         # lookup: its explicit all scope is not addressed to one provider
         # at all. Every other scope still requires a known provider, so the

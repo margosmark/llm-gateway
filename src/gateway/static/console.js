@@ -286,7 +286,14 @@
         type: "button",
         "aria-current": tab === item.id ? "page" : null,
         text: item.label,
-        onclick: function () { tab = item.id; draw(); }
+        onclick: function () {
+          tab = item.id;
+          // The machine-key list is read on entry (and after each of its
+          // own mutations), never from the state snapshot: key metadata
+          // deliberately does not travel in /owner/api/state.
+          if (item.id === "settings") fetchMachineKeys();
+          draw();
+        }
       }));
     });
     header.appendChild(nav);
@@ -3067,6 +3074,7 @@
 
     var release = state.release || {};
     frag.appendChild(renderAccess());
+    frag.appendChild(renderMachineKeys());
 
     frag.appendChild(el("section", {}, [
       el("div", { class: "card" }, [
@@ -3280,6 +3288,219 @@
         el("p", { class: "small muted", text: "Changing or clearing the key never edits an agent or client configuration — no client changes silently." })
       ])
     ]);
+  }
+
+  // --- machine keys (MCP / automation) ---------------------------------
+  // The third credential: console-generated, shown once, scoped read or
+  // write, revocable at once. The list carries display id, name, scope
+  // and last-used only - the store keeps a hash, so there is no value
+  // for any read path to hand back, and key metadata never travels in
+  // the /owner/api/state snapshot either.
+
+  var machineKeys = { phase: "idle", rows: [], error: null, reveal: null };
+
+  function fetchMachineKeys() {
+    machineKeys.phase = "loading";
+    return api(BASE + "/api/machine-keys").then(function (payload) {
+      machineKeys.phase = "ready";
+      machineKeys.rows = (payload && payload.machine_keys) || [];
+      machineKeys.error = null;
+      if (tab === "settings") draw();
+      return payload;
+    }).catch(function (error) {
+      machineKeys.phase = "error";
+      machineKeys.error = error.message || "could not load machine keys";
+      if (tab === "settings") draw();
+      return null;
+    });
+  }
+
+  function postMachineKey(body) {
+    return api(BASE + "/api/machine-keys", { method: "POST", body: body });
+  }
+
+  function createMachineKey() {
+    var name = inputValue("machine-key-name");
+    var scope = inputValue("machine-key-scope") || "read";
+    if (!name) {
+      toast("give the key a name so you can recognise it later", "bad");
+      return;
+    }
+    postMachineKey({ action: "create", name: name, scope: scope })
+      .then(function (result) {
+        clearInputs(["machine-key-name"]);
+        // Shown exactly once: held only in this render, then gone.
+        machineKeys.reveal = (result && result.machine_key) || null;
+        return fetchMachineKeys();
+      })
+      .catch(function (error) { toast(error.message || "could not create the key", "bad"); });
+  }
+
+  function rotateMachineKey(row) {
+    var confirmed = global.confirm(
+      "Rotate machine key '" + row.name + "' (" + row.display_id + ")?\n\n" +
+      "The new value is shown once. The current value stops working immediately, so " +
+      "update every automation that uses it before you close the dialog."
+    );
+    if (!confirmed) return;
+    postMachineKey({ action: "rotate", display_id: row.display_id })
+      .then(function (result) {
+        machineKeys.reveal = (result && result.machine_key) || null;
+        return fetchMachineKeys();
+      })
+      .catch(function (error) { toast(error.message || "could not rotate the key", "bad"); });
+  }
+
+  function revokeMachineKey(row) {
+    var confirmed = global.confirm(
+      "Revoke machine key '" + row.name + "' (" + row.display_id + ")?\n\n" +
+      "It stops working at once and cannot be restored. Create a new key if the " +
+      "automation still needs one."
+    );
+    if (!confirmed) return;
+    postMachineKey({ action: "revoke", display_id: row.display_id })
+      .then(function () { return fetchMachineKeys(); })
+      .catch(function (error) { toast(error.message || "could not revoke the key", "bad"); });
+  }
+
+  function copyMachineKeyReveal() {
+    var node = global.document.getElementById("machine-key-reveal");
+    var value = node ? String(node.value || "") : "";
+    if (!value) return;
+    if (global.navigator && global.navigator.clipboard && global.navigator.clipboard.writeText) {
+      global.navigator.clipboard.writeText(value).then(function () {
+        toast("key copied to the clipboard", "ok");
+      }, function () {
+        toast("could not copy — select the value and copy it by hand", "bad");
+      });
+      return;
+    }
+    if (node && typeof node.select === "function") node.select();
+    toast("key selected — press Ctrl+C (or Cmd+C) to copy it", "ok");
+  }
+
+  function machineKeyRevealCard() {
+    var reveal = machineKeys.reveal;
+    if (!reveal) return null;
+    return el("div", { class: "card warn", role: "alert" }, [
+      el("h3", { text: "Copy this key now — it is shown exactly once" }),
+      el("dl", { class: "kv" }, [
+        el("dt", { text: "Name" }), el("dd", { text: String(reveal.name || "") }),
+        el("dt", { text: "Key id" }), el("dd", { text: String(reveal.display_id || "") }),
+        el("dt", { text: "Scope" }),
+        el("dd", { text: reveal.scope === "write" ? "read + write" : "read only" })
+      ]),
+      el("input", {
+        id: "machine-key-reveal",
+        type: "text",
+        readonly: true,
+        autocomplete: "off",
+        value: String(reveal.key || "")
+      }),
+      el("div", { class: "row" }, [
+        el("button", { type: "button", text: "Copy key", onclick: copyMachineKeyReveal }),
+        el("button", {
+          type: "button",
+          text: "I have stored it",
+          onclick: function () { machineKeys.reveal = null; draw(); }
+        })
+      ]),
+      el("p", {
+        class: "small muted",
+        text: "The gateway keeps only a hash of this value: it cannot be shown again, " +
+          "and it never appears in state, status, logs, errors or any URL."
+      })
+    ]);
+  }
+
+  function machineKeyTable() {
+    if (machineKeys.phase === "error") {
+      return el("p", {
+        class: "small bad",
+        text: "Machine keys could not be loaded: " + (machineKeys.error || "unknown error")
+      });
+    }
+    if (machineKeys.phase !== "ready") {
+      return el("p", { class: "small muted", text: "Loading machine keys…" });
+    }
+    var rows = machineKeys.rows || [];
+    if (!rows.length) {
+      return emptyState(
+        "No machine keys yet.",
+        "Create one to let an MCP client or another automation read or change gateway state with its own revocable credential."
+      );
+    }
+    var table = el("table", {}, [
+      el("thead", {}, [el("tr", {}, [
+        el("th", { text: "Key id" }),
+        el("th", { text: "Name" }),
+        el("th", { text: "Scope" }),
+        el("th", { text: "Last used" }),
+        el("th", { text: "Actions" })
+      ])])
+    ]);
+    var tbody = el("tbody");
+    rows.forEach(function (row) {
+      tbody.appendChild(el("tr", {}, [
+        el("td", { class: "small", text: String(row.display_id || "") }),
+        el("td", { class: "small", text: String(row.name || "") }),
+        el("td", { class: "small", text: row.scope === "write" ? "read + write" : "read only" }),
+        el("td", { class: "small", text: row.last_used_at ? when(row.last_used_at) : "never" }),
+        el("td", {}, [
+          el("button", {
+            type: "button",
+            text: "Rotate",
+            onclick: function () { rotateMachineKey(row); }
+          }),
+          el("button", {
+            type: "button",
+            class: "danger",
+            text: "Revoke",
+            onclick: function () { revokeMachineKey(row); }
+          })
+        ])
+      ]));
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function renderMachineKeys() {
+    var scopeSelect = el("select", { id: "machine-key-scope" }, [
+      el("option", { value: "read", text: "read — owner state only" }),
+      el("option", { value: "write", text: "write — read plus configuration changes" })
+    ]);
+    var children = [
+      el("h2", { text: "Machine keys (MCP / automation)" }),
+      el("p", {
+        class: "small muted",
+        text: "A machine key is a third, separate credential: not your owner password or " +
+          "session, and not the model client API key. Automation sends it as an " +
+          "Authorization: Bearer header with no browser Origin. Read keys can only read " +
+          "owner state; write keys can also change configuration. Each value is shown " +
+          "once, at creation and at rotation, and can never be retrieved again."
+      })
+    ];
+    var reveal = machineKeyRevealCard();
+    if (reveal) children.push(reveal);
+    children.push(machineKeyTable());
+    children.push(el("h3", { text: "Create a machine key" }));
+    children.push(el("div", { class: "row" }, [
+      field("machine-key-name", "Name (for example: laptop-mcp)", "text"),
+      el("label", {}, [el("span", { text: "Scope" }), scopeSelect])
+    ]));
+    children.push(el("button", {
+      type: "button",
+      class: "primary",
+      text: "Create machine key",
+      onclick: createMachineKey
+    }));
+    children.push(el("p", {
+      class: "small muted",
+      text: "Credential minting stays in this console: a machine key can never list, " +
+        "create, rotate or revoke keys, and it can never enrol a provider credential."
+    }));
+    return el("section", {}, [el("div", { class: "card" }, children)]);
   }
 
   // --- sign-in and first-run setup --------------------------------------
@@ -3505,6 +3726,36 @@
         } finally {
           state = previous;
         }
+      },
+      renderMachineKeysForTest: function (rows, view, reveal) {
+        // The machine-key card against a fixture list: the fetch phase is
+        // forced to "ready" (or handed a reveal payload) so Node never
+        // touches the network, exactly like the leaderboard seam.
+        var previousState = state;
+        var previousKeys = machineKeys;
+        state = view === undefined ? previousState : view;
+        machineKeys = {
+          phase: "ready",
+          rows: rows || [],
+          error: null,
+          reveal: reveal || null
+        };
+        try {
+          return renderMachineKeys();
+        } finally {
+          state = previousState;
+          machineKeys = previousKeys;
+        }
+      },
+      machineKeysStateForTest: function () {
+        // The module's machine-key state after a driven click: phase,
+        // loaded rows, and the one-time reveal (if any).
+        return {
+          phase: machineKeys.phase,
+          rows: machineKeys.rows,
+          reveal: machineKeys.reveal,
+          error: machineKeys.error
+        };
       },
       renderCooldownTableForTest: function (view) {
         // The operator's cooldown view with its clear controls, rendered

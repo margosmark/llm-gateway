@@ -48,6 +48,7 @@ class RequestLogger:
         error_class: str | None = None,
         streamed: bool = False,
         action: str | None = None,
+        machine_key_id: str | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -60,6 +61,11 @@ class RequestLogger:
         }
         if action:
             record["action"] = action
+        # Audit identity for a machine-key mutation: the *display id*
+        # only. The key value is never a field of this record, so no log
+        # line - and no redaction miss - can carry it.
+        if machine_key_id:
+            record["machine_key_id"] = machine_key_id
         if alias:
             record["alias"] = alias
         if provider:
