@@ -1014,9 +1014,37 @@
     return text;
   }
 
+  // The one line a cooldown clear reports back: how many circuits went
+  // and which keys they had. Keys are provider/model metadata only -
+  // never a credential, a prompt or a completion.
+  function cooldownClearedMessage(result) {
+    var count = result.cleared_count || 0;
+    var keys = result.keys || [];
+    var message = "Cleared " + count + " cooldown(s)";
+    if (result.scope === "all") message += " across every provider";
+    else if (result.provider) message += " for " + providerLabel(result.provider);
+    if (keys.length) message += ": " + keys.join(", ");
+    return message + ".";
+  }
+
+  // Every clear in this table is confirmed first, then reported with the
+  // keys it removed and followed by a state refresh, so the table shows
+  // the post-clear truth instead of the snapshot it was rendered from.
+  function clearCooldowns(body, confirmText) {
+    if (!global.confirm(confirmText)) return;
+    run(api(BASE + "/api/provider", { method: "POST", body: body }))
+      .then(function (result) {
+        toast(cooldownClearedMessage(result), "ok");
+        return refresh();
+      })
+      .catch(function () {});
+  }
+
   // The cooldown table is the operator's view of a held provider: when the
   // exhaustion was seen, how long the hold runs, when the next automatic
-  // probe may run, and whether one is in flight right now.
+  // probe may run, and whether one is in flight right now. Each held
+  // circuit carries its own clear control, and the whole table can be
+  // emptied behind one counted confirmation.
   function cooldownTable() {
     var details = state.cooldown_details || {};
     var keys = Object.keys(details).sort();
@@ -1031,12 +1059,31 @@
         el("th", { text: "Failure" }), el("th", { text: "Failures" }),
         el("th", { text: "Opened" }), el("th", { text: "Hold left" }),
         el("th", { text: "Next probe" }), el("th", { text: "State" }),
-        el("th", { text: "Why" })
+        el("th", { text: "Why" }), el("th", { text: "Clear" })
       ])])
     ]);
     var tbody = el("tbody");
     keys.forEach(function (key) {
       var entry = details[key] || {};
+      var providerWide = entry.scope === "provider";
+      // A row is cleared at its own scope: one route for a route row,
+      // the provider and its routes for a provider-wide row (there is no
+      // single-entry clear for the wildcard circuit).
+      var clearButton = el("button", {
+        type: "button", text: "Clear",
+        onclick: function () {
+          var body = providerWide
+            ? { action: "clear_cooldowns", provider_id: entry.provider, scope: "provider" }
+            : { action: "clear_cooldowns", provider_id: entry.provider, model: entry.model, scope: "route" };
+          clearCooldowns(
+            body,
+            "Clear " + (providerWide
+              ? "the whole-provider cooldown on " + providerLabel(entry.provider) + "?\n\nThis also clears the route cooldowns held for that provider."
+              : "the cooldown on " + providerLabel(entry.provider) + " → " + (entry.model || key) + "?") +
+            "\n\nOnly do this after you have confirmed the subscription or reset window has reopened."
+          );
+        }
+      });
       tbody.appendChild(el("tr", {}, [
         el("td", { class: "small", text: key }),
         el("td", { class: "small", text: entry.scope === "provider" ? "whole provider" : "this route only" }),
@@ -1046,11 +1093,28 @@
         el("td", { class: "small", text: (entry.remaining_seconds || 0) + "s" }),
         el("td", { class: "small", text: entry.next_probe_at ? when(new Date(entry.next_probe_at * 1000).toISOString()) : "Unknown" }),
         el("td", { class: "small", text: (entry.state || "unknown") + (entry.probe_in_flight ? " · probe in flight" : "") }),
-        el("td", { class: "small muted", text: (entry.reason || "") + (entry.request_id ? " · event " + entry.request_id : "") })
+        el("td", { class: "small muted", text: (entry.reason || "") + (entry.request_id ? " · event " + entry.request_id : "") }),
+        el("td", {}, [clearButton])
       ]));
     });
     table.appendChild(tbody);
     card.appendChild(table);
+    // The mass clear lives next to the table it empties, and it names the
+    // exact number of entries before anything is removed. The server
+    // refuses it unless the payload itself says scope: "all".
+    card.appendChild(el("div", { class: "small" }, [
+      el("button", {
+        type: "button", text: "Clear all cooldowns",
+        onclick: function () {
+          clearCooldowns(
+            { action: "clear_cooldowns", scope: "all" },
+            "Clear all " + keys.length + " local cooldown(s) held by this gateway?\n\n" +
+            "This removes every provider and route cooldown, for every provider. " +
+            "Only do this after you have confirmed every subscription or reset window has reopened."
+          );
+        }
+      })
+    ]));
     return card;
   }
 
@@ -3438,6 +3502,17 @@
         state = view;
         try {
           return renderSettings();
+        } finally {
+          state = previous;
+        }
+      },
+      renderCooldownTableForTest: function (view) {
+        // The operator's cooldown view with its clear controls, rendered
+        // against a fixture state so a test can drive the buttons.
+        var previous = state;
+        state = view;
+        try {
+          return cooldownTable();
         } finally {
           state = previous;
         }
