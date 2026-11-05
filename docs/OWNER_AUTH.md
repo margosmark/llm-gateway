@@ -49,8 +49,9 @@ One username/password account. It protects `GET /owner/` and every
 - **CSRF.** No CSRF token: `SameSite=Strict` stops the cookie from being
   sent cross-site. `check_forwarded_headers` and `check_host` run for
   every request first - bearer included - and `check_origin` enforces
-  the exact canonical `Origin` on a browser-surface request **before
-  its authentication runs**, with one deliberate exception: it returns
+  the exact canonical `Origin` on a browser-surface **mutation** before
+  its authentication runs (non-mutating methods return early: a read is
+  not origin-checked), with one deliberate exception: it returns
   early for any request that presents a bearer `Authorization` header
   (a machine client has no browser Origin). That exception cannot open
   a cookie-CSRF path: a hostile page cannot set `Authorization` (it is
@@ -139,11 +140,12 @@ login (it never issues or satisfies a session cookie) and not the
 client API key (`/v1` refuses a valid machine key with
 `401 invalid_api_key`, even on the keyless default).
 
-- **Mint - shown once.** The value is generated server-side (`gwmk_` +
-  64 hex) and returned exactly once, in the create (and the rotate)
-  response; every later read returns only the random `display_id`,
-  name, scope, timestamps and last use. At most 100 active keys
-  (`MACHINE_KEY_MAX_ACTIVE`).
+- **Mint - shown once.** The value is generated server-side (`gwmk_`
+  + 43 base64url characters derived from 32 random bytes) and returned
+  exactly once, in the create (and the rotate) response; every later
+  read returns only the random `display_id`, name, scope and last use
+  — no `created_at`: that timestamp exists only in the create/rotate
+  response. At most 100 active keys (`MACHINE_KEY_MAX_ACTIVE`).
 - **Storage - hash only.** `machine_keys.json`, `0600` inside the
   `0700` data directory, holds a SHA-256 digest per key keyed on a
   **separate pepper** file `machine_key_pepper` (`0600`, independent
