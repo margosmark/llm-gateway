@@ -232,8 +232,8 @@ acceptance: `docs/OWNER_AUTH.md`; MCP contract: `docs/GATEWAY_MCP_SPEC.md`.
   leave the row; the console never shows it again, and it never
   appears in a log line, an export or `/version`. At most 100 active
   keys.
-- **List.** The same tab shows display id, name, scope, created and
-  last use for every key — never the value.
+- **List.** The same tab shows display id, name, scope and last use
+  for every key — never the value.
 - **Rotate.** Same display id, new value shown once; the old value
   stops working **immediately** — there is no rotation grace window
   (unlike the model client key's 10-minute one).
