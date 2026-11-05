@@ -4,13 +4,31 @@ A personal, LAN-only, OpenAI-compatible LLM gateway. It lets one owner manage
 their LLM access through a browser — no editing files, no Docker commands, no
 environment variables, no JSON.
 
-Two providers are in scope:
+Seven providers are registered — four cloud providers and three local
+servers:
 
 | Provider | Credential | Wire dialect |
 |---|---|---|
+| **Anthropic** | API key, stored in its own provider-scoped credential file | Anthropic Messages (native), bridged to Chat Completions and Responses; `POST /v1/messages` |
 | **ChatGPT / Codex** | user-operated device-code authorisation (beta) | Responses API |
-| **OpenCode Go** | API key | Responses, Chat Completions, Anthropic Messages, or Google v1beta — **per model** |
 | **OpenCode Console Jev** | API key | Native System One structured decisions (`/v1/systemone`), not chat completions |
+| **OpenCode Go** | API key | Responses, Chat Completions, Anthropic Messages, or Google v1beta — **per model** |
+| **Ollama**, **llama.cpp server**, **LM Studio** — three fixed ids (`ollama`, `llama_cpp`, `lm_studio`) behind one shared `LocalOpenAIAdapter` | **Keyless by default**; an optional enrolled local token, only when the server itself requires one | OpenAI-compatible local server: `GET /v1/models`, `POST /v1/chat/completions` |
+
+The three local providers are the only outbound destination the owner types
+themselves, so they carry an egress boundary the cloud providers do not
+need. The endpoint must be an `http`/`https` URL whose host is inside
+`127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16` or `fc00::/7`; public
+addresses, link-local and metadata addresses (`169.254/16`, `fe80::/10`,
+including `169.254.169.254`) and everything else are refused — twice. Once
+when the URL is saved, and again against the socket's actual peer after the
+TCP handshake and **before any request byte is written** (before the TLS
+handshake on `https://`), so a hostname that changes its answer between the
+two is still refused with nothing sent. Redirects are never followed. The
+endpoint is changed only from the owner console (`Providers → <card> →
+Save endpoint`), and with no endpoint saved the provider stays *not
+configured* and is never contacted — nothing is downloaded, and the gateway
+never fetches a model.
 
 ---
 
@@ -130,8 +148,8 @@ Then, from a trusted LAN device:
 6. Create an alias, pick a primary, publish it.
 7. Point a LAN client at the alias.
 
-The console opens on **Set up your gateway** with that checklist. The two
-supported provider *cards* are visible so the owner can choose one, but a
+The console opens on **Set up your gateway** with that checklist. Every
+supported provider *card* is visible so the owner can choose one, but a
 fresh install has zero provider credentials, zero discovered models, zero
 profiles, zero aliases and zero published models.
 
@@ -189,6 +207,37 @@ explicit action stores the key and then validates it against
 `https://opencode.ai/inference/go/v1/models`; ordinary page loads still never
 call a provider. The key is stored in a private credential store,
 separately from any other provider, and is **never displayed again**.
+
+### Local model servers (Ollama, llama.cpp, LM Studio)
+
+`Providers → Ollama (local)` / `llama.cpp server (local)` / `LM Studio
+(local)` → enter a **Server base URL** → **Save endpoint**.
+
+All three are the same OpenAI-compatible surface, so the setup is one field
+and no key. The URL must resolve to a private or loopback address
+(`127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `fc00::/7`) — see the
+egress note at the top of this file. `127.0.0.1` is the safe default for a
+server on the gateway host itself: `[::1]` sits outside the allowlist (there
+is no `::1/128`) and `localhost` is refused whenever its answer carries that
+IPv6 half — deliberately fail-closed, so use `127.0.0.1`. Saving an endpoint
+is the only thing that configures the provider: it makes no connection at
+boot, and **Refresh model catalog** is what discovers models — saving a
+different endpoint clears the models the previous one produced.
+
+**No credential is needed by default.** Ollama, `llama-server` and LM Studio
+are all keyless out of the box, so the gateway sends no `Authorization`
+header. Only if you enabled authentication on the server itself
+(`llama-server --api-key`, LM Studio *Require Auth*) do you enrol that token
+in the **Optional local token** field on the same card; otherwise the
+connection test fails with an authentication error.
+
+Capabilities and cost stay **Unknown** until evidence exists: these servers
+publish no capability evidence through `/v1/models` and no tariff, so tools
+and image input start off (moving only on your explicit approval, or on
+Ollama's own documented `POST /api/show` output) and local cost is never a
+number. Real-server compatibility is unclaimed — the tests run against
+scripted loopback fixtures, not against a live Ollama/llama-server/LM Studio
+(`docs/PROVIDER_CONTRACTS.md`).
 
 ---
 
