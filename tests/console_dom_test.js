@@ -1916,6 +1916,218 @@ check("the provider-card clear button is unchanged: provider-only payload, origi
   }
 });
 
+// --- machine keys (MCP / automation) ------------------------------------
+
+const MACHINE_KEY_ROWS = [
+  { display_id: "mk_1a2b3c4d", name: "laptop-mcp", scope: "read", last_used_at: "2026-11-04T10:00:00Z" },
+  { display_id: "mk_5e6f7a8b", name: "ci-mcp", scope: "write", last_used_at: null },
+];
+
+check("the machine key list shows display id, name, scope and last-used only", function () {
+  const card = helpers.renderMachineKeysForTest(MACHINE_KEY_ROWS, fixtureState());
+  const text = collectText(card).join("\n");
+  assert(text.includes("mk_1a2b3c4d"), "the display id is shown");
+  assert(text.includes("laptop-mcp"), "the name is shown");
+  assert(text.includes("read only"), "a read scope reads as read only");
+  assert(text.includes("read + write"), "a write scope reads as read plus write");
+  assert(text.includes("never"), "an unused key says never");
+  // The renderer has no value to draw: the list is metadata by contract.
+  assert(!text.includes("gwmk_"), "no key material in the list");
+  const headers = findAll(card, (n) => n.tag === "th").map((n) => n.textContent);
+  assert.deepStrictEqual(
+    headers,
+    ["Key id", "Name", "Scope", "Last used", "Actions"],
+    "the list is exactly display id, name, scope, last-used (+ actions)"
+  );
+});
+
+check("the machine key card offers read and write scopes and nothing else", function () {
+  const card = helpers.renderMachineKeysForTest([], fixtureState());
+  const buttons = findAll(card, (n) => n.tag === "button");
+  assert(buttons.some((b) => b.textContent === "Create machine key"), "a create control exists");
+  const select = findAll(card, (n) => n.tag === "select")
+    .find((n) => n.attributes.id === "machine-key-scope");
+  assert(select, "a scope select exists");
+  assert.deepStrictEqual(
+    select.children.map((o) => o.attributes.value),
+    ["read", "write"],
+    "exactly two scopes - no third is offered"
+  );
+  const text = collectText(card).join("\n");
+  assert(text.includes("No machine keys yet"), "an empty list says so");
+  assert(
+    text.includes("a machine key can never list, create, rotate or revoke keys"),
+    "the console states that a machine key cannot manage keys"
+  );
+});
+
+check("the one-time reveal shows the value once and never in the list", function () {
+  const reveal = {
+    display_id: "mk_1a2b3c4d",
+    name: "laptop-mcp",
+    scope: "read",
+    key: "gwmk_freshly-created-value",
+  };
+  const card = helpers.renderMachineKeysForTest(MACHINE_KEY_ROWS, fixtureState(), reveal);
+  const input = findAll(card, (n) => n.tag === "input")
+    .find((n) => n.attributes.id === "machine-key-reveal");
+  assert(input, "the reveal input exists");
+  assert.strictEqual(input.attributes.value, reveal.key, "the value is shown to the owner");
+  assert.strictEqual(input.attributes.readonly, "", "the reveal input is read-only");
+  const text = collectText(card).join("\n");
+  assert(text.includes("shown exactly once"), "the once-only warning is stated");
+  const buttons = findAll(card, (n) => n.tag === "button").map((b) => b.textContent);
+  assert(buttons.includes("Copy key"), "a copy action exists");
+  assert(buttons.includes("I have stored it"), "the owner can dismiss the reveal");
+  // The list under the reveal still carries metadata only.
+  assert(text.includes("mk_5e6f7a8b"), "the list still renders");
+});
+
+check("creating a machine key posts name and scope and holds the value for one reveal", function () {
+  const recorded = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  const realWindow = global.window;
+  const realGetElementById = global.document.getElementById;
+  const inputs = {
+    "machine-key-name": { value: "laptop-mcp" },
+    "machine-key-scope": { value: "write" },
+  };
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  globalThis.confirm = function () { return true; };
+  global.document.getElementById = function (id) {
+    if (inputs[id]) return inputs[id];
+    if (id === "machine-key-reveal") return { value: "", select: function () {} };
+    return null;
+  };
+  const created = {
+    ok: true,
+    action: "create",
+    shown_once: true,
+    machine_key: { display_id: "mk_new1", name: "laptop-mcp", scope: "write", key: "gwmk_fresh" },
+  };
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({
+      url: url,
+      method: options.method || "GET",
+      body: options.body ? JSON.parse(options.body) : null,
+    });
+    if ((options.method || "GET") === "POST") return jsonResponse(created);
+    return jsonResponse({
+      machine_keys: [{ display_id: "mk_new1", name: "laptop-mcp", scope: "write", last_used_at: null }],
+      count: 1,
+    });
+  };
+  try {
+    const card = helpers.renderMachineKeysForTest([], fixtureState());
+    const button = findAll(card, (n) => n.tag === "button")
+      .find((b) => b.textContent === "Create machine key");
+    button.listeners.click();
+
+    const posts = recorded.filter((r) => r.method === "POST");
+    assert.strictEqual(posts.length, 1, "one create request");
+    assert(posts[0].url.endsWith("/api/machine-keys"), posts[0].url);
+    assert.deepStrictEqual(
+      posts[0].body,
+      { action: "create", name: "laptop-mcp", scope: "write" },
+      "name and scope are posted, nothing else"
+    );
+    const state = helpers.machineKeysStateForTest();
+    assert.strictEqual(state.reveal && state.reveal.key, "gwmk_fresh", "the value is held for one reveal");
+    assert.strictEqual(state.rows.length, 1, "the list reloads after creation");
+    assert.strictEqual(inputs["machine-key-name"].value, "", "the name field is cleared");
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+    global.document.getElementById = realGetElementById;
+  }
+});
+
+check("rotate and revoke confirm first and post the display id", function () {
+  const recorded = [];
+  const confirms = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  globalThis.confirm = function (message) { confirms.push(message); return true; };
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({
+      url: url,
+      method: options.method || "GET",
+      body: options.body ? JSON.parse(options.body) : null,
+    });
+    if ((options.method || "GET") === "POST") {
+      return jsonResponse({ ok: true, action: "rotate", machine_key: { display_id: "mk_1a2b3c4d", key: "gwmk_next" } });
+    }
+    return jsonResponse({ machine_keys: [], count: 0 });
+  };
+  try {
+    const card = helpers.renderMachineKeysForTest(MACHINE_KEY_ROWS, fixtureState());
+    const buttons = findAll(card, (n) => n.tag === "button");
+    buttons.find((b) => b.textContent === "Rotate").listeners.click();
+    buttons.find((b) => b.textContent === "Revoke").listeners.click();
+
+    assert.strictEqual(confirms.length, 2, "both destructive actions confirm");
+    assert(confirms[0].includes("mk_1a2b3c4d"), "the confirmation names the key id");
+    assert(confirms[1].includes("stops working at once"), "revocation states the immediacy");
+    const posts = recorded.filter((r) => r.method === "POST");
+    assert.deepStrictEqual(
+      posts.map((p) => p.body),
+      [
+        { action: "rotate", display_id: "mk_1a2b3c4d" },
+        { action: "revoke", display_id: "mk_1a2b3c4d" },
+      ],
+      "both post the display id and nothing else"
+    );
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
+check("declining a machine key confirmation sends nothing", function () {
+  const recorded = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  globalThis.confirm = function () { return false; };
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET" });
+    return jsonResponse({ machine_keys: [], count: 0 });
+  };
+  try {
+    const card = helpers.renderMachineKeysForTest(MACHINE_KEY_ROWS, fixtureState());
+    const buttons = findAll(card, (n) => n.tag === "button");
+    buttons.find((b) => b.textContent === "Rotate").listeners.click();
+    buttons.find((b) => b.textContent === "Revoke").listeners.click();
+    assert.strictEqual(
+      recorded.filter((r) => r.method === "POST").length,
+      0,
+      "a declined confirmation must not touch the API"
+    );
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
 if (failures.length) {
   console.error("\n" + failures.length + " check(s) failed");
   process.exit(1);

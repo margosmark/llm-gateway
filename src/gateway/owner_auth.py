@@ -1,6 +1,6 @@
 """Owner authentication and the optional model client API key.
 
-Two separate boundaries live in this module and must never be conflated:
+Three separate boundaries live in this module and must never be conflated:
 
 * **Owner authentication** protects the owner console and every owner
   configuration API. It is one username/password account with server-side
@@ -15,18 +15,26 @@ Two separate boundaries live in this module and must never be conflated:
   endpoints; clearing the key restores keyless access. Rotation keeps the
   previous key valid for an explicit grace window so a rollout cannot lock
   clients out mid-change.
+* **Machine keys** are the third credential: console-generated bearer
+  tokens for MCP and other automation against the owner API, with a
+  ``read`` or ``write`` scope, shown exactly once, hash-only on disk,
+  revocable at once. They are never a session (no cookie is ever issued
+  for one), never a model key (``/v1`` refuses them), and never a
+  password.
 
 Rules this module enforces:
 
 * **A stored secret is never returned.** The account stores a PBKDF2 hash,
-  sessions are stored as SHA-256 hashes of their tokens, and the client key
-  is stored as a SHA-256 hash plus a random display id. No read path hands
-  secret material back, so no response, log line or export can carry it.
-* **No default credential exists.** There is no admin/admin: the password is
-  chosen during the one-time setup, and the setup code is single-use.
-* The setup code, the password and the client key are written only to
-  owner-only files on the gateway host (``0600`` inside a ``0700``
-  directory) or accepted in a request body.
+  sessions are stored as SHA-256 hashes of their tokens, the client key
+  is stored as a SHA-256 hash plus a random display id, and machine keys
+  are stored as an HMAC-SHA-256 digest under a separate local pepper.
+  No read path hands secret material back, so no response, log line or
+  export can carry it.
+* **No default credential exists.** There is no admin/admin: the password
+  is chosen during the one-time setup, and the setup code is single-use.
+* The setup code, the password, the client key and machine keys are
+  written only to owner-only files on the gateway host (``0600`` inside
+  a ``0700`` directory) or accepted in a request body.
 * Login and setup attempts are throttled per account and per client
   address, in memory, so a brute-force attempt cannot run unbounded.
 * Every mutation is serialised under one lock and persisted atomically, so
@@ -683,6 +691,350 @@ class OwnerAuthStore:
         return False
 
 
+# --- machine keys (MCP / automation) ------------------------------------
+#
+# The third credential, kept apart from the owner password/session and
+# from the model client key. Console-generated, shown exactly once,
+# hash-only on disk, scoped ``read`` or ``write``, revocable at once.
+
+#: The store and its pepper both live in the owner-only data directory:
+#: the store is ``0600`` like every other secret here, the pepper is a
+#: *separate* ``0600`` file so a copy of the store alone cannot be
+#: attacked offline.
+MACHINE_KEY_FILE_NAME = "machine_keys.json"
+MACHINE_KEY_PEPPER_FILE_NAME = "machine_key_pepper"
+
+#: Every machine key carries this marker, so a value can be recognised
+#: (and refused on the model API) without the store ever holding one.
+MACHINE_KEY_PREFIX = "gwmk_"
+MACHINE_KEY_NAME_MAX = 64
+#: Bounded store: a runaway console script cannot grow the file forever.
+MACHINE_KEY_MAX_ACTIVE = 100
+#: ``last_used_at`` is written back at most this often, so a polling
+#: automation client cannot turn every read into a disk write. The value
+#: still updates in memory on every use, and the console's list read
+#: flushes any pending update before it answers.
+MACHINE_KEY_LAST_USED_FLUSH_SECONDS = 60.0
+MACHINE_KEY_SCOPES = ("read", "write")
+
+
+def validate_machine_key_name(name: Any) -> str:
+    if not isinstance(name, str):
+        raise OwnerAuthError(400, "invalid_machine_key_name", "name must be a string")
+    cleaned = name.strip()
+    if not 1 <= len(cleaned) <= MACHINE_KEY_NAME_MAX:
+        raise OwnerAuthError(
+            400, "invalid_machine_key_name",
+            f"name must be 1-{MACHINE_KEY_NAME_MAX} characters",
+        )
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in cleaned):
+        raise OwnerAuthError(
+            400, "invalid_machine_key_name", "name must not contain control characters",
+        )
+    return cleaned
+
+
+def validate_machine_key_scope(scope: Any) -> str:
+    if not isinstance(scope, str) or scope not in MACHINE_KEY_SCOPES:
+        raise OwnerAuthError(
+            400, "invalid_scope", "scope must be 'read' or 'write'",
+        )
+    return scope
+
+
+class MachineKeyStore:
+    """Console-generated machine keys for MCP and other automation.
+
+    What this store guarantees:
+
+    * **The plaintext exists only in the return value of**
+      :meth:`create` / :meth:`rotate`. On disk there is an HMAC-SHA-256
+      digest keyed by a local pepper, plus display id, name, scope and
+      timestamps - never the key, never anything derived from it that
+      could be reversed. No read path returns secret material.
+    * **Rotate replaces the secret immediately** (same display id, new
+      value, old value dead on the next request) and **revoke deletes the
+      record**, so a revoked key cannot be resurrected by a stale cache:
+      :meth:`authenticate` re-reads the file whenever it changed on
+      disk, exactly like the session store does for ``--reset-owner-password``.
+    * **One file, one lock, atomic writes**: concurrent create/rotate/
+      revoke serialise and each write is a complete record.
+    * ``last_used_at`` is throttled to a write a minute (see
+      :data:`MACHINE_KEY_LAST_USED_FLUSH_SECONDS`); the list read flushes
+      it, so the console never shows a value older than the last list.
+    """
+
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._dir = ensure_private_dir(Path(data_dir))
+        self._path = self._dir / MACHINE_KEY_FILE_NAME
+        self._pepper_path = self._dir / MACHINE_KEY_PEPPER_FILE_NAME
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._revision = 0
+        self._pepper_value: bytes | None = None
+        self._last_flush_at: float | None = None
+        self._data = self._load()
+        self._disk_fingerprint = self._fingerprint()
+
+    # --- persistence -----------------------------------------------------
+
+    def _fingerprint(self) -> tuple[int, int] | None:
+        try:
+            stat = self._path.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _reload_if_changed(self) -> None:
+        fingerprint = self._fingerprint()
+        with self._lock:
+            if fingerprint == self._disk_fingerprint:
+                return
+            self._data = self._load()
+            self._disk_fingerprint = self._fingerprint()
+            self._revision += 1
+
+    def _load(self) -> dict[str, Any]:
+        raw = read_json(self._path, None)
+        data: dict[str, Any] = {"version": 1, "keys": {}}
+        if not isinstance(raw, dict):
+            return data
+        keys = raw.get("keys")
+        if not isinstance(keys, dict):
+            return data
+        for display_id, record in keys.items():
+            # Anything malformed is dropped rather than trusted: a
+            # hand-edited file degrades to "fewer keys", never to a
+            # key that authenticates with a forged scope.
+            if not isinstance(display_id, str) or not isinstance(record, dict):
+                continue
+            if not isinstance(record.get("key_hash"), str):
+                continue
+            if record.get("scope") not in MACHINE_KEY_SCOPES:
+                continue
+            if not isinstance(record.get("name"), str):
+                continue
+            data["keys"][display_id] = record
+        return data
+
+    def _save(self) -> None:
+        atomic_write_json(self._path, self._data, mode=0o600)
+        self._disk_fingerprint = self._fingerprint()
+        self._revision += 1
+
+    @property
+    def revision(self) -> int:
+        with self._lock:
+            return self._revision
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def _pepper(self) -> bytes | None:
+        """The local pepper; ``None`` means authentication fails closed.
+
+        First use mints it into its own ``0600`` file. If it is missing
+        or unreadable while keys exist, verification returns ``None``
+        instead of silently minting a fresh one - a pepper that changed
+        under a live store must stop every key, not invent a working set.
+        """
+        with self._lock:
+            if self._pepper_value is not None:
+                return self._pepper_value
+            payload = read_json(self._pepper_path, None)
+            if isinstance(payload, dict) and isinstance(payload.get("pepper"), str):
+                try:
+                    value = bytes.fromhex(payload["pepper"])
+                except ValueError:
+                    return None
+                if len(value) >= 32:
+                    self._pepper_value = value
+                    return value
+                return None
+            if self._pepper_path.exists():
+                # Present but unreadable/corrupt: fail closed.
+                return None
+            if read_json(self._path, None) is not None and self._data["keys"]:
+                # Keys exist but the pepper is gone: do not mint a new
+                # one, which would pretend the old keys still work.
+                return None
+            value = secrets.token_bytes(32)
+            atomic_write_json(self._pepper_path, {"pepper": value.hex()}, mode=0o600)
+            self._pepper_value = value
+            return value
+
+    def _digest(self, token: str) -> str | None:
+        pepper = self._pepper()
+        if pepper is None:
+            return None
+        return hmac.new(pepper, token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    # --- console operations ---------------------------------------------
+
+    def create(self, name: Any, scope: Any) -> dict[str, Any]:
+        """Mint a key. The plaintext is returned once and never stored."""
+        name = validate_machine_key_name(name)
+        scope = validate_machine_key_scope(scope)
+        now = self._clock()
+        token = MACHINE_KEY_PREFIX + secrets.token_urlsafe(32)
+        digest = self._digest(token)
+        if digest is None:
+            raise OwnerAuthError(
+                500, "machine_key_store_unavailable",
+                "the machine key store is unavailable; check the gateway data directory",
+            )
+        with self._lock:
+            if len(self._data["keys"]) >= MACHINE_KEY_MAX_ACTIVE:
+                raise OwnerAuthError(
+                    409, "too_many_machine_keys",
+                    f"at most {MACHINE_KEY_MAX_ACTIVE} machine keys can be active; revoke one first",
+                )
+            display_id = "mk_" + secrets.token_hex(4)
+            while display_id in self._data["keys"]:
+                display_id = "mk_" + secrets.token_hex(4)
+            self._data["keys"][display_id] = {
+                "key_hash": digest,
+                "display_id": display_id,
+                "name": name,
+                "scope": scope,
+                "created_at": now,
+                "last_used_at": None,
+            }
+            self._save()
+        return {
+            "display_id": display_id,
+            "name": name,
+            "scope": scope,
+            "key": token,
+            "created_at": now,
+        }
+
+    def rotate(self, display_id: Any) -> dict[str, Any]:
+        """Replace a key's secret. The old value stops working at once."""
+        if not isinstance(display_id, str) or not display_id:
+            raise OwnerAuthError(400, "invalid_display_id", "display id is required")
+        now = self._clock()
+        token = MACHINE_KEY_PREFIX + secrets.token_urlsafe(32)
+        digest = self._digest(token)
+        if digest is None:
+            raise OwnerAuthError(
+                500, "machine_key_store_unavailable",
+                "the machine key store is unavailable; check the gateway data directory",
+            )
+        with self._lock:
+            record = self._data["keys"].get(display_id)
+            if record is None:
+                raise OwnerAuthError(
+                    404, "unknown_machine_key", "no machine key with that display id",
+                )
+            # Same display id: the audit trail keeps one identity while
+            # the secret changes, and the previous value is dead here -
+            # there is no grace window for a machine key.
+            record["key_hash"] = digest
+            record["rotated_at"] = now
+            self._save()
+        return {
+            "display_id": display_id,
+            "name": record.get("name"),
+            "scope": record.get("scope"),
+            "key": token,
+            "rotated_at": now,
+        }
+
+    def revoke(self, display_id: Any) -> dict[str, Any]:
+        """Delete a key. The record - and with it the only accepted hash - is gone."""
+        if not isinstance(display_id, str) or not display_id:
+            raise OwnerAuthError(400, "invalid_display_id", "display id is required")
+        with self._lock:
+            record = self._data["keys"].pop(display_id, None)
+            if record is None:
+                raise OwnerAuthError(
+                    404, "unknown_machine_key", "no machine key with that display id",
+                )
+            self._save()
+        return {"display_id": display_id, "revoked": True}
+
+    def list(self) -> list[dict[str, Any]]:
+        """Display id, name, scope and last-used - nothing else, ever."""
+        self._reload_if_changed()
+        with self._lock:
+            self._flush_last_used()
+            rows = [
+                {
+                    "display_id": display_id,
+                    "name": record.get("name"),
+                    "scope": record.get("scope"),
+                    "last_used_at": record.get("last_used_at"),
+                }
+                for display_id, record in self._data["keys"].items()
+            ]
+        rows.sort(key=lambda row: (row["name"] or "", row["display_id"] or ""))
+        return rows
+
+    def describe(self) -> dict[str, Any]:
+        """A log/report-safe description: counts only, never values."""
+        self._reload_if_changed()
+        with self._lock:
+            return {"count": len(self._data["keys"])}
+
+    # --- authentication ---------------------------------------------------
+
+    def authenticate(self, token: Any, *, touch: bool = True) -> dict[str, Any] | None:
+        """Resolve a presented bearer to its record, or ``None``.
+
+        Every call re-reads the file when it changed, so a revoke or a
+        rotate written by this process - or by any other writer - is in
+        effect on the very next request. Nothing about a key is cached
+        across calls.
+        """
+        if not isinstance(token, str) or not token or len(token) > 512:
+            return None
+        if not token.startswith(MACHINE_KEY_PREFIX):
+            return None
+        self._reload_if_changed()
+        digest = self._digest(token)
+        if digest is None:
+            return None
+        matched: str | None = None
+        with self._lock:
+            for display_id, record in self._data["keys"].items():
+                if hmac.compare_digest(str(record.get("key_hash", "")), digest):
+                    matched = display_id
+                    break
+            if matched is None:
+                return None
+            record = self._data["keys"][matched]
+            result = {
+                "display_id": matched,
+                "name": record.get("name"),
+                "scope": record.get("scope"),
+            }
+            if touch:
+                record["last_used_at"] = self._clock()
+        if touch:
+            with self._lock:
+                self._flush_last_used()
+        return result
+
+    def _flush_last_used(self) -> None:
+        """Persist pending ``last_used_at`` updates at most once a minute.
+
+        Called with the lock held. A flush is a full atomic write of the
+        (small) store, so the throttle is what keeps a polling client off
+        the disk.
+        """
+        now = self._clock()
+        if self._last_flush_at is None or now - self._last_flush_at >= MACHINE_KEY_LAST_USED_FLUSH_SECONDS:
+            self._save()
+            self._last_flush_at = now
+
+
 def describe_store(store: OwnerAuthStore) -> dict[str, Any]:
     """A log/report-safe description: presence and shape, never values."""
     return {
@@ -699,6 +1051,14 @@ __all__ = [
     "DEFAULT_PBKDF2_ITERATIONS",
     "LOGIN_MAX_FAILURES",
     "LOGIN_WINDOW_SECONDS",
+    "MACHINE_KEY_FILE_NAME",
+    "MACHINE_KEY_LAST_USED_FLUSH_SECONDS",
+    "MACHINE_KEY_MAX_ACTIVE",
+    "MACHINE_KEY_NAME_MAX",
+    "MACHINE_KEY_PEPPER_FILE_NAME",
+    "MACHINE_KEY_PREFIX",
+    "MACHINE_KEY_SCOPES",
+    "MachineKeyStore",
     "OwnerAuthError",
     "OwnerAuthStore",
     "SETUP_CODE_FILE_NAME",
@@ -707,6 +1067,8 @@ __all__ = [
     "hash_password",
     "verify_password",
     "validate_client_key",
+    "validate_machine_key_name",
+    "validate_machine_key_scope",
     "validate_password",
     "validate_username",
 ]
