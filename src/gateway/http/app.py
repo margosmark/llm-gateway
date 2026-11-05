@@ -1989,6 +1989,13 @@ class GatewayApp:
         # failure cannot be told apart from the others.
         request.context["action"] = action
         request.context["provider_id"] = provider_id
+        # The cooldown-clear action is dispatched before the provider
+        # lookup: its explicit all scope is not addressed to one provider
+        # at all. Every other scope still requires a known provider, so the
+        # unknown-provider refusal below is unchanged for the other three
+        # actions and for the provider and route scopes.
+        if action == "clear_cooldowns":
+            return self._handle_clear_cooldowns(payload, provider_id)
         adapter = self.registry.get(provider_id)
         if adapter is None:
             return json_response(
@@ -2173,29 +2180,93 @@ class GatewayApp:
             # The key is never echoed back.
             return json_response({"ok": True, "stored": True})
 
-        if action == "clear_cooldowns":
-            # The deliberate recovery action. The owner has confirmed the
-            # subscription/reset window is open, so the local circuits for
-            # exactly this provider are cleared. It never touches another
-            # provider's circuits, and it returns only metadata: the
-            # removed circuit entries, never a credential or request
-            # content. No provider is called unless the owner also asks
-            # for one explicit probe by naming its alias.
-            cleared = self.router.circuits.clear(provider=provider_id)
-            probe_alias = str(payload.get("probe_alias") or "")
-            probe = self._run_alias_probe(probe_alias) if probe_alias else None
-            return json_response(
-                {
-                    "ok": True,
-                    "provider": provider_id,
-                    "cleared": cleared,
-                    "cleared_count": len(cleared),
-                    "probe": probe,
-                }
-            )
-
         return json_response(
             {"error": {"message": f"unknown action '{action}'", "type": "unknown_action"}}, 400
+        )
+
+    def _handle_clear_cooldowns(self, payload: dict[str, Any], provider_id: str) -> Response:
+        """The deliberate recovery action, at a scope the owner names.
+
+        Three scopes, and the widest one is never a default:
+
+        * no ``scope`` (or ``scope="provider"``) - exactly the provider
+          named by ``provider_id`` and its routes. This is the original
+          behaviour, so the console's provider-card button is unchanged;
+        * ``scope="route"``, or a ``model`` (``route``) with no scope -
+          the single provider/model circuit;
+        * ``scope="all"`` - every circuit on the gateway, and only when
+          the payload spells ``all`` out. A defaulted field can never
+          reach ``clear(provider=None)``, so no accidental mass clear is
+          possible.
+
+        The response is metadata only: the removed entries and their
+        keys, never a credential or request content. No provider is
+        called unless the owner also asks for one explicit probe by
+        naming its alias.
+        """
+        scope_raw = payload.get("scope", None)
+        model_raw = payload.get("model", None)
+        route_raw = payload.get("route", None)
+        if (
+            (scope_raw is not None and not isinstance(scope_raw, str))
+            or (model_raw is not None and not isinstance(model_raw, str))
+            or (route_raw is not None and not isinstance(route_raw, str))
+        ):
+            return json_response(
+                {"error": {"message": "Invalid cooldown clear request", "type": "invalid_request"}}, 400
+            )
+        scope = scope_raw or ""
+        model = model_raw or route_raw or ""
+        if model_raw and route_raw and model_raw != route_raw:
+            return json_response(
+                {"error": {"message": "model and route name different circuits", "type": "invalid_request"}}, 400
+            )
+        if scope not in ("", "provider", "route", "all"):
+            return json_response(
+                {"error": {"message": "scope must be one of provider, route or all", "type": "invalid_scope"}}, 400
+            )
+        if scope == "provider" and model:
+            return json_response(
+                {"error": {"message": "the provider scope cannot name a route", "type": "invalid_scope"}}, 400
+            )
+        if scope == "all" and model:
+            return json_response(
+                {"error": {"message": "the all scope cannot name a route", "type": "invalid_scope"}}, 400
+            )
+        if scope == "route" and not model:
+            return json_response(
+                {"error": {"message": "a route clear must name the model", "type": "invalid_scope"}}, 400
+            )
+        # Everything except an unnamed-provider all clear addresses one
+        # provider, so the unknown-provider refusal applies exactly as it
+        # did before this action had a scope.
+        if scope != "all" or provider_id:
+            if self.registry.get(provider_id) is None:
+                return json_response(
+                    {"error": {"message": f"unknown provider '{provider_id}'", "type": "unknown_provider"}}, 404
+                )
+        if scope == "all":
+            resolved = "all"
+            cleared = self.router.circuits.clear()
+        elif model:
+            resolved = "route"
+            cleared = self.router.circuits.clear(provider=provider_id, model=model)
+        else:
+            resolved = "provider"
+            cleared = self.router.circuits.clear(provider=provider_id)
+        probe_alias = str(payload.get("probe_alias") or "")
+        probe = self._run_alias_probe(probe_alias) if probe_alias else None
+        return json_response(
+            {
+                "ok": True,
+                "scope": resolved,
+                "provider": None if resolved == "all" else provider_id,
+                "model": model if resolved == "route" else None,
+                "cleared": cleared,
+                "cleared_count": len(cleared),
+                "keys": [entry.get("key") for entry in cleared],
+                "probe": probe,
+            }
         )
 
     def _publish_limits(self, provider_id: str, observed_at: str) -> None:

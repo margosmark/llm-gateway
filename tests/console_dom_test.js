@@ -1602,6 +1602,320 @@ check("a public provider card has no endpoint field and no local privacy text", 
   assert.strictEqual(endpointInputs.length, 0);
 });
 
+// --- cooldown clear controls (card t_a278c4d4) --------------------------
+
+function cooldownFixtureState() {
+  return {
+    cooldown_details: {
+      "chatgpt_codex/*": {
+        provider: "chatgpt_codex", model: null, scope: "provider",
+        error_class: "exhausted", failures: 2, opened_at: 1762000000, until: 1762003600,
+        remaining_seconds: 3600, next_probe_at: 1762003600, probe_in_flight: false,
+        reason: "the provider reported that this account's allowance is exhausted",
+        request_id: "evt-1", state: "open"
+      },
+      "opencode_go/mimo-v2.6-flash": {
+        provider: "opencode_go", model: "mimo-v2.6-flash", scope: "route",
+        error_class: "rate_limited", failures: 1, opened_at: 1762000100, until: 1762000700,
+        remaining_seconds: 600, next_probe_at: 1762000700, probe_in_flight: false,
+        reason: "the provider rate-limited this route",
+        request_id: "evt-2", state: "open"
+      }
+    }
+  };
+}
+
+// A synchronous thenable with finally, so a click handler chained as
+// run(api(...)).then(...).catch(...) settles inside a check. The state is
+// resolved eagerly: a callback's returned thenable is drained on the spot,
+// never re-adopted (that is what blew the stack on the first draft).
+function settle(value, failed) {
+  const isThenable = (v) => !!v && (typeof v === "object" || typeof v === "function") && typeof v.then === "function";
+  return {
+    then(onFulfilled, onRejected) {
+      const fn = failed ? onRejected : onFulfilled;
+      if (typeof fn !== "function") return settle(value, failed);
+      let out;
+      try {
+        const result = fn(value);
+        if (isThenable(result)) {
+          let settled = false;
+          result.then(
+            (x) => { if (!settled) { settled = true; out = settle(x, false); } },
+            (e) => { if (!settled) { settled = true; out = settle(e, true); } }
+          );
+          if (!settled) throw new Error("async thenables are not supported by this test harness");
+        } else {
+          out = settle(result, false);
+        }
+      } catch (error) {
+        out = settle(error, true);
+      }
+      return out;
+    },
+    catch(onRejected) { return this.then(undefined, onRejected); },
+    finally(onFinally) {
+      try { if (typeof onFinally === "function") onFinally(); }
+      catch (error) { return settle(error, true); }
+      return this;
+    },
+  };
+}
+
+function jsonResponse(value) {
+  return settle({
+    ok: true,
+    headers: { get: function () { return "application/json"; } },
+    json: function () { return settle(value, false); },
+    text: function () { return settle(JSON.stringify(value), false); }
+  }, false);
+}
+
+check("the cooldown table offers one clear control per held circuit and a counted clear-all", function () {
+  const card = helpers.renderCooldownTableForTest(cooldownFixtureState());
+  const headers = findAll(card, (node) => node.tag === "th").map((node) => node.textContent);
+  assert(headers.includes("Clear"), "the table needs a clear column");
+  const texts = findAll(card, (node) => node.tag === "button").map((node) => node.textContent);
+  assert.strictEqual(texts.filter((t) => t === "Clear").length, 2, "one clear button per held circuit");
+  assert(texts.includes("Clear all cooldowns"), "the mass clear sits next to the table it empties");
+  const empty = helpers.renderCooldownTableForTest({ cooldown_details: {} });
+  assert.strictEqual(findAll(empty, (node) => node.tag === "button").length, 0, "nothing held, nothing to clear");
+});
+
+check("a route row confirms, posts the route scope, reports the keys and refreshes the table", function () {
+  const recorded = [];
+  const confirms = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };  // toast cleanup must not outlive the check
+  global.window = globalThis;
+  globalThis.confirm = function (message) { confirms.push(message); return true; };
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+    if (options.method === "POST") {
+      return jsonResponse({
+        ok: true, scope: "route", provider: "opencode_go", model: "mimo-v2.6-flash",
+        cleared: [{ key: "opencode_go/mimo-v2.6-flash" }],
+        cleared_count: 1, keys: ["opencode_go/mimo-v2.6-flash"], probe: null
+      });
+    }
+    const after = cooldownFixtureState();
+    delete after.cooldown_details["opencode_go/mimo-v2.6-flash"];
+    return jsonResponse(after);
+  };
+  try {
+    const toastBefore = document.body.children.length;
+    const card = helpers.renderCooldownTableForTest(cooldownFixtureState());
+    const routeRow = findAll(card, (node) => node.tag === "tr")
+      .find((row) => collectText(row).join(" ").includes("opencode_go/mimo-v2.6-flash"));
+    const button = findAll(routeRow, (node) => node.tag === "button")[0];
+    button.listeners.click();
+
+    assert.strictEqual(confirms.length, 1, "a row clear must confirm first");
+    assert(confirms[0].includes("mimo-v2.6-flash"), "the confirmation names the route");
+    const posts = recorded.filter((r) => r.method === "POST");
+    assert.strictEqual(posts.length, 1);
+    assert.deepStrictEqual(posts[0].body, {
+      action: "clear_cooldowns", provider_id: "opencode_go",
+      model: "mimo-v2.6-flash", scope: "route"
+    }, "a route row clears exactly its route");
+    const refreshes = recorded.filter((r) => r.method === "GET" && r.url.endsWith("/api/state"));
+    assert.strictEqual(refreshes.length, 1, "the table refreshes from state after the clear");
+    const toasts = [];
+    for (let i = toastBefore; i < document.body.children.length; i += 1) {
+      toasts.push(collectText(document.body.children[i]).join("\n"));
+    }
+    const message = toasts.join("\n");
+    assert(message.includes("Cleared 1 cooldown(s)"), "the report states the count");
+    assert(message.includes("opencode_go/mimo-v2.6-flash"), "the report names the cleared key");
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
+check("a provider-wide row clears the provider scope and says its routes go too", function () {
+  const recorded = [];
+  const confirms = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  globalThis.confirm = function (message) { confirms.push(message); return true; };
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+    if (options.method === "POST") {
+      return jsonResponse({
+        ok: true, scope: "provider", provider: "chatgpt_codex", model: null,
+        cleared: [{ key: "chatgpt_codex/*" }, { key: "chatgpt_codex/gpt-6-luna" }],
+        cleared_count: 2, keys: ["chatgpt_codex/*", "chatgpt_codex/gpt-6-luna"], probe: null
+      });
+    }
+    return jsonResponse(cooldownFixtureState());
+  };
+  try {
+    const card = helpers.renderCooldownTableForTest(cooldownFixtureState());
+    const wideRow = findAll(card, (node) => node.tag === "tr")
+      .find((row) => collectText(row).join(" ").includes("chatgpt_codex/*"));
+    const button = findAll(wideRow, (node) => node.tag === "button")[0];
+    button.listeners.click();
+
+    assert(confirms[0].includes("whole-provider cooldown"), "the confirmation names the wider scope");
+    assert(confirms[0].includes("route cooldowns"), "the owner is told the routes go too");
+    const posts = recorded.filter((r) => r.method === "POST");
+    assert.deepStrictEqual(posts[0].body, {
+      action: "clear_cooldowns", provider_id: "chatgpt_codex", scope: "provider"
+    }, "a provider row never reaches the all scope");
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
+check("the clear-all control names the entry count and sends only scope: all", function () {
+  const recorded = [];
+  const confirms = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  globalThis.confirm = function (message) { confirms.push(message); return true; };
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+    if (options.method === "POST") {
+      return jsonResponse({
+        ok: true, scope: "all", provider: null, model: null,
+        cleared: [{ key: "chatgpt_codex/*" }, { key: "chatgpt_codex/gpt-6-luna" }, { key: "opencode_go/*" }, { key: "opencode_go/mimo-v2.6-flash" }],
+        cleared_count: 4,
+        keys: ["chatgpt_codex/*", "chatgpt_codex/gpt-6-luna", "opencode_go/*", "opencode_go/mimo-v2.6-flash"],
+        probe: null
+      });
+    }
+    const after = { cooldown_details: {} };
+    return jsonResponse(after);
+  };
+  try {
+    const toastBefore = document.body.children.length;
+    const card = helpers.renderCooldownTableForTest(cooldownFixtureState());
+    const button = findAll(card, (node) => node.tag === "button")
+      .find((node) => node.textContent === "Clear all cooldowns");
+    button.listeners.click();
+
+    assert.strictEqual(confirms.length, 1, "the mass clear must confirm first");
+    assert(confirms[0].includes("2 local cooldown(s)"), "the confirmation names how many entries go");
+    const posts = recorded.filter((r) => r.method === "POST");
+    assert.strictEqual(posts.length, 1);
+    assert.deepStrictEqual(
+      posts[0].body,
+      { action: "clear_cooldowns", scope: "all" },
+      "the mass clear says scope: all by name and carries no provider to default against"
+    );
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(posts[0].body, "provider_id"), false);
+    const toasts = [];
+    for (let i = toastBefore; i < document.body.children.length; i += 1) {
+      toasts.push(collectText(document.body.children[i]).join("\n"));
+    }
+    const message = toasts.join("\n");
+    assert(message.includes("Cleared 4 cooldown(s) across every provider"), "the report states the total");
+    assert(message.includes("chatgpt_codex/*"), "the report names the cleared keys");
+    assert.strictEqual(
+      recorded.filter((r) => r.method === "GET" && r.url.endsWith("/api/state")).length, 1,
+      "the table refreshes from state after the mass clear"
+    );
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
+check("declining any cooldown confirmation sends nothing", function () {
+  const recorded = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  globalThis.confirm = function () { return false; };
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET" });
+    return jsonResponse({});
+  };
+  try {
+    const card = helpers.renderCooldownTableForTest(cooldownFixtureState());
+    const buttons = findAll(card, (node) => node.tag === "button");
+    buttons.find((node) => node.textContent === "Clear all cooldowns").listeners.click();
+    buttons.find((node) => node.textContent === "Clear").listeners.click();
+    assert.strictEqual(recorded.length, 0, "a declined confirmation must not touch the API");
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
+check("the provider-card clear button is unchanged: provider-only payload, original confirmation", function () {
+  const recorded = [];
+  const confirms = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  globalThis.confirm = function (message) { confirms.push(message); return true; };
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+    if (options.method === "POST") {
+      return jsonResponse({
+        ok: true, provider: "anthropic", cleared: [], cleared_count: 0,
+        scope: "provider", model: null, keys: [], probe: null
+      });
+    }
+    return jsonResponse(cooldownFixtureState());
+  };
+  try {
+    const card = helpers.renderProviderForTest({
+      provider_id: "anthropic", kind: "anthropic", state: "connected", models: 3, base_url: null
+    });
+    const button = findAll(card, (node) => node.tag === "button")
+      .find((node) => node.textContent === "Clear cooldowns");
+    assert(button, "the provider card keeps its own clear button");
+    button.listeners.click();
+    assert(confirms[0].includes("single recovery probe"), "the provider-card confirmation wording is unchanged");
+    const posts = recorded.filter((r) => r.method === "POST");
+    assert.strictEqual(posts.length, 1);
+    assert.deepStrictEqual(
+      posts[0].body,
+      { action: "clear_cooldowns", provider_id: "anthropic" },
+      "the provider-card button still posts the provider-only default, with no scope field"
+    );
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
 if (failures.length) {
   console.error("\n" + failures.length + " check(s) failed");
   process.exit(1);

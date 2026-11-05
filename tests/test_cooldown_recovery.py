@@ -304,5 +304,171 @@ class OwnerRecoveryActionTests(unittest.TestCase):
         self.assertEqual(detail["error_class"], "exhausted")
 
 
+class CooldownClearScopeTests(unittest.TestCase):
+    """The three clear scopes, and the refusal of an unnamed mass clear."""
+
+    def setUp(self) -> None:
+        self.harness = GatewayHarness()
+        self.addCleanup(self.harness.close)
+        self.circuits = self.harness.router.circuits
+
+    def _seed(self) -> None:
+        # Four circuits: a provider-wide and a route hold on the fake
+        # provider, and the same pair on a second provider, so every scope
+        # has something to remove and something to leave alone.
+        self.circuits.record_failure(FAKE_PROVIDER, "gpt-6-luna", "exhausted", base_seconds=300)
+        self.circuits.record_failure(
+            "opencode_go", "mimo-v2.6-flash", "rate_limited", base_seconds=300, retry_after=600
+        )
+        self.circuits.record_failure("opencode_go", "mimo-v2.6-flash", "exhausted", base_seconds=300)
+        self.assertEqual(len(self.circuits.details()), 4, "the fixture must hold four circuits")
+
+    def _clear(self, **fields):
+        body = {"action": "clear_cooldowns"}
+        body.update(fields)
+        return self.harness.request("POST", "/owner/api/provider", body=body)
+
+    def _keys(self) -> set[str]:
+        return set(self.circuits.details())
+
+    def test_the_route_scope_clears_one_route_and_leaves_the_others(self) -> None:
+        self._seed()
+        status, payload, _headers = self._clear(
+            provider_id=FAKE_PROVIDER, model="gpt-6-luna", scope="route"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["scope"], "route")
+        self.assertEqual(payload["keys"], [f"{FAKE_PROVIDER}/gpt-6-luna"])
+        self.assertEqual(payload["cleared_count"], 1)
+        self.assertEqual(
+            self._keys(),
+            {f"{FAKE_PROVIDER}/*", "opencode_go/*", "opencode_go/mimo-v2.6-flash"},
+            "a route clear must leave every other circuit held",
+        )
+
+    def test_the_provider_scope_clears_its_whole_provider_only(self) -> None:
+        self._seed()
+        for fields in (
+            {"provider_id": FAKE_PROVIDER},
+            {"provider_id": FAKE_PROVIDER, "scope": "provider"},
+        ):
+            with self.subTest(fields=fields):
+                status, payload, _headers = self._clear(**fields)
+                self.assertEqual(status, 200, payload)
+                self.assertEqual(payload["scope"], "provider")
+                self.assertEqual(payload["provider"], FAKE_PROVIDER)
+                self.assertEqual(payload["keys"], [f"{FAKE_PROVIDER}/*", f"{FAKE_PROVIDER}/gpt-6-luna"])
+                self.assertEqual(
+                    self._keys(),
+                    {"opencode_go/*", "opencode_go/mimo-v2.6-flash"},
+                    "another provider's circuits must be left alone",
+                )
+                self._seed()  # restore the four circuits for the next pass
+
+    def test_the_all_scope_clears_every_circuit_and_says_so(self) -> None:
+        self._seed()
+        status, payload, _headers = self._clear(scope="all")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["scope"], "all")
+        self.assertIsNone(payload["provider"], "an all clear is addressed to no single provider")
+        self.assertEqual(payload["cleared_count"], 4)
+        self.assertEqual(
+            set(payload["keys"]),
+            {f"{FAKE_PROVIDER}/*", f"{FAKE_PROVIDER}/gpt-6-luna", "opencode_go/*", "opencode_go/mimo-v2.6-flash"},
+        )
+        self.assertEqual(self._keys(), set(), "the all scope must empty the store")
+
+    def test_no_defaulted_field_can_reach_an_all_clear(self) -> None:
+        self._seed()
+        # The default scope is the provider one: a payload that never says
+        # "all" must leave the other provider untouched.
+        status, payload, _headers = self._clear(provider_id=FAKE_PROVIDER)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["scope"], "provider")
+        self.assertIn("opencode_go/*", self._keys())
+        self._seed()  # back to four circuits, so every refusal below can prove it cleared nothing
+
+        # No provider at all: the unknown-provider refusal, nothing cleared.
+        status, payload, _headers = self._clear()
+        self.assertEqual(status, 404, payload)
+        self.assertEqual(payload["error"]["type"], "unknown_provider")
+        self.assertEqual(len(self._keys()), 4)
+
+        # A scope that is not one of the three is refused, not defaulted.
+        status, payload, _headers = self._clear(provider_id=FAKE_PROVIDER, scope="everything")
+        self.assertEqual(status, 400, payload)
+        self.assertEqual(payload["error"]["type"], "invalid_scope")
+        self.assertEqual(len(self._keys()), 4)
+
+        # "all" with a route named is contradictory and refused.
+        status, payload, _headers = self._clear(scope="all", model="gpt-6-luna")
+        self.assertEqual(status, 400, payload)
+        self.assertEqual(payload["error"]["type"], "invalid_scope")
+        self.assertEqual(len(self._keys()), 4)
+
+        # An unknown provider is refused even when the payload says "all".
+        status, payload, _headers = self._clear(scope="all", provider_id="no_such_provider")
+        self.assertEqual(status, 404, payload)
+        self.assertEqual(payload["error"]["type"], "unknown_provider")
+        self.assertEqual(len(self._keys()), 4)
+
+    def test_a_route_scope_without_a_model_is_refused(self) -> None:
+        self._seed()
+        status, payload, _headers = self._clear(provider_id=FAKE_PROVIDER, scope="route")
+        self.assertEqual(status, 400, payload)
+        self.assertEqual(payload["error"]["type"], "invalid_scope")
+        self.assertEqual(len(self._keys()), 4, "a refused clear must remove nothing")
+
+    def test_every_scope_reports_metadata_and_never_a_secret(self) -> None:
+        import json as _json
+
+        for fields in (
+            {"provider_id": FAKE_PROVIDER},
+            {"provider_id": FAKE_PROVIDER, "model": "gpt-6-luna", "scope": "route"},
+            {"scope": "all"},
+        ):
+            with self.subTest(fields=fields):
+                self._seed()
+                status, payload, _headers = self._clear(**fields)
+                self.assertEqual(status, 200, payload)
+                self.assertEqual(payload["cleared_count"], len(payload["cleared"]))
+                self.assertEqual(payload["keys"], [entry["key"] for entry in payload["cleared"]])
+                raw = _json.dumps(payload)
+                for field in ("token", "api_key", "credential", "secret", "probe_owner", "prompt"):
+                    self.assertNotIn(field, raw)
+                for entry in payload["cleared"]:
+                    for field in ("key", "provider", "error_class", "failures", "reason", "until"):
+                        self.assertIn(field, entry)
+
+    def test_the_state_table_refreshes_after_a_clear(self) -> None:
+        # cooldown_details is the table's data source: the console must see
+        # the post-clear truth on its next state fetch.
+        self._seed()
+        status, _payload, _headers = self._clear(
+            provider_id=FAKE_PROVIDER, model="gpt-6-luna", scope="route"
+        )
+        self.assertEqual(status, 200)
+        status, state, _headers = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        details = state["cooldown_details"]
+        self.assertNotIn(f"{FAKE_PROVIDER}/gpt-6-luna", details)
+        self.assertEqual(
+            set(details), {f"{FAKE_PROVIDER}/*", "opencode_go/*", "opencode_go/mimo-v2.6-flash"}
+        )
+
+        status, _payload, _headers = self._clear(scope="all")
+        self.assertEqual(status, 200)
+        status, state, _headers = self.harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(state["cooldown_details"], {})
+
+    def test_an_unknown_provider_is_still_refused_on_the_default_scope(self) -> None:
+        self._seed()
+        status, payload, _headers = self._clear(provider_id="no_such_provider")
+        self.assertEqual(status, 404, payload)
+        self.assertEqual(payload["error"]["type"], "unknown_provider")
+        self.assertEqual(len(self._keys()), 4)
+
+
 if __name__ == "__main__":
     unittest.main()
