@@ -777,6 +777,10 @@ class MachineKeyStore:
         self._lock = threading.RLock()
         self._revision = 0
         self._pepper_value: bytes | None = None
+        #: A stat of the pepper file that cached value was read from, so
+        #: a pepper deleted or replaced under a *live* store is noticed
+        #: on the next use instead of answering from a stale cache.
+        self._pepper_fingerprint: tuple[int, int] | None = None
         self._last_flush_at: float | None = None
         self._data = self._load()
         self._disk_fingerprint = self._fingerprint()
@@ -786,6 +790,14 @@ class MachineKeyStore:
     def _fingerprint(self) -> tuple[int, int] | None:
         try:
             stat = self._path.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _pepper_stat(self) -> tuple[int, int] | None:
+        """A stat of the pepper file; ``None`` when it is not there."""
+        try:
+            stat = self._pepper_path.stat()
         except OSError:
             return None
         return (stat.st_mtime_ns, stat.st_size)
@@ -839,34 +851,46 @@ class MachineKeyStore:
     def _pepper(self) -> bytes | None:
         """The local pepper; ``None`` means authentication fails closed.
 
-        First use mints it into its own ``0600`` file. If it is missing
-        or unreadable while keys exist, verification returns ``None``
-        instead of silently minting a fresh one - a pepper that changed
-        under a live store must stop every key, not invent a working set.
+        First use mints it into its own ``0600`` file. The cached value
+        is keyed by a stat of that file, so a pepper deleted, replaced
+        or corrupted *under a live store* stops every key on the very
+        next use: the fail-closed paths below run again instead of a
+        stale cache answering for a file that is no longer there.
         """
         with self._lock:
-            if self._pepper_value is not None:
+            fingerprint = self._pepper_stat()
+            if (
+                self._pepper_value is not None
+                and fingerprint is not None
+                and fingerprint == self._pepper_fingerprint
+            ):
                 return self._pepper_value
             payload = read_json(self._pepper_path, None)
             if isinstance(payload, dict) and isinstance(payload.get("pepper"), str):
                 try:
                     value = bytes.fromhex(payload["pepper"])
                 except ValueError:
+                    self._pepper_value = None
                     return None
                 if len(value) >= 32:
                     self._pepper_value = value
+                    self._pepper_fingerprint = fingerprint
                     return value
+                self._pepper_value = None
                 return None
             if self._pepper_path.exists():
                 # Present but unreadable/corrupt: fail closed.
+                self._pepper_value = None
                 return None
             if read_json(self._path, None) is not None and self._data["keys"]:
                 # Keys exist but the pepper is gone: do not mint a new
                 # one, which would pretend the old keys still work.
+                self._pepper_value = None
                 return None
             value = secrets.token_bytes(32)
             atomic_write_json(self._pepper_path, {"pepper": value.hex()}, mode=0o600)
             self._pepper_value = value
+            self._pepper_fingerprint = self._pepper_stat()
             return value
 
     def _digest(self, token: str) -> str | None:
@@ -1028,9 +1052,25 @@ class MachineKeyStore:
         Called with the lock held. A flush is a full atomic write of the
         (small) store, so the throttle is what keeps a polling client off
         the disk.
+
+        The write is refused when the file moved since this store last
+        read it: a foreign writer (another process) landing between our
+        :meth:`_reload_if_changed` and this call would otherwise be
+        overwritten with our stale copy - resurrecting, for example, a
+        key it had just revoked. The copy is re-read instead, so the
+        next flush writes what is actually on disk. The window between
+        this check and the write is a few microseconds and there is no
+        in-product cross-process writer for the store today; this is the
+        defence in depth for that window, not a file lock.
         """
         now = self._clock()
         if self._last_flush_at is None or now - self._last_flush_at >= MACHINE_KEY_LAST_USED_FLUSH_SECONDS:
+            if self._fingerprint() != self._disk_fingerprint:
+                self._data = self._load()
+                self._disk_fingerprint = self._fingerprint()
+                self._revision += 1
+                self._last_flush_at = now
+                return
             self._save()
             self._last_flush_at = now
 
