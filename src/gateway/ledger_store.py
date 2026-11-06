@@ -25,6 +25,11 @@ Design commitments, each of which is a test:
   a lock. WAL means readers never block the request path, and the request
   path never touches SQLite at all: rows reach the store from the ledger
   writer queue.
+* **0600, like every sibling state artifact.** sqlite creates the db and
+  its ``-wal``/``-shm`` sidecars with the process umask (0644 under the
+  standard 0022); the state-directory convention is "0600 inside a 0700
+  directory" (``docs/RUNBOOK.md``), so every connect re-tightens all three
+  files to owner-only.
 * **Bounded reads.** ``iter_bodies`` streams (for the boot rebuild),
   ``recent(n)`` returns at most *n* rows (for the in-memory ring), and
   ``totals``/``stats`` are single SQL aggregates - no read path
@@ -33,6 +38,7 @@ Design commitments, each of which is a test:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
@@ -65,7 +71,27 @@ class LedgerStoreError(RuntimeError):
     """Raised when the SQLite store cannot be opened or written."""
 
 
+def _tighten_permissions(path: Path) -> None:
+    """Force the store and its WAL sidecars to owner-only (0600).
+
+    sqlite creates every file it owns with the process umask - 0644 under
+    the standard 0022 - while each sibling state artifact (journal,
+    rotations, rollup sidecar) is created explicitly 0600 and the documented
+    convention is "0600 inside a 0700 directory" (``docs/RUNBOOK.md``).
+    Called after every connect so a sidecar a checkpoint recreated keeps the
+    same mode. A file sqlite removes between the call and the chmod is not
+    an error; any other failure propagates, so the store fails closed rather
+    than world-readable.
+    """
+    for candidate in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        try:
+            os.chmod(candidate, 0o600)
+        except FileNotFoundError:  # pragma: no cover - sidecar raced away
+            continue
+
+
 def _connect(path: Path) -> sqlite3.Connection:
+    connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(
             str(path),
@@ -79,8 +105,14 @@ def _connect(path: Path) -> sqlite3.Connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute("PRAGMA busy_timeout=5000")
+        _tighten_permissions(path)
         return connection
-    except sqlite3.Error as exc:  # pragma: no cover - depends on the filesystem
+    except (sqlite3.Error, OSError) as exc:
+        if connection is not None:
+            try:
+                connection.close()
+            except sqlite3.Error:  # pragma: no cover - best effort
+                pass
         raise LedgerStoreError(f"cannot open ledger store {path}: {exc}") from exc
 
 
@@ -111,6 +143,10 @@ class LedgerStore:
             for statement in _INDEXES:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            # The schema write is what creates the -wal/-shm sidecars, so
+            # re-tighten after it (F4: sqlite leaves them at the umask's
+            # 0644 until this).
+            _tighten_permissions(self.path)
         except (LedgerStoreError, OSError, sqlite3.Error) as exc:
             if connection is not None:
                 try:
@@ -173,7 +209,12 @@ class LedgerStore:
                     (request_id, ts, stamp, error_class, fallback_used, body),
                 )
                 rowid = int(cursor.lastrowid or 0)
-            except sqlite3.Error as exc:
+            except (sqlite3.Error, ValueError) as exc:
+                # ValueError covers UnicodeEncodeError (a lone surrogate in
+                # a TEXT param): anything non-SQLite that would otherwise
+                # escape the writer must still surface as a visible
+                # LedgerStoreError with last_error set, never as an
+                # exception that kills the writer thread (F2).
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 raise LedgerStoreError(self.last_error) from exc
             self.last_error = None
@@ -234,10 +275,14 @@ class LedgerStore:
                     rows,
                 )
                 connection.execute("COMMIT")
-            except sqlite3.Error as exc:
+            except (sqlite3.Error, ValueError) as exc:
+                # Same non-SQLite surface as append(): a row whose TEXT
+                # cannot encode (lone surrogate) must roll the batch back
+                # and raise LedgerStoreError - never escape as the raw
+                # UnicodeEncodeError that used to abort first-boot import.
                 try:
                     connection.execute("ROLLBACK")
-                except sqlite3.Error:  # pragma: no cover - rollback of a failed txn
+                except (sqlite3.Error, ValueError):  # pragma: no cover - rollback of a failed txn
                     pass
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 raise LedgerStoreError(self.last_error) from exc
@@ -253,7 +298,7 @@ class LedgerStore:
         with self._write_lock:
             try:
                 cursor = self._writer().execute("DELETE FROM ledger WHERE ts < ?", (int(cutoff_ts),))
-            except sqlite3.Error as exc:
+            except (sqlite3.Error, ValueError) as exc:  # ValueError: un-castable cutoff, same visibility rule as append()
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 raise LedgerStoreError(self.last_error) from exc
             self.last_error = None
