@@ -48,10 +48,13 @@ release identity      the **result** of ``release_identity()`` - a plain
 ====================  ====================================================
 
 Process constants the render also reads are deliberately not part of the
-key: ``ledger.durability()`` (``persistence is not None`` plus two
-literals) and the cooldown-policy literals cannot change after start-up,
-and wall-clock fields are handled by ``refresh_after`` / ``hard_max``
-below.
+key: the cooldown-policy literals cannot change after start-up, and
+wall-clock fields are handled by ``refresh_after`` / ``hard_max`` below.
+``ledger.durability()`` *is* part of the ledger component now: it used to
+be two literals, but it reports the store's row count, byte size, oldest
+row and last error, so it is mutable state - a store that stops accepting
+rows has to reach the owner's status view, not sit stale behind a cached
+body.
 
 A mutation therefore changes the key, and the very next read takes the
 miss path and renders synchronously: no staleness window can lie about
@@ -191,7 +194,7 @@ class StateCache:
             ["identity", [app.base_url, app._release_identity() if app._release_identity else {}]],
         ]
         if app.ledger is not None:
-            components.append(["ledger", [app.ledger.version, app.ledger.evicted, app.ledger.totals(), app.ledger.rollup()]])
+            components.append(["ledger", [app.ledger.version, app.ledger.evicted, app.ledger.totals(), app.ledger.rollup(), app.ledger.durability()]])
         return hashlib.sha256(_stable(components).encode("utf-8")).hexdigest()
 
     # --- serving --------------------------------------------------------
