@@ -2214,7 +2214,7 @@
     var probeNames = [["text_generation", "Basic text response"], ["image_input", "Synthetic image understanding"], ["function_tools", "Function tool call (never executed)"]];
     var probeList = el("div", { class: "row" });
     probeNames.forEach(function (item) {
-      var input = el("input", { type: "checkbox", value: item[0] });
+      var input = el("input", { type: "checkbox", value: item[0], onchange: function () { syncPreviewControl(); } });
       input.checked = false;
       choices[item[0]] = input;
       probeList.appendChild(el("label", {}, [input, el("span", { text: item[1] })]));
@@ -2245,11 +2245,11 @@
         if (!isFinite(ceiling) || ceiling <= 0) { toast("The spend ceiling must be a number greater than zero; nothing was sent.", "bad"); return; }
         authorisedOwner = { authorize_billing_route: true, spend_policy: "estimate_accepted", max_spend_estimate_usd: ceiling };
         renderAuthorisationGranted(ceiling);
-        previewButton.disabled = !canMutate;
+        syncPreviewControl();
       } }));
       authHost.appendChild(el("button", { type: "button", class: "secondary", text: "Cancel", disabled: !canMutate, onclick: function () {
         authorisedOwner = null;
-        previewButton.disabled = true;
+        syncPreviewControl();
         authHost.textContent = "";
         authHost.appendChild(el("p", { class: "small muted", text: "No billing route authorised. Nothing was sent to the provider." }));
         authHost.appendChild(el("button", { type: "button", text: "Authorise a paid probe run", disabled: !canMutate, onclick: function () { renderAuthorisationPrompt(); } }));
@@ -2261,23 +2261,68 @@
       authHost.appendChild(el("p", { class: "small", text: "Billing route authorised for this panel: " + target.provider_id + " / " + target.model_id + " · spend ceiling " + String(ceiling) + " USD · estimate policy (not a hard cap). Held in this page only — a reload or a closed panel requires authorising again." }));
       authHost.appendChild(el("button", { type: "button", class: "secondary", text: "Withdraw authorisation", onclick: function () {
         authorisedOwner = null;
-        previewButton.disabled = true;
+        syncPreviewControl();
         renderAuthorisationPrompt();
       } }));
     }
 
     renderAuthorisationPrompt();
 
+    // The result must land BELOW the button, in the owner's line of sight.
+    // Rendering it into an initially-empty div above the button hides it
+    // exactly where the click happened: the whole loading cycle flashes past
+    // in under a millisecond on a LAN and the owner never sees it, which
+    // reads as "the button does nothing". The button also states why it
+    // cannot be used instead of sitting dead with no reason shown.
     var previewHost = el("div", { class: "capability-preview", role: "status", "aria-live": "polite" });
-    panel.appendChild(previewHost);
-    var previewButton = el("button", { type: "button", text: "Preview selected probes", disabled: true, onclick: function () {
-      var selected = Object.keys(choices).filter(function (key) { return choices[key].checked; });
+    var previewHintId = "capability-preview-hint-" + target.provider_id + "-" + target.model_id;
+    var previewHint = el("p", { class: "small muted", id: previewHintId });
+    var previewBusy = false;
+
+    function selectedProbes() {
+      return Object.keys(choices).filter(function (key) { return choices[key].checked; });
+    }
+
+    // The single source of truth for whether preview may run, so the button,
+    // its label and the line under it can never disagree with each other.
+    function previewGateReason() {
+      if (!canMutate) return "Read-only session: authorising a paid run and previewing are unavailable.";
+      if (!selectedProbes().length) return "Select at least one probe above to enable preview.";
+      if (!authorisedOwner) return "Authorise the billing route above to enable preview; previewing itself sends no provider request.";
+      return "";
+    }
+
+    function syncPreviewControl() {
+      var reason = previewBusy ? "" : previewGateReason();
+      previewButton.disabled = previewBusy || !!reason;
+      previewButton.textContent = previewBusy ? "Previewing…" : "Preview selected probes";
+      previewHint.textContent = reason;
+    }
+
+    // The output sits directly under the button, so it is normally already on
+    // screen; this only moves the page when the result would otherwise land
+    // below the fold.
+    function revealPreview() {
+      if (typeof previewHost.scrollIntoView === "function") previewHost.scrollIntoView({ block: "nearest" });
+    }
+
+    var previewButton = el("button", { type: "button", text: "Preview selected probes", "aria-describedby": previewHintId, disabled: true, onclick: function () {
+      var selected = selectedProbes();
       if (!selected.length) { toast("Select at least one probe; nothing was sent.", "bad"); return; }
       if (!authorisedOwner) { toast("Authorise the billing route first; nothing was sent.", "bad"); return; }
-      previewHost.textContent = "Loading preview…";
+      // Feedback in the same tick as the click: the button changes state and
+      // the result region below it fills, before any network round trip.
+      previewBusy = true;
+      syncPreviewControl();
+      previewHost.textContent = "";
+      previewHost.appendChild(el("p", { class: "small", text: "Loading preview… reading the published bounds for " + target.provider_id + " / " + target.model_id + "; no provider request is sent." }));
+      revealPreview();
       api(BASE + "/api/capabilities/preview", { method: "POST", body: { provider_id: target.provider_id, model_id: target.model_id, probes: selected, owner: authorisedOwner } })
         .then(function (preview) {
+          previewBusy = false;
+          syncPreviewControl();
           previewHost.textContent = "";
+          previewHost.appendChild(el("h4", { text: preview.available ? "Preview available" : "Preview unavailable" }));
           previewHost.appendChild(el("p", { class: "small", text: "Target: " + preview.provider_id + " / " + preview.model_id + " · selected: " + preview.probes.join(", ") + " · suite " + preview.suite_version + " · max " + preview.maximum_requests + " request(s), output " + preview.max_output_tokens + " tokens, " + preview.timeout_seconds + "s, concurrency " + preview.concurrency + ", retries " + preview.retries + "." }));
           previewHost.appendChild(el("p", { class: "notice warn", text: preview.reason + " Price: " + probePriceText(preview.price) + ". No provider request has been sent." }));
           previewHost.appendChild(el("p", { class: "small muted", text: "Estimate is not a bill guarantee: worst-case tariff arithmetic on the published bounds; no provider-enforced hard ceiling exists for this route." }));
@@ -2289,19 +2334,30 @@
           } else {
             previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable: this probe cannot be run for the reason above; Unknown is not false." }));
           }
+          revealPreview();
         }).catch(function (error) {
           var unavailable = error.payload && typeof error.payload.available === "boolean" ? error.payload : null;
+          previewBusy = false;
+          syncPreviewControl();
           previewHost.textContent = "";
           if (unavailable) {
+            previewHost.appendChild(el("h4", { text: "Preview unavailable" }));
             previewHost.appendChild(el("p", { class: "small", text: "Target: " + unavailable.provider_id + " / " + unavailable.model_id + " · selected: " + (unavailable.probes || []).join(", ") + " · suite " + unavailable.suite_version + " · maximum " + unavailable.maximum_requests + " request(s), output " + unavailable.max_output_tokens + " tokens, timeout " + unavailable.timeout_seconds + "s." }));
             previewHost.appendChild(el("p", { class: "notice warn", text: unavailable.reason + " Price: " + probePriceText(unavailable.price) + ". No provider request has been sent." }));
             previewHost.appendChild(el("p", { class: "small muted", text: "Unavailable; Unknown is not false. No probe was executed." }));
           } else {
-            previewHost.appendChild(el("p", { class: "notice warn", text: "Preview refused: " + error.message + ". No provider request was sent." }));
+            previewHost.appendChild(el("h4", { text: "Preview refused" }));
+            previewHost.appendChild(el("p", { class: "notice bad", text: error.message + ". No provider request was sent." }));
           }
+          revealPreview();
         });
     } });
+    // Button first, output last: everything the click produces is rendered
+    // after the button that produced it.
     panel.appendChild(previewButton);
+    panel.appendChild(previewHint);
+    panel.appendChild(previewHost);
+    syncPreviewControl();
   }
 
   function renderModels() {
