@@ -15,9 +15,10 @@ This module is the shared machinery for that rule:
   ``key-path -> type`` map, so a nested addition (the class of change a
   required-key presence check cannot see) is visible;
 * ``evaluate(current, snapshot, constant)`` decides pass/fail;
-* ``ancestor_snapshots()`` walks the committed baseline back through git,
-  so regenerating the snapshot file cannot hide a change from the guard
-  (the snapshot at the branch point is what the change is judged against).
+* ``ancestor_snapshots()`` walks the committed baseline back to the root
+  of history, so regenerating the snapshot file - or burying the last
+  matching snapshot under enough later commits - cannot hide a change
+  from the guard.
 
 Nothing here writes ``MCP_CONTRACT_VERSION``. There is no auto-bump path in
 this repository: an automatic bump would be an automatic widening of the
@@ -41,11 +42,6 @@ GATED_FAMILIES: dict[str, str] = {
     "leaderboard": "/owner/api/leaderboard?days=7",
     "capabilities": "/owner/api/capabilities",
 }
-
-#: How far back the ancestor walk looks for a snapshot that differs from
-#: the current schema. Normal runs stop at HEAD or HEAD~1; the bound only
-#: matters for a long chain of schema-identical commits.
-MAX_ANCESTOR_COMMITS = 50
 
 
 def flat(obj: Any, prefix: str = "") -> dict[str, str]:
@@ -132,11 +128,12 @@ def evaluate(
     return None
 
 
-def _git(*args: str) -> str | None:
-    """Run git in the repo, or None when git/history is unavailable."""
+def _git(*args: str, repo: Path | None = None) -> str | None:
+    """Run git in ``repo`` (this checkout by default), or None on failure."""
+    root = REPO_ROOT if repo is None else repo
     try:
         proc = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), *args],
+            ["git", "-C", str(root), *args],
             capture_output=True,
             text=True,
             timeout=30,
@@ -148,27 +145,59 @@ def _git(*args: str) -> str | None:
     return proc.stdout
 
 
-def ancestor_snapshots(limit: int = MAX_ANCESTOR_COMMITS) -> list[tuple[str, dict[str, Any]]]:
+def ancestor_snapshots(
+    current: dict[str, dict[str, str]] | None = None,
+    *,
+    repo: Path | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
     """``[(origin, snapshot), ...]`` newest first, from committed history.
 
     The walk starts at ``HEAD``'s committed snapshot (not the working-tree
     file), so an uncommitted regeneration cannot stand in for the record the
-    change is judged against. ``[]`` means git or history is unavailable -
-    callers fall back to the working-tree snapshot.
+    change is judged against.
+
+    There is **no bound**. ``git rev-list HEAD`` is walked to the root of
+    history and only stops early when ``current`` is given, at the first
+    snapshot whose ``families`` differ from it - the newest snapshot the
+    change can be judged against. A fixed window was the F-1 fail-open: a
+    differing snapshot older than the window made every examined snapshot
+    match, ``governing`` came back empty, and a gated payload family could
+    ship with no ``MCP_CONTRACT_VERSION`` bump (regression:
+    ``tests/test_mcp_contract_ancestor_walk.py``).
+
+    Returns ``[]`` **only** when git or history itself is unavailable -
+    callers may then fall back to the working-tree snapshot, because there
+    is no committed record at all. When history exists but no committed
+    snapshot is found anywhere in it, this raises instead: falling back to
+    the working-tree file there would judge the developer's own regenerated
+    snapshot against itself, which passes for any change.
     """
-    log = _git("rev-list", "--max-count", str(limit), "HEAD")
+    root = REPO_ROOT if repo is None else repo
+    log = _git("rev-list", "HEAD", repo=root)
     if not log:
         return []
-    out: list[tuple[str, dict[str, Any]]] = []
+    shas = log.split()
     rel = str(BASELINE_PATH.relative_to(REPO_ROOT))
-    for sha in log.split():
-        text = _git("show", f"{sha}:{rel}")
+    out: list[tuple[str, dict[str, Any]]] = []
+    for sha in shas:
+        text = _git("show", f"{sha}:{rel}", repo=root)
         if text is None:
             continue
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict) and "families" in data:
-            out.append((f"snapshot at {sha[:12]}", data))
+        if not (isinstance(data, dict) and "families" in data):
+            continue
+        out.append((f"snapshot at {sha[:12]}", data))
+        if current is not None and data["families"] != current:
+            break
+    if not out:
+        raise AssertionError(
+            f"git history at {root} has {len(shas)} commits but none records "
+            f"{rel}; the bump guard has no committed snapshot to judge "
+            "against and must not fall back to the working-tree file (that "
+            "compares the developer's own regenerated snapshot with itself) "
+            "- commit the baseline with scripts/capture_mcp_contract.py first"
+        )
     return out
