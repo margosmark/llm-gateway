@@ -350,17 +350,18 @@ Your client asks for the **alias**; the provider only knows its own model
 ids. The gateway substitutes the upstream model id for the chosen route and
 never sends the alias upstream, and the request ledger records both the
 alias you asked for and the provider and model that actually served it.
-Metadata-only outcomes are persisted asynchronously on the state volume with
-bounded rotation and a 30-day retention window when durable ledger storage is
-enabled; otherwise only the bounded in-memory ring is available and is lost
-when the gateway restarts. The Status view reports the current durability
+Metadata-only outcomes are persisted asynchronously to a SQLite store on the
+state volume with a 30-day retention window bounded by age alone - no size
+cap, so the window stays real at the measured write rate - when durable
+ledger storage is enabled; otherwise only the bounded in-memory ring is
+available and is lost when the gateway restarts. The Status view reports the current durability
 mode and marks aggregates Unknown when evictions may omit in-window events.
 The same append path maintains `request-ledger-rollup.json`, a derived daily
 rollup (one row per day, alias, provider and model, with tokens, fallbacks by
 the closed reason vocabulary — `cooldown`, `route_ineligible`,
 `upstream_failure`, `other`, `unknown`, folded when the row is written so a
 per-second cooldown sentence never becomes a bucket — errors by class and
-statuses) that is rebuilt from the ledger on every start, so daily history
+statuses) that is rebuilt from the store on every start, so daily history
 survives restarts and ring eviction; its `coverage` block says what it
 covers instead of reporting a gap as zero, including the 50,000-entry request
 index cap and anything that cap evicted. This is not a billing system.

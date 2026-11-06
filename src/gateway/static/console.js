@@ -202,6 +202,29 @@
     return Object.prototype.hasOwnProperty.call(LOCAL_PROVIDER_IDS, providerId);
   }
 
+  // Bytes for the durability store figures the status card shows: the store
+  // of record, its row count and the journal tail's size are the numbers
+  // that prove the retention window is real, so they are rendered rather
+  // than left as an inference.
+  function fmtBytes(value) {
+    if (typeof value !== "number" || !isFinite(value)) return "";
+    if (value >= 1048576) return (value / 1048576).toFixed(1) + " MiB";
+    if (value >= 1024) return Math.round(value / 1024) + " KiB";
+    return value + " B";
+  }
+
+  function ledgerStoreDetail(durability) {
+    var store = durability && durability.store;
+    if (!store) return "";
+    var parts = [];
+    if (typeof store.bytes === "number") parts.push(fmtBytes(store.bytes) + " store");
+    if (typeof store.rows === "number") parts.push(store.rows.toLocaleString() + " rows");
+    if (store.oldest_row_ts) parts.push("oldest row " + store.oldest_row_ts);
+    if (typeof store.journal_bytes === "number") parts.push(fmtBytes(store.journal_bytes) + " journal tail");
+    if (store.error) parts.push("store error: " + store.error);
+    return parts.length ? " On disk: " + parts.join(" · ") + "." : "";
+  }
+
   function statePill(value) {
     var map = {
       connected: "ok",
@@ -449,7 +472,7 @@
       el("a", { class: "button", href: BASE + "/api/ledger/export", text: "Download CSV" }),
       el("a", { class: "button secondary", href: BASE + "/api/ledger/export?format=json", text: "Download JSON" }),
       el("p", { class: "small muted", text: "Metadata only. Prompts, responses, tokens and secrets are never stored." }),
-      el("p", { class: "small muted", text: (state.ledger_durability && state.ledger_durability.enabled ? "Recent outcomes are retained on the state volume for up to 30 days, with bounded rotation; the in-memory ring is the hot view. Persistence is asynchronous and may lag briefly. This metadata ledger is not a billing system." : "Durable ledger storage is not enabled; only the bounded in-memory ring is available and is lost when the gateway restarts. This metadata ledger is not a billing system.") }),
+      el("p", { class: "small muted", text: (state.ledger_durability && state.ledger_durability.enabled ? "Recent outcomes are retained on the state volume for up to 30 days, bound by age alone - never by file size; the in-memory ring is the hot view. Persistence is asynchronous and may lag briefly." + ledgerStoreDetail(state.ledger_durability) + " This metadata ledger is not a billing system." : "Durable ledger storage is not enabled; only the bounded in-memory ring is available and is lost when the gateway restarts. This metadata ledger is not a billing system.") }),
       el("div", { class: "row" }, [
         statBox("Requests", totals.requests || 0),
         statBox("Errors", totals.errors || 0),
@@ -499,10 +522,10 @@
 
     var costsCard = el("div", { class: "card" }, [el("h2", { text: "Local usage and estimated cost" })]);
     if (dayKnown) {
-      costsCard.appendChild(el("p", { class: "small muted", text: "UTC day " + usageDay + ", from the durable daily rollup (30-day retention, rebuilt from the request ledger on every start). Prices are applied at read time from the published catalogue; " + (analytics.coverage && analytics.coverage.incomplete ? "the rollup's coverage is incomplete, so this day may be partial." : "every retained row for the day is included.") + " Estimates are not provider bills." }));
+      costsCard.appendChild(el("p", { class: "small muted", text: "UTC day " + usageDay + ", from the durable daily rollup (30-day retention, rebuilt from the request store on every start). Prices are applied at read time from the published catalogue; " + (analytics.coverage && analytics.coverage.incomplete ? "the rollup's coverage is incomplete, so this day may be partial." : "every retained row for the day is included.") + " Estimates are not provider bills." }));
     } else {
       costsCard.appendChild(el("p", { class: "small muted", text: "Last " + costs.window_hours + " hours. Based on reported token counts and published prices only; estimates are not provider bills." }));
-      costsCard.appendChild(el("p", { class: "small muted", text: (costs.coverage && costs.coverage.incomplete ? "The bounded recent-event ring may omit older events from this window; affected cost estimates are Unknown." : "Aggregates cover the available recent-event ring for the last " + costs.window_hours + " hours.") + " " + (state.ledger_durability && state.ledger_durability.enabled ? "The metadata ledger is persisted asynchronously with bounded rotation and a 30-day retention window." : "Durable ledger storage is not enabled; the in-memory ring is lost when the gateway restarts.") + " This is not a billing system." }));
+      costsCard.appendChild(el("p", { class: "small muted", text: (costs.coverage && costs.coverage.incomplete ? "The bounded recent-event ring may omit older events from this window; affected cost estimates are Unknown." : "Aggregates cover the available recent-event ring for the last " + costs.window_hours + " hours.") + " " + (state.ledger_durability && state.ledger_durability.enabled ? "The metadata ledger is persisted asynchronously with an age-based 30-day retention window (no size cap)." : "Durable ledger storage is not enabled; the in-memory ring is lost when the gateway restarts.") + " This is not a billing system." }));
     }
     if (analytics.available && (analytics.series || []).length) {
       costsCard.appendChild(el("div", { class: "row" }, [
@@ -1586,7 +1609,7 @@
           ? "in progress and will keep changing."
           : "complete."),
       "Source: the durable daily rollup (" + (payload.schema || "daily-rollup/v1") +
-        ", 30-day retention, rebuilt from the metadata request ledger on every start), " +
+        ", 30-day retention, rebuilt from the durable request store on every start), " +
         "aggregated from (day, alias, provider, model) rows onto (day, provider, model). " +
         "Rollup generated at " + (payload.generated_at || "unknown") + ".",
       "Ranking metric: " + (metric.label || "input + output tokens") + ". " + (metric.definition || ""),

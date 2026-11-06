@@ -372,9 +372,17 @@ metadata and never makes a provider call. System One state/questions are sent
 to OpenCode Console for that direct request; they are not retained by the gateway.
 
 The Status ledger is metadata-only and asynchronously persisted to
-`request-ledger.jsonl` in the state volume. It retains up to 30 days with
-bounded rotation (5 MiB active file plus two rotations); disk-write errors or
-a full queue can cause a persistence update to be dropped. The in-memory ring
+`request-ledger.db` in the state volume (SQLite, WAL, one writer thread -
+the request hot path never waits on it). Retention is by AGE ONLY: rows
+older than 30 days are pruned on load and on a daily timer, with no size
+cap on history, so the full window survives at the measured write rate
+(~5,200 requests/day, ~156k rows over 30 days, tens of MiB on disk). The
+plaintext `request-ledger.jsonl` journal tail (5 MiB plus two rotations)
+is still written for debugging; it is not the history bound - the first
+boot imports it and its rotations without losing a row. Disk-write errors
+or a full queue can still cause a persistence update to be dropped, and
+the Status view reports the store's real size, row count and oldest row
+(`store` block in the durability section). The in-memory ring
 is the live view. Local usage aggregates cover the last 24 hours; costs use
 published prices only and display their source and observation date. Request
 statistics can be selected for the last hour, day or 30 days, grouped by alias,
@@ -383,7 +391,7 @@ history (up to 10,000 recent records); unavailable usage, latency or prices are
 reported as **Unknown**, never zero. This is not a billing system.
 
 The same append path also maintains `request-ledger-rollup.json` beside the
-ledger: one row per UTC day, alias, provider and model with requests, input,
+store: one row per UTC day, alias, provider and model with requests, input,
 output and cached tokens, fallbacks by reason, errors by class and statuses,
 plus a per-day trend. Reasons are folded onto a closed vocabulary when the
 row is written - `cooldown`, `route_ineligible`, `upstream_failure`, `other`,

@@ -120,7 +120,7 @@ class RollupAggregationTests(unittest.TestCase):
             self.assertTrue(ledger.flush())
             payload = json.loads(rollup_path_for(path).read_text())
             self.assertEqual(payload["schema"], "daily-rollup/v1")
-            self.assertEqual(payload["source"], "request-ledger.jsonl")
+            self.assertEqual(payload["source"], "request-ledger.db")
             self.assertEqual(rows_json(payload), expected_rows())
             coverage = payload["coverage"]
             self.assertEqual(coverage["requests"], 3)
@@ -272,7 +272,14 @@ class RollupBackfillTests(unittest.TestCase):
             payload = rollup_of(restarted)
             self.assertEqual(rows_json(payload), expected_rows())
             self.assertEqual(payload["coverage"]["rebuild"]["trigger"], "boot")
-            self.assertEqual(payload["coverage"]["rebuild"]["lines_read"], 4)
+            # The sidecar from the previous process is the fast path: boot
+            # loads it and replays only rows past its watermark - here none,
+            # because the fixture flushed before closing. The full store
+            # replay (lines_read == every line) still happens whenever the
+            # sidecar is missing or untrustworthy; the manual rebuild above
+            # and test_unrepresentable_rows... cover that path.
+            self.assertEqual(payload["coverage"]["rebuild"]["mode"], "incremental")
+            self.assertEqual(payload["coverage"]["rebuild"]["lines_read"], 0)
             self.assertEqual(payload["coverage"]["rows_appended"], 0)
             restarted.close()
 
