@@ -124,5 +124,92 @@ class DurableLedgerTests(unittest.TestCase):
         ledger.close()
 
 
+class InvalidUtf8JournalTests(unittest.TestCase):
+    """F7: invalid UTF-8 bytes in a journal file never take a boot down.
+
+    ``load()`` is the one journal reader that used to catch only
+    ``FileNotFoundError``: a ``UnicodeDecodeError`` from its line iterator
+    escaped ``restore()`` straight into ``RequestLedger.__init__`` and the
+    gateway failed to start (reproduced on a944023 and 3fc4b3a). Its two
+    sibling readers - ``rebuild()`` and ``_import_journal()`` - already
+    treat an unreadable file as a partial-coverage gap; this pins the same
+    contract for ``load()``, including the no-rewrite rule: rewriting a
+    file that could not be read to the end would silently truncate every
+    line after the bad byte.
+    """
+
+    #: The gate's exact repro bytes: a rotation file that is not UTF-8.
+    BAD_BYTES = b"\xff\xfe not utf-8\n"
+
+    @staticmethod
+    def _good_line(request_id: str) -> bytes:
+        row = {"request_id": request_id, "timestamp": stamp(days_ago=1),
+               "requested_alias": "a", "status": 200}
+        return (json.dumps(row) + "\n").encode()
+
+    def test_first_boot_survives_invalid_utf8_rotation_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            # Readable content in the active file keeps importing...
+            path.write_bytes(self._good_line("ok"))
+            rotation = Path(directory) / "request-ledger.jsonl.1"
+            # ...while a rotation carrying a readable line, the bad byte
+            # run and another readable line is skipped whole: text mode
+            # decodes the buffered chunk before it yields any line, so
+            # nothing from that file can be trusted past the bad byte.
+            # Pre-fix: UnicodeDecodeError out of load() -> restore() ->
+            # RequestLedger.__init__ (gateway failed to start).
+            original = self._good_line("tail") + self.BAD_BYTES + self._good_line("tail2")
+            rotation.write_bytes(original)
+            ledger = RequestLedger(persistence_path=path)
+            try:
+                payload = ledger.rollup()
+                self.assertIsNotNone(payload)
+                assert payload is not None
+                coverage = payload["coverage"]
+                # The unreadable file is reported as a gap, not counted
+                # as a complete read.
+                self.assertEqual(coverage["rebuild"]["status"], "partial")
+                self.assertTrue(coverage["incomplete"])
+                self.assertEqual(ledger.totals()["requests"], 1)
+            finally:
+                ledger.close()
+            # load() must not rewrite a file it could not read to the
+            # end: _rewrite would replace it with only the lines read
+            # before the failure - here, silently nothing - and drop the
+            # tail after the bad byte.
+            self.assertEqual(rotation.read_bytes(), original)
+
+    def test_restart_with_a_corrupt_rotation_boots_and_marks_coverage_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            path.write_text(self._good_line("kept").decode())
+            ledger = RequestLedger(persistence_path=path)
+            self.assertTrue(ledger.flush())
+            ledger.close()
+            # The store and sidecar now describe a complete history;
+            # corrupt a rotation file afterwards (hand-crafted line or
+            # media damage). This is the path where only load() reads the
+            # journal: the sidecar load path closes coverage as "complete"
+            # before restore() runs, so load() itself has to report the gap.
+            rotation = Path(directory) / "request-ledger.jsonl.1"
+            rotation.write_bytes(self.BAD_BYTES)
+            restarted = RequestLedger(persistence_path=path)
+            try:
+                payload = restarted.rollup()
+                self.assertIsNotNone(payload)
+                assert payload is not None
+                coverage = payload["coverage"]
+                # Pre-fix this boot raised UnicodeDecodeError; catching
+                # without note_source(partial=True) would leave coverage
+                # claiming "complete" over a file it never finished reading.
+                self.assertEqual(coverage["rebuild"]["status"], "partial")
+                self.assertTrue(coverage["incomplete"])
+                self.assertEqual(restarted.totals()["requests"], 1)
+            finally:
+                restarted.close()
+            self.assertEqual(rotation.read_bytes(), self.BAD_BYTES)
+
+
 if __name__ == "__main__":
     unittest.main()
