@@ -795,6 +795,12 @@ class LedgerPersistence:
         self._ring_capacity = int(ring_capacity)
         self._store: LedgerStore | None = None
         self._store_open_error: str | None = None
+        #: Last failure raised *outside* the store's own catches while the
+        #: writer loop was handling a row (journal write, rollup fold, ...).
+        #: Kept beside the store's last_error so a writer that stops making
+        #: progress is always visible through durability() - never a thread
+        #: that died with store.error left None (F2 / AC7).
+        self._writer_error: str | None = None
         # Open the store of record first; boot is open -> migrate-if-empty
         # -> age-prune -> rebuild the rollup from the store, all before the
         # writer thread starts, so the sidecar is aggregated immediately and
@@ -970,11 +976,29 @@ class LedgerPersistence:
                             continue
                         clean = _sanitize_row(row)
                         body = json.dumps(clean, separators=(",", ":"), ensure_ascii=True)
+                        request_id = clean["request_id"]
+                        stamp_text = str(clean["timestamp"])
+                        error_class = _error_class_for(clean)
+                        try:
+                            # Every TEXT param must survive UTF-8 encoding
+                            # before it enters the batch: sqlite raises
+                            # UnicodeEncodeError (not sqlite3.Error) for a
+                            # lone surrogate such as a hand-crafted
+                            # ``"error_class": "\\ud800"`` line, which used
+                            # to escape every boot-level catch and take the
+                            # gateway down on first start (F1/AC4: a
+                            # malformed line is counted, never fatal).
+                            for value in (request_id, stamp_text, error_class, body):
+                                if value is not None:
+                                    value.encode("utf-8")
+                        except UnicodeEncodeError:
+                            skipped += 1
+                            continue
                         items.append((
-                            clean["request_id"],
+                            request_id,
                             int(stamp.timestamp()),
-                            str(clean["timestamp"]),
-                            _error_class_for(clean),
+                            stamp_text,
+                            error_class,
                             int(bool(clean.get("fallback_used"))),
                             body,
                         ))
@@ -1090,11 +1114,15 @@ class LedgerPersistence:
             try:
                 store_info.update(self._store.stats())
                 store_info["path"] = str(self.store_path)
-                store_info["error"] = self._store.last_error
+                # Store failures first (more specific), then the writer
+                # loop's own last failure: either way a store that has
+                # stopped accepting rows is visible here, never None while
+                # the writer is failing (F2 / AC7).
+                store_info["error"] = self._store.last_error or self._writer_error
             except LedgerStoreError as exc:
                 store_info["error"] = str(exc)
         else:
-            store_info["error"] = self._store_open_error or "store unavailable"
+            store_info["error"] = self._store_open_error or self._writer_error or "store unavailable"
         store_info["journal_path"] = str(self.path)
         store_info["journal_bytes"] = self._journal_bytes()
         info["store"] = store_info
@@ -1141,9 +1169,24 @@ class LedgerPersistence:
             try:
                 if row is None:
                     return
-                self._append(row)
+                try:
+                    self._append(row)
+                except Exception as exc:  # noqa: BLE001 - a writer crash must be recorded, never silently fatal
+                    # Store failures already carry last_error; anything else
+                    # (journal write, rollup fold) is recorded here, and the
+                    # loop keeps draining so one bad row cannot stop every
+                    # later one.
+                    self._note_writer_failure(exc)
+                else:
+                    # A fully successful row clears the record: recovery is
+                    # as visible as the failure was.
+                    self._writer_error = None
             finally:
                 self._queue.task_done()
+
+    def _note_writer_failure(self, exc: BaseException) -> None:
+        """Record a writer-loop failure where the owner reads durability()."""
+        self._writer_error = f"{type(exc).__name__}: {exc}"
 
     def _append(self, row: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
