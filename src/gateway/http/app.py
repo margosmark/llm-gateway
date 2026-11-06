@@ -814,6 +814,14 @@ class GatewayApp:
         # the key value never enters this context.
         target = request.context.get("machine_key_target")
         machine_key_target = target if isinstance(target, str) and target else None
+        if exception is None:
+            # A handler that converts its own failure into a response (the
+            # capability-decision blanket clause) notes the exception class
+            # here, so this one access line still names the cause instead of
+            # masking a genuine bug as a client error. Class name only - the
+            # same never-str(exc) rule as above; client text never enters it.
+            noted = request.context.get("handler_exception")
+            exception = noted if isinstance(noted, str) and noted else None
         self.logger.log(
             method=request.method,
             path=request.path,
@@ -2393,7 +2401,25 @@ class GatewayApp:
             return json_response({"error": {"message": "Invalid capability decision", "type": "invalid_request"}}, 400)
         except RuntimeError as exc:
             return json_response({"error": {"message": "Capability proposal conflict or resolved", "type": "conflict"}}, 409)
-        except Exception:
+        except InvalidBodyText:
+            # InvalidBodyText is deliberately not a ValueError, but it IS an
+            # Exception, so the blanket clause below would swallow it here -
+            # before the dispatch boundary's F9 choke could run. That clause
+            # returns a bare 400 with no field, no terminal ledger row and no
+            # metrics counter, so a hostile body on this route would be
+            # forensically invisible (every other route records +1 policy row
+            # and +1 gateway_errors_total{error_class="policy"}). Re-raise and
+            # let the boundary answer exactly like every other JSON ingress:
+            # 400 with the named field, the escaped excerpt in the ledger and
+            # the counter. (F1, t_a93d59e3)
+            raise
+        except Exception as exc:
+            # A genuine bug in this handler must not pose as a client error
+            # *silently*: note the class name - never str(exc), which could
+            # carry client text - so the one access line the dispatch
+            # boundary writes names the cause. The response conversion is
+            # unchanged. (companion to F1, t_a93d59e3)
+            request.context["handler_exception"] = type(exc).__name__
             return json_response({"error": {"message": "Capability decision could not be applied", "type": "invalid_request"}}, 400)
 
     # --- provider actions ------------------------------------------------
