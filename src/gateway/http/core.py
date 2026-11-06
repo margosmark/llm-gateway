@@ -185,7 +185,13 @@ class StreamResponse:
 
 
 def json_response(payload: Any, status: int = 200, headers: Sequence[tuple[str, str]] = ()) -> Response:
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # backslashreplace: a lone surrogate that survived every earlier
+    # boundary cannot be UTF-8 encoded, so it would raise here and turn a
+    # clean response into a bare 500. The escape text keeps the payload
+    # buildable; encodable characters are byte-identical (F9).
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8", "backslashreplace"
+    )
     base = [("Content-Type", "application/json; charset=utf-8")]
     return Response(status, [*base, *headers], body)
 

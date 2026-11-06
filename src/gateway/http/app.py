@@ -641,7 +641,18 @@ class GatewayApp:
         except RoutingError as exc:
             headers = ([("Retry-After", str(exc.retry_after_seconds))]
                        if exc.status == 503 and exc.retry_after_seconds is not None else [])
-            result = json_response(exc.to_dict(), exc.status, headers)
+            try:
+                result = json_response(exc.to_dict(), exc.status, headers)
+            except Exception:  # noqa: BLE001 - last-resort envelope; # pragma: no cover - defensive
+                # A hostile payload must never turn a clean 4xx/5xx into a
+                # bare 500 with a traceback: canned envelope, original
+                # status, no serialization step that can fail (F9).
+                canned = b'{"error":{"message":"internal error","type":"gateway_error"}}'
+                result = Response(
+                    exc.status,
+                    [("Content-Type", "application/json; charset=utf-8"), *headers],
+                    canned,
+                )
             self._log_request(request, result, started)
             return result
         except ConversionError as exc:
