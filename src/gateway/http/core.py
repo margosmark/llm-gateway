@@ -40,6 +40,16 @@ DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
 MAX_JSON_NESTING = 3000
 """Maximum JSON container nesting accepted by the request parser."""
 
+#: The ``Request.context`` key under which an application hands the HTTP
+#: layer the release for a provider in-flight slot that a streamed
+#: response is holding (``_LeasedStream.release_if_unstarted``).
+#: ``_handle`` calls it in its own ``finally``, so the slot is given back
+#: on **every** exit path even when the stream itself was never entered -
+#: an unstarted generator's ``finally`` never runs, so a client reset
+#: before the response headers used to leak the slot until the gateway
+#: restarted (finding F1, ``docs/REVIEW.md`` R71).
+STREAM_LEASE_CONTEXT_KEY = "stream_lease_release"
+
 
 def _check_json_nesting(text: str) -> None:
     """Bound structural JSON nesting without interpreting brackets in strings."""
@@ -327,13 +337,26 @@ class _RequestHandler(BaseHTTPRequestHandler):
         request = Request(method, path, parts.query, headers, body, self.client_address, server_port)
 
         try:
-            result = self.server.application(request)  # type: ignore[attr-defined]
-        except Exception:  # pragma: no cover - defensive
-            traceback.print_exc(file=sys.stderr)
-            result = Response(500, [("Content-Type", "application/json; charset=utf-8")],
-                              b'{"error":{"message":"internal error","type":"gateway_error"}}')
+            try:
+                result = self.server.application(request)  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover - defensive
+                traceback.print_exc(file=sys.stderr)
+                result = Response(500, [("Content-Type", "application/json; charset=utf-8")],
+                                  b'{"error":{"message":"internal error","type":"gateway_error"}}')
 
-        self._send(result, head_only=(method == "HEAD"))
+            self._send(result, head_only=(method == "HEAD"))
+        finally:
+            # A streamed response holds a provider in-flight slot until its
+            # stream finishes or is closed. This finally is what gives the
+            # slot back when neither happens: a client reset (or a HEAD)
+            # can abandon the response before its first ``next()``, and
+            # closing a never-started generator runs no code at all, so
+            # the stream's own ``finally`` would never execute. The lease
+            # releases at most once and is a no-op for a stream that has
+            # already started or finished, so this cannot double-count.
+            release = request.context.pop(STREAM_LEASE_CONTEXT_KEY, None)
+            if release is not None:
+                release()
 
     def _send(self, result: Any, head_only: bool = False) -> None:
         try:

@@ -98,7 +98,7 @@ from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.fallback_reasons import fallback_reason_class
 from gateway.http import messages as messages_surface
-from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
+from gateway.http.core import Request, Response, Router as HttpRouter, STREAM_LEASE_CONTEXT_KEY, StreamResponse, json_response
 from gateway.http.security import (
     MUTATING_METHODS,
     SecurityError,
@@ -1478,6 +1478,18 @@ class GatewayApp:
             caller_phase=caller_phase,
         )
 
+        # A streamed response holds a provider in-flight slot beyond this
+        # function: the stream releases it when it finishes or is closed,
+        # and the HTTP handler's finally releases it when the stream is
+        # never entered (a client reset before the response headers, or a
+        # HEAD). Register the lease before anything else can raise, so no
+        # exit path can drop it. Only a lease-backed stream exposes
+        # release_if_unstarted; a buffered response has no slot left to
+        # give back. See docs/REVIEW.md R71.
+        release_lease = getattr(routed.response.stream, "release_if_unstarted", None)
+        if release_lease is not None:
+            request.context[STREAM_LEASE_CONTEXT_KEY] = release_lease
+
         # The attribution is recorded on the request so the access log can
         # name the alias and the provider that served it.
         request.context["attribution"] = routed.attribution.to_dict()
@@ -2465,11 +2477,14 @@ class GatewayApp:
             else:
                 try:
                     normalized_limit = check_limit(raw_limit, "max_in_flight")
-                except ValueError:
+                except ValueError as exc:
+                    # check_limit's own words: identical to the old fixed
+                    # message for an ordinary invalid value, and it names
+                    # the ceiling for an absurd one (R72).
                     return json_response(
                         {
                             "error": {
-                                "message": "max_in_flight must be a positive integer",
+                                "message": str(exc),
                                 "type": "invalid_max_in_flight",
                             }
                         },
@@ -2935,6 +2950,16 @@ class GatewayApp:
                 # report it here exactly as the inference path does.
                 error["status"] = 429
             return {"ok": False, "error": error}
+        # The probe never reads the response body, and a streaming-only
+        # upstream answered with a stream anyway. Close it here: an
+        # unstarted stream's own ``finally`` never runs, so without this
+        # the probe would hold the provider's in-flight slot until the
+        # gateway restarts (the probe acquires the cap like any other
+        # inference call). See docs/REVIEW.md R71.
+        if routed.response.stream is not None:
+            close = getattr(routed.response.stream, "close", None)
+            if close is not None:
+                close()
         return {
             "ok": True,
             "serving_provider": routed.attribution.serving_provider,
