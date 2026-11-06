@@ -206,7 +206,7 @@ def main(argv: list[str]) -> int:
     # 13. The exact deployed release.
     status, release = http(base + "/version")
     keys = set(release.keys()) if isinstance(release, dict) else set()
-    expected = {"service", "source_revision", "source_tree", "image_revision"}
+    expected = {"service", "source_revision", "source_tree", "image_revision", "mcp_contract_version"}
     add(
         13,
         "View the exact deployed release at /version",

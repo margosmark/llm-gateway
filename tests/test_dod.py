@@ -170,7 +170,7 @@ class DefinitionOfDoneTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             sorted(payload.keys()),
-            ["image_revision", "service", "source_revision", "source_tree"],
+            ["image_revision", "mcp_contract_version", "service", "source_revision", "source_tree"],
         )
         self.assertEqual(payload["source_revision"], "testcommit")
         self.assertTrue(payload["image_revision"].startswith("sha256:"))

@@ -214,8 +214,9 @@ def main(argv: list[str] | None = None) -> int:
     status, payload = http(base + "/version")
     keys = sorted(payload.keys()) if isinstance(payload, dict) else []
     check(
-        "/version returns the fixed four-key schema",
-        status == 200 and keys == ["image_revision", "service", "source_revision", "source_tree"],
+        "/version returns the fixed five-key schema",
+        status == 200
+        and keys == ["image_revision", "mcp_contract_version", "service", "source_revision", "source_tree"],
         f"status={status} keys={keys}",
     )
     reported = payload.get("image_revision") if isinstance(payload, dict) else None

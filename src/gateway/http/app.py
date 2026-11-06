@@ -27,6 +27,7 @@ from gateway.bridge.anthropic import aggregate_stream_any, convert_buffered_byte
 from gateway.bridge.model import ConversionError
 from gateway.bridge.streams import sse_done
 from gateway.backup import export_config, import_config, snapshot_interval_seconds
+from gateway.buildinfo import MCP_CONTRACT_VERSION
 from gateway.budget import budget_status, over_budget
 from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
@@ -412,7 +413,7 @@ class GatewayApp:
         policy: SecurityPolicy,
         ledger: RequestLedger | None = None,
         limits: LimitStore | None = None,
-        release_identity: Callable[[], dict[str, str]] | None = None,
+        release_identity: Callable[[], dict[str, Any]] | None = None,
         base_url: str = "",
         mounts: tuple[str, ...] = ("/owner",),
         logger: RequestLogger | None = None,
@@ -1217,6 +1218,11 @@ class GatewayApp:
             "source_revision": "unknown",
             "source_tree": "unknown",
             "image_revision": "unknown",
+            # The contract version is code, not build provenance: it is
+            # known even when the git context is not, and it must be
+            # published on every path out of /version. Same constant, no
+            # second literal.
+            "mcp_contract_version": MCP_CONTRACT_VERSION,
         }
         return json_response(identity)
 

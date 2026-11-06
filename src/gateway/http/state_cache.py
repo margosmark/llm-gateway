@@ -37,7 +37,8 @@ limits                digest of ``LimitStore.all()``
 request               query string, surface, and the mutation/credential
                       verdicts derived from the request
 release identity      the **result** of ``release_identity()`` - a plain
-                      four-key dict of strings. The function re-reads
+                      five-key dict (four strings plus the integer
+                      ``mcp_contract_version``). The function re-reads
                       ``release.json`` on every call, so a release written
                       after the container was up (``scripts/release.py
                       --build``, ``scripts/write_release_identity.py``
