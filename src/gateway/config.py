@@ -225,9 +225,27 @@ class ModelEntry:
         )
 
 
-def _positive_int(value: Any) -> int | None:
-    """A positive ``int``, or ``None`` for anything else (never a ``bool``)."""
+#: Hard ceiling for ``max_in_flight``, the per-provider in-flight cap. The
+#: cap refuses a request only while ``active >= limit``, so a value larger
+#: than the traffic the gateway could ever generate is the cap silently
+#: switched off - a persisted ``10**400`` did exactly that (finding F2 of
+#: security gate `t_3fd0925e`, ``docs/REVIEW.md`` R74). Both the owner API
+#: (400 ``invalid_max_in_flight``) and this parser refuse the far end; the
+#: bound is documented in ``docs/RUNBOOK.md`` §Per-provider concurrency.
+MAX_IN_FLIGHT_CEILING = 4096
+
+
+def _positive_int(value: Any, maximum: int | None = None) -> int | None:
+    """A positive ``int``, or ``None`` for anything else (never a ``bool``).
+
+    With ``maximum``, a value above the bound is treated exactly like any
+    other invalid one: dropped to ``None``, so a hand-edited config falls
+    back to the default instead of carrying a value that would disable
+    what the field is supposed to enforce.
+    """
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    if maximum is not None and value > maximum:
         return None
     return value
 
@@ -305,8 +323,10 @@ class ProviderState:
             # Tolerant the same way: only a positive integer survives the
             # round trip, so a hand-edited config with 0, a negative, a
             # bool or a string falls back to the default instead of
-            # disabling the provider or crashing the boot path.
-            max_in_flight=_positive_int(data.get("max_in_flight")),
+            # disabling the provider or crashing the boot path. A value
+            # above MAX_IN_FLIGHT_CEILING is dropped the same way - it
+            # would be the cap switched off, not a limit (R74).
+            max_in_flight=_positive_int(data.get("max_in_flight"), maximum=MAX_IN_FLIGHT_CEILING),
         )
 
     def enabled_models(self) -> list[ModelEntry]:

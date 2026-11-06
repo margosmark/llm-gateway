@@ -69,9 +69,24 @@ class WorkerPoolTests(unittest.TestCase):
             self.assertEqual(payload["error"]["type"], "rate_limited")
             release.set()
             worker.join(2)
-            with urllib.request.urlopen(base + "/health", timeout=2) as response:
-                self.assertEqual(response.status, 200)
-                self.assertEqual(json.load(response), {"ok": True})
+            # The client reads the response before the server thread has
+            # necessarily returned its worker slot, so the very next
+            # request can still see the pool busy on a loaded machine -
+            # this flaked on base ac515eb itself (2 failures in 8 isolated
+            # runs there). Probe until the service has recovered instead
+            # of firing once; only the worker cap may refuse here.
+            recovered = False
+            deadline = time.monotonic() + 2.0
+            while not recovered and time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(base + "/health", timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(json.load(response), {"ok": True})
+                        recovered = True
+                except urllib.error.HTTPError as exc:
+                    self.assertEqual(exc.code, 429)
+                    time.sleep(0.05)
+            self.assertTrue(recovered, "the worker pool never returned its slot")
         finally:
             release.set()
             worker.join(2)

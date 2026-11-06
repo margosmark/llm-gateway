@@ -332,9 +332,13 @@ provider past its cap is refused **immediately** with HTTP 429, error type
 `rate_limited`, and the body
 `local concurrency limit reached for this provider; retry later`. There is
 no queue and no wait — the caller retries or the request fails fast. A
-streamed response holds its slot until the stream finishes or closes. This
-is a local protection only: it is never a limit the provider published, and
-it is per provider, per gateway process.
+streamed response holds its slot until the stream finishes or closes; a
+response the client abandoned before its stream ever started (the
+connection vanished before the response headers, or a `HEAD` request)
+gives the slot back when that request finishes. A slot is never leaked,
+so a saturated provider always recovers on its own — no restart.
+This is a local protection only: it is never a limit the provider
+published, and it is per provider, per gateway process.
 
 | Family | Default | Why |
 |---|---|---|
@@ -349,7 +353,12 @@ one in force right now.
 
 * A value must be a positive whole number. `0`, a negative, a decimal, a
   string or a boolean is refused with HTTP 400
-  (`invalid_max_in_flight`) and writes nothing.
+  (`invalid_max_in_flight`) and writes nothing. So is any whole number
+  above **4096** — the hard ceiling for this field (`max_in_flight`
+  cannot exceed `MAX_IN_FLIGHT_CEILING`): no value can be large enough
+  to switch the cap off, which a persisted `10**400` used to do silently.
+  A `config.json` that already carries a larger value is ignored on load
+  and the provider runs at its default.
 * A cap refusal never opens a cooldown. The route is not benched for the
   gateway's own capacity, so once a slot frees the next request is served
   normally — the `rate_limited` circuit still only ever opens for a
