@@ -331,6 +331,11 @@ class ProviderConcurrencyTests(unittest.TestCase):
         self.addCleanup(harness.close)
         with harness.config.mutate() as config:
             config.aliases["coding"] = _alias()
+            # The cloud default is 32, so this fixture pins the cap with
+            # the owner's own per-provider override. Hitting the cap at 4
+            # therefore also proves the override is the number that is
+            # enforced, not the default.
+            config.providers[FAKE_PROVIDER].max_in_flight = 4
         results: list[int] = []
 
         def first_request() -> None:
@@ -346,9 +351,14 @@ class ProviderConcurrencyTests(unittest.TestCase):
         status, payload, _ = harness.request(
             "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
         )
-        self.assertEqual(status, 502)
+        # Over the cap: a fast local 429 with the fixed "retry later"
+        # body - no queueing, and the adapter is never called for it.
+        self.assertEqual(status, 429)
         self.assertEqual(payload["error"]["type"], "rate_limited")
-        self.assertIn("local concurrency limit", payload["error"]["message"])
+        self.assertEqual(
+            payload["error"]["message"],
+            "local concurrency limit reached for this provider; retry later",
+        )
         self.assertEqual(len(adapter.calls), 0)
 
         release.set()
@@ -360,6 +370,247 @@ class ProviderConcurrencyTests(unittest.TestCase):
             "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
         )
         self.assertEqual(status, 200)
+
+    def test_the_cap_refusal_keeps_its_message_when_a_fallback_is_not_authorized(self) -> None:
+        """The refusal string is the same on every path out of the cap."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingAdapter(FakeAdapter):
+            def invoke(self, request: ProviderRequest) -> ProviderResponse:
+                entered.set()
+                release.wait(timeout=5)
+                return super().invoke(request)
+
+        harness = GatewayHarness(BlockingAdapter())
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            alias = _alias()
+            alias.fallbacks = [RouteRef("opencode_go", "private-model")]
+            alias.fallback_authorized = False
+            config.aliases["coding"] = alias
+            config.providers["opencode_go"].models["private-model"] = ModelEntry(
+                model_id="private-model", enabled=True, dialect="openai_chat", source="manual"
+            )
+            config.providers[FAKE_PROVIDER].max_in_flight = 1
+        results: list[int] = []
+
+        def held_request() -> None:
+            status, _, _ = harness.request(
+                "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+            )
+            results.append(status)
+
+        worker = threading.Thread(target=held_request)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=3))
+        status, payload, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        # Two eligible routes, so the loop reaches the "fallback not used"
+        # rewrite - which must not replace the capacity message with the
+        # generic "the provider rate-limited this request" text.
+        self.assertEqual(status, 429)
+        self.assertEqual(payload["error"]["type"], "rate_limited")
+        self.assertEqual(
+            payload["error"]["message"],
+            "local concurrency limit reached for this provider; retry later",
+        )
+        release.set()
+        worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [200])
+
+    def test_local_adapters_default_to_four_and_cloud_providers_to_thirty_two(self) -> None:
+        from gateway.provider_concurrency import (
+            DEFAULT_PROVIDER_CONCURRENCY,
+            LOCAL_PROVIDER_CONCURRENCY,
+            default_limit_for,
+            effective_limit,
+        )
+
+        self.assertEqual(DEFAULT_PROVIDER_CONCURRENCY, 32)
+        self.assertEqual(LOCAL_PROVIDER_CONCURRENCY, 4)
+        for provider_id in ("ollama", "llama_cpp", "lm_studio"):
+            self.assertEqual(default_limit_for(provider_id), 4, provider_id)
+        for provider_id in ("anthropic", "chatgpt_codex", "opencode_console", "opencode_go"):
+            self.assertEqual(default_limit_for(provider_id), 32, provider_id)
+        # An owner override wins for either family.
+        self.assertEqual(effective_limit("ollama", 16), 16)
+        self.assertEqual(effective_limit("opencode_go", 2), 2)
+        with self.assertRaises(ValueError):
+            effective_limit("ollama", 0)
+
+    def test_the_state_payload_reports_the_override_and_the_effective_limit(self) -> None:
+        harness = GatewayHarness()
+        self.addCleanup(harness.close)
+        harness.registry.register(FakeAdapter(provider_id="ollama"))
+        with harness.config.mutate() as config:
+            config.providers["ollama"] = ProviderState(provider_id="ollama", kind="ollama")
+        status, state, _ = harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        providers = {row["provider_id"]: row for row in state["providers"]}
+        self.assertIsNone(providers[FAKE_PROVIDER]["max_in_flight"])
+        self.assertEqual(providers[FAKE_PROVIDER]["max_in_flight_effective"], 32)
+        self.assertIsNone(providers["ollama"]["max_in_flight"])
+        self.assertEqual(providers["ollama"]["max_in_flight_effective"], 4)
+
+        status, result, _ = harness.request(
+            "POST",
+            "/owner/api/provider",
+            {"action": "set_max_in_flight", "provider_id": FAKE_PROVIDER, "max_in_flight": 7},
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["max_in_flight"], 7)
+        self.assertEqual(result["max_in_flight_effective"], 7)
+
+        status, state, _ = harness.request("GET", "/owner/api/state")
+        self.assertEqual(status, 200)
+        providers = {row["provider_id"]: row for row in state["providers"]}
+        self.assertEqual(providers[FAKE_PROVIDER]["max_in_flight"], 7)
+        self.assertEqual(providers[FAKE_PROVIDER]["max_in_flight_effective"], 7)
+        # Persisted, so it survives a restart.
+        self.assertEqual(
+            harness.config.snapshot().providers[FAKE_PROVIDER].max_in_flight, 7
+        )
+
+        # Clearing it returns the provider to its default.
+        status, result, _ = harness.request(
+            "POST",
+            "/owner/api/provider",
+            {"action": "set_max_in_flight", "provider_id": FAKE_PROVIDER, "max_in_flight": None},
+        )
+        self.assertEqual(status, 200, result)
+        self.assertIsNone(result["max_in_flight"])
+        self.assertEqual(result["max_in_flight_effective"], 32)
+
+    def test_the_override_is_enforced_for_the_next_request_without_a_restart(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingAdapter(FakeAdapter):
+            def invoke(self, request: ProviderRequest) -> ProviderResponse:
+                entered.set()
+                release.wait(timeout=5)
+                return super().invoke(request)
+
+        harness = GatewayHarness(BlockingAdapter())
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            config.aliases["coding"] = _alias()
+            config.providers[FAKE_PROVIDER].max_in_flight = 1
+        results: list[int] = []
+
+        def held_request() -> None:
+            status, _, _ = harness.request(
+                "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+            )
+            results.append(status)
+
+        worker = threading.Thread(target=held_request)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=3))
+        status, _, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        self.assertEqual(status, 429)
+
+        # Raise it while the process is up: the very next request is let
+        # through, because the guard reads the config on every acquire.
+        status, result, _ = harness.request(
+            "POST",
+            "/owner/api/provider",
+            {"action": "set_max_in_flight", "provider_id": FAKE_PROVIDER, "max_in_flight": 2},
+        )
+        self.assertEqual(status, 200, result)
+        release.set()
+        worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [200])
+        status, _, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        self.assertEqual(status, 200)
+
+    def test_a_cap_refusal_does_not_bench_the_provider(self) -> None:
+        """Over the cap is local capacity, never a provider failure."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingAdapter(FakeAdapter):
+            def invoke(self, request: ProviderRequest) -> ProviderResponse:
+                entered.set()
+                release.wait(timeout=5)
+                return super().invoke(request)
+
+        harness = GatewayHarness(BlockingAdapter())
+        self.addCleanup(harness.close)
+        with harness.config.mutate() as config:
+            alias = _alias()
+            # The trigger set a console-created alias actually carries:
+            # with rate_limited enabled, a circuit would open on the very
+            # first cap refusal and bench the route for minutes.
+            alias.fallback_triggers = ["exhausted", "rate_limited", "upstream_unavailable"]
+            config.aliases["coding"] = alias
+            config.providers[FAKE_PROVIDER].max_in_flight = 1
+        results: list[int] = []
+
+        def held_request() -> None:
+            status, _, _ = harness.request(
+                "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+            )
+            results.append(status)
+
+        worker = threading.Thread(target=held_request)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=3))
+        status, payload, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        self.assertEqual(status, 429)
+        self.assertEqual(payload["error"]["type"], "rate_limited")
+        self.assertEqual(
+            harness.router.circuits.snapshot(),
+            {},
+            "a local capacity refusal must not open a circuit",
+        )
+        release.set()
+        worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [200])
+        status, _, _ = harness.request(
+            "POST", "/v1/responses", {"model": "coding", "input": "synthetic"}
+        )
+        self.assertEqual(status, 200)
+
+    def test_invalid_max_in_flight_values_are_refused_and_write_nothing(self) -> None:
+        harness = GatewayHarness()
+        self.addCleanup(harness.close)
+        before = harness.config.snapshot().revision
+        for value in (0, -1, True, False, "8", 2.5, [4], {"n": 1}):
+            with self.subTest(value=value):
+                status, payload, _ = harness.request(
+                    "POST",
+                    "/owner/api/provider",
+                    {"action": "set_max_in_flight", "provider_id": FAKE_PROVIDER, "max_in_flight": value},
+                )
+                self.assertEqual(status, 400, payload)
+                self.assertEqual(payload["error"]["type"], "invalid_max_in_flight")
+                self.assertIn("positive integer", payload["error"]["message"])
+        self.assertIsNone(harness.config.snapshot().providers[FAKE_PROVIDER].max_in_flight)
+        self.assertEqual(harness.config.snapshot().revision, before)
+
+    def test_set_max_in_flight_requires_an_owner_session(self) -> None:
+        harness = GatewayHarness()
+        self.addCleanup(harness.close)
+        status, payload, _ = harness.request(
+            "POST",
+            "/owner/api/provider",
+            {"action": "set_max_in_flight", "provider_id": FAKE_PROVIDER, "max_in_flight": 8},
+            auth=False,
+        )
+        self.assertEqual(status, 401, payload)
+        self.assertIsNone(harness.config.snapshot().providers[FAKE_PROVIDER].max_in_flight)
 
     def test_capacity_is_independent_per_provider(self) -> None:
         from gateway.provider_concurrency import ProviderConcurrency
@@ -405,6 +656,26 @@ class ProviderConcurrencyTests(unittest.TestCase):
         for limit in (0, -1, True, 1.5):
             with self.subTest(limit=limit), self.assertRaises(ValueError):
                 ProviderConcurrency(limit)
+
+    def test_a_config_written_with_a_bad_override_falls_back_to_the_default(self) -> None:
+        from gateway.config import ProviderState as State
+        from gateway.provider_concurrency import effective_limit
+
+        for bad in (0, -3, True, "8", 2.5, []):
+            with self.subTest(bad=bad):
+                row = State.from_dict({"provider_id": "opencode_go", "kind": "opencode_go", "max_in_flight": bad})
+                assert row is not None
+                self.assertIsNone(row.max_in_flight)
+                self.assertEqual(effective_limit("opencode_go", row.max_in_flight), 32)
+        row = State.from_dict({"provider_id": "ollama", "kind": "ollama", "max_in_flight": 5})
+        assert row is not None
+        self.assertEqual(row.max_in_flight, 5)
+        self.assertEqual(effective_limit("ollama", row.max_in_flight), 5)
+        # A config written before the field existed has no override.
+        row = State.from_dict({"provider_id": "ollama", "kind": "ollama"})
+        assert row is not None
+        self.assertIsNone(row.max_in_flight)
+        self.assertIsNone(row.to_dict()["max_in_flight"])
 
 
 class MetadataTests(unittest.TestCase):

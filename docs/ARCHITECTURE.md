@@ -31,11 +31,15 @@ not an access-control boundary or defense against an on-path LAN attacker.
 ## Provider concurrency
 
 Inference adapters are wrapped by a process-local concurrency guard with a
-fixed limit of four active requests per provider. Excess calls fail promptly
-with the `rate_limited` error class; no queue or provider probe is introduced.
-A streamed response retains its slot until the stream finishes or closes. This
-is a local protection only, not a provider guarantee or provider-reported
-limit. The cap is not persisted and is independent per process.
+**per-provider** limit: cloud providers default to 32 active requests and
+the local adapters (`ollama`, `llama_cpp`, `lm_studio`) to 4, and the owner
+can override any single provider with `max_in_flight` in the config (set
+from the owner console, read live on every acquire). Excess calls fail
+promptly with HTTP 429 and the `rate_limited` error class; no queue or
+provider probe is introduced. A streamed response retains its slot until
+the stream finishes or closes. This is a local protection only, not a
+provider guarantee or provider-reported limit. The defaults and overrides
+are configuration, and the active counters are independent per process.
 
 ## State boundaries
 

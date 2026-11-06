@@ -1608,6 +1608,98 @@ check("a public provider card has no endpoint field and no local privacy text", 
   assert.strictEqual(endpointInputs.length, 0);
 });
 
+// --- per-provider concurrency (card t_59fd2408) --------------------------
+
+check("every provider card states its in-flight limit and the cloud/local split", function () {
+  const cloud = helpers.renderProviderForTest({
+    provider_id: "anthropic", kind: "anthropic", state: "connected", models: 3,
+    base_url: null, max_in_flight: null, max_in_flight_effective: 32
+  });
+  const cloudText = collectText(cloud).join("\n");
+  assert(cloudText.includes("In flight at once: 32 (default for this provider)"), "the cloud default is shown");
+  assert(cloudText.includes("Cloud providers default to 32"), "the cloud default must be stated");
+  assert(cloudText.includes("default to 4"), "the local floor must be stated next to it");
+  assert(cloudText.includes("HTTP 429"), "the over-cap answer must be stated");
+  assert(cloudText.includes("does not queue"), "no queueing must be stated");
+
+  const local = helpers.renderProviderForTest({
+    provider_id: "ollama", kind: "ollama", state: "not_configured", models: 0,
+    base_url: "", max_in_flight: null, max_in_flight_effective: 4
+  });
+  assert(
+    collectText(local).join("\n").includes("In flight at once: 4 (default for this provider)"),
+    "the local floor is what a local provider actually runs at"
+  );
+
+  const overridden = helpers.renderProviderForTest({
+    provider_id: "opencode_go", kind: "opencode_go", state: "not_configured", models: 0,
+    base_url: null, max_in_flight: 12, max_in_flight_effective: 12
+  });
+  const overriddenText = collectText(overridden).join("\n");
+  assert(overriddenText.includes("In flight at once: 12 (owner override 12)"), "the override is labelled");
+  const inputs = findAll(overridden, (node) => node.tag === "input" && node.attributes.type === "number");
+  assert.strictEqual(inputs.length, 1, "exactly one limit field");
+  assert.strictEqual(inputs[0].value, "12", "the saved override is pre-filled");
+});
+
+check("saving an in-flight limit posts the owner's number, and an invalid one posts nothing", function () {
+  const recorded = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = function () { return 0; };  // toast cleanup must not outlive the check
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({
+      url: url, method: options.method || "GET",
+      body: options.body ? JSON.parse(options.body) : null
+    });
+    if (options.method === "POST") {
+      return jsonResponse({ ok: true, max_in_flight: 16, max_in_flight_effective: 16 });
+    }
+    return jsonResponse({ providers: [], aliases: [], profiles: [] });
+  };
+  try {
+    const card = helpers.renderProviderForTest({
+      provider_id: "opencode_go", kind: "opencode_go", state: "not_configured", models: 0,
+      base_url: null, max_in_flight: null, max_in_flight_effective: 32
+    });
+    const input = findAll(card, (node) => node.tag === "input" && node.attributes.type === "number")[0];
+    assert(input, "the card must offer the limit field");
+    const buttons = findAll(card, (node) => node.tag === "button");
+    const save = buttons.find((node) => node.textContent === "Save limit");
+    const clear = buttons.find((node) => node.textContent === "Use default");
+    assert(save && clear, "the card must offer save and clear");
+
+    input.value = "16";
+    save.listeners.click();
+    let posts = recorded.filter((r) => r.method === "POST");
+    assert.strictEqual(posts.length, 1, "a valid number is sent");
+    assert.deepStrictEqual(posts[0].body, {
+      action: "set_max_in_flight", provider_id: "opencode_go", max_in_flight: 16
+    });
+
+    input.value = "0";
+    save.listeners.click();
+    assert.strictEqual(
+      recorded.filter((r) => r.method === "POST").length, 1, "zero is refused before it leaves the browser"
+    );
+
+    input.value = "-3";
+    save.listeners.click();
+    assert.strictEqual(
+      recorded.filter((r) => r.method === "POST").length, 1, "a negative is refused before it leaves the browser"
+    );
+
+    clear.listeners.click();
+    posts = recorded.filter((r) => r.method === "POST");
+    assert.strictEqual(posts.length, 2, "clearing sends the clear");
+    assert.strictEqual(posts[1].body.max_in_flight, null, "empty means back to the default");
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+  }
+});
+
 // --- cooldown clear controls (card t_a278c4d4) --------------------------
 
 function cooldownFixtureState() {
