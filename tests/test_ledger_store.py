@@ -14,18 +14,24 @@ here pins one commitment of that replacement:
   whole-history materialisation - the R56 state bar);
 * the schema stays metadata-only (six whitelisted columns, no content);
 * the legacy journal migrates without losing a row and never re-imports;
-* the status figures the owner reads (size / rows / oldest row) are real.
+* the status figures the owner reads (size / rows / oldest row) are real;
+* a hostile journal line (unknown key, truncated JSON, non-dict, wrong
+  types, lone surrogate) is counted and skipped - boot never crashes on it
+  and no hostile line ever lands in the store;
+* the store files are owner-only (0600), like every sibling state artifact.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
 import tracemalloc
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gateway.ledger_export import export_records, render_csv, render_json
 from gateway.ledger_persistence import (
@@ -34,7 +40,7 @@ from gateway.ledger_persistence import (
     RETENTION_SECONDS,
     store_path_for,
 )
-from gateway.ledger_store import LedgerStore
+from gateway.ledger_store import LedgerStore, LedgerStoreError
 from gateway.observability import RequestLedger
 
 #: The measured fleet volume the card names: ~400 KiB/h of ledger writes,
@@ -561,3 +567,143 @@ class ExportTests(unittest.TestCase):
                 self.assertEqual(json.loads(render_json(records)), records)
             finally:
                 restarted.close()
+
+
+class HostileJournalImportTests(unittest.TestCase):
+    """F1/F3: hostile journal lines are counted at import, never fatal."""
+
+    def test_hostile_lines_are_counted_skipped_and_never_imported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            now = time.time()
+            # One importable line plus every hostile shape the store-import
+            # seam must refuse: unknown key, truncated JSON, non-dict line,
+            # non-str request_id, non-str timestamp, and a lone surrogate
+            # (F1: that last line raised UnicodeEncodeError out of
+            # insert_many, past every boot-level catch, killing first boot).
+            lines = [
+                json.dumps(_row("ok", now)),
+                json.dumps({**_row("unknown-key", now), "unexpected": "field"}),
+                '{"truncated": ',
+                json.dumps(["not", "a", "dict"]),
+                json.dumps({**_row("bad-rid", now), "request_id": 123}),
+                json.dumps({**_row("bad-ts", now), "timestamp": 42}),
+                json.dumps({**_row("surrogate", now), "error_class": "\ud800"}),
+            ]
+            path.write_text("\n".join(lines) + "\n")
+            # Boot must succeed - the pre-fix code raised out of __init__ here.
+            ledger = RequestLedger(persistence_path=path)
+            try:
+                payload = ledger.rollup()
+                self.assertIsNotNone(payload)
+                assert payload is not None
+                coverage = payload["coverage"]
+                self.assertEqual(coverage["rows_skipped"], 6)
+                self.assertEqual(coverage["requests"], 1)
+                self.assertTrue(coverage["incomplete"])
+                self.assertEqual(ledger.totals()["requests"], 1)
+            finally:
+                ledger.close()
+            # Only the clean line reached the store; no hostile row slipped in.
+            connection = sqlite3.connect(store_path_for(path))
+            try:
+                identifiers = [row[0] for row in
+                              connection.execute("SELECT request_id FROM ledger ORDER BY rowid")]
+            finally:
+                connection.close()
+            self.assertEqual(identifiers, ["ok"])
+
+
+class WriterFailureVisibilityTests(unittest.TestCase):
+    """F2: a non-sqlite failure is recorded; the writer never dies silently."""
+
+    def test_a_non_sqlite_store_failure_becomes_a_ledger_store_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            store = LedgerStore(store_path_for(path))
+            store.open()
+            real = store._write_conn
+            self.assertIsNotNone(real)
+
+            class ExplodingConnection:
+                def execute(self, *_args: object, **_kwargs: object) -> object:
+                    raise ValueError("simulated non-sqlite failure")
+
+            try:
+                store._write_conn = ExplodingConnection()  # type: ignore[assignment]
+                with self.assertRaises(LedgerStoreError):
+                    store.append(request_id="r1", ts=int(time.time()), stamp=_stamp(time.time()),
+                                 error_class=None, fallback_used=0, body="{}")
+                self.assertIn("ValueError", store.last_error or "")
+            finally:
+                store._write_conn = real
+            try:
+                # Recovery clears the record, so the owner sees current state.
+                store.append(request_id="r2", ts=int(time.time()), stamp=_stamp(time.time()),
+                             error_class=None, fallback_used=0, body="{}")
+                self.assertIsNone(store.last_error)
+            finally:
+                store.close()
+
+    def test_a_writer_loop_failure_is_recorded_and_the_loop_survives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            original = LedgerPersistence._append
+            failed = {"done": False}
+
+            def flaky(self: LedgerPersistence, row: dict[str, object]) -> None:
+                if not failed["done"]:
+                    failed["done"] = True
+                    raise RuntimeError("simulated writer crash")
+                original(self, row)
+
+            with mock.patch.object(LedgerPersistence, "_append", flaky):
+                persistence = LedgerPersistence(path)
+                try:
+                    self.assertTrue(persistence.submit(_row("boom", time.time())))
+                    self.assertTrue(persistence.flush())
+                    # Pre-fix: the thread died here and store.error stayed
+                    # None. Now: the thread is alive and the failure shows
+                    # exactly where the owner reads it.
+                    self.assertTrue(persistence._thread.is_alive())
+                    error = persistence.durability()["store"]["error"]
+                    self.assertIn("simulated writer crash", error or "")
+                    # The loop keeps draining: a later row still lands, and
+                    # the record clears once the writer recovers.
+                    self.assertTrue(persistence.submit(_row("after", time.time())))
+                    self.assertTrue(persistence.flush())
+                    self.assertTrue(persistence._thread.is_alive())
+                    self.assertIsNone(persistence.durability()["store"]["error"])
+                finally:
+                    persistence.close()
+            connection = sqlite3.connect(store_path_for(path))
+            try:
+                identifiers = [row[0] for row in
+                              connection.execute("SELECT request_id FROM ledger ORDER BY rowid")]
+            finally:
+                connection.close()
+            self.assertEqual(identifiers, ["after"])
+
+
+class StoreFilePermissionsTests(unittest.TestCase):
+    """F4: the store and its WAL sidecars are owner-only, like every sibling artifact."""
+
+    def test_the_db_and_its_sidecars_are_created_0600(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            store = LedgerStore(store_path_for(path))
+            store.open()
+            try:
+                store.append(request_id="r1", ts=int(time.time()), stamp=_stamp(time.time()),
+                             error_class=None, fallback_used=0, body="{}")
+                modes: dict[str, int] = {}
+                for suffix in ("", "-wal", "-shm"):
+                    candidate = store.path.with_name(store.path.name + suffix)
+                    self.assertTrue(candidate.exists(), f"{candidate.name} was not created")
+                    modes[suffix] = stat.S_IMODE(candidate.stat().st_mode)
+            finally:
+                store.close()
+            # sqlite leaves all three at the process umask (0644 under 0022);
+            # the state-directory convention is 0600 inside a 0700 directory
+            # (docs/RUNBOOK.md), which every sibling artifact already follows.
+            self.assertEqual(modes, {"": 0o600, "-wal": 0o600, "-shm": 0o600})
