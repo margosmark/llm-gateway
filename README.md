@@ -236,6 +236,27 @@ is the only thing that configures the provider: it makes no connection at
 boot, and **Refresh model catalog** is what discovers models — saving a
 different endpoint clears the models the previous one produced.
 
+**Enter the server's root origin, not a full API path.** The gateway appends
+`/v1/chat/completions` and `/v1/models` itself (and `/api/show` on Ollama for
+capability evidence), so a path does not belong in the field; a trailing
+`/v1` is stripped for you. Per server:
+
+* **Ollama** — root `http://HOST:11434`, e.g. `http://10.10.11.5:11434`.
+  Ollama serves its OpenAI surface under `/v1` at that root, so `11434` is
+  the whole port. Ollama needs no key: the OpenAI client requires some
+  `Authorization` header but Ollama ignores the value, and the gateway sends
+  no credential at all unless you enrol one in **Optional local token**.
+* **llama.cpp (`llama-server`)** — root `http://HOST:PORT`, where `PORT` is
+  whatever `--port` you passed. Current upstream builds default to `9931`;
+  older builds and the official Docker images use `8080`, so read the port
+  from the server's startup log rather than assuming one. `--host` defaults
+  to `127.0.0.1`, so a server on another machine must be started
+  LAN-facing (`--host 0.0.0.0` or your LAN address) or the gateway will be
+  refused at connect. Authentication is optional via `--api-key`, which
+  matches **Optional local token**.
+* **LM Studio** — root `http://HOST:PORT` from the server's local-network
+  port display, with **Require Auth** off unless you enrol its token.
+
 **No credential is needed by default.** Ollama, `llama-server` and LM Studio
 are all keyless out of the box, so the gateway sends no `Authorization`
 header. Only if you enabled authentication on the server itself

@@ -282,6 +282,18 @@ Ollama, `llama-server` and LM Studio all expose the same OpenAI-compatible
 2. Enter the **Server base URL** — a plain origin, e.g.
    `http://127.0.0.1:11434` (Ollama) or `http://192.168.1.20:8080`. A
    trailing `/v1` is stripped for you; nothing else belongs in the field.
+   Per server, the origin is the **root** — the gateway appends
+   `/v1/chat/completions`, `/v1/models` (and Ollama's `/api/show`):
+   * **Ollama** — `http://HOST:11434`. Ollama ignores any `Authorization`
+     value, and the gateway sends no credential unless one is enrolled.
+   * **llama.cpp (`llama-server`)** — `http://HOST:PORT` for whatever
+     `--port` you passed: current upstream builds default to `9931`, older
+     builds and the official Docker images to `8080`, so take the port from
+     the server's startup log. `--host` defaults to `127.0.0.1`, so start it
+     LAN-facing (`--host 0.0.0.0` or the LAN address) or the gateway cannot
+     reach another machine. Optional `--api-key` pairs with
+     **Optional local token**.
+   * **LM Studio** — `http://HOST:PORT` from its local-network port display.
 3. Choose **Save endpoint**. The URL is normalised and checked against the
    private-destination policy on save, and refused with a fixed reason if it
    fails — the value you typed is never echoed back (§6).
