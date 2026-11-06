@@ -731,6 +731,16 @@ def validate_machine_key_name(name: Any) -> str:
         raise OwnerAuthError(
             400, "invalid_machine_key_name", "name must not contain control characters",
         )
+    # A lone surrogate cannot be UTF-8 encoded, so it would fail the
+    # atomic write of the store after the record was already mutated into
+    # memory - the wedge this check and the rollback in create() both
+    # guard against. The body-parse choke refuses it first; this is the
+    # store's own boundary (F9).
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in cleaned):
+        raise OwnerAuthError(
+            400, "invalid_machine_key_name",
+            "name must not contain unpaired surrogate characters",
+        )
     return cleaned
 
 
@@ -930,7 +940,16 @@ class MachineKeyStore:
                 "created_at": now,
                 "last_used_at": None,
             }
-            self._save()
+            try:
+                self._save()
+            except BaseException:
+                # The record exists only in memory until the write lands.
+                # Leaving it behind would wedge the store: every later
+                # create/rotate/revoke re-serialises the same unencodable
+                # text and fails until restart, holding the key_hash of a
+                # token that was never returned (F9).
+                self._data["keys"].pop(display_id, None)
+                raise
         return {
             "display_id": display_id,
             "name": name,
@@ -960,9 +979,17 @@ class MachineKeyStore:
             # Same display id: the audit trail keeps one identity while
             # the secret changes, and the previous value is dead here -
             # there is no grace window for a machine key.
+            previous = dict(record)
             record["key_hash"] = digest
             record["rotated_at"] = now
-            self._save()
+            try:
+                self._save()
+            except BaseException:
+                # Same no-phantom rule as create(): an in-memory mutation
+                # must not outlive the write that was supposed to persist
+                # it (F9).
+                self._data["keys"][display_id] = previous
+                raise
         return {
             "display_id": display_id,
             "name": record.get("name"),
@@ -981,7 +1008,14 @@ class MachineKeyStore:
                 raise OwnerAuthError(
                     404, "unknown_machine_key", "no machine key with that display id",
                 )
-            self._save()
+            try:
+                self._save()
+            except BaseException:
+                # The revocation is not real until it is on disk; a failed
+                # write must not leave the record deleted in memory only
+                # (F9).
+                self._data["keys"][display_id] = record
+                raise
         return {"display_id": display_id, "revoked": True}
 
     def list(self) -> list[dict[str, Any]]:

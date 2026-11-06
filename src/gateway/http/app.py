@@ -77,6 +77,7 @@ from gateway.capability_probe import (
 )
 from gateway.config import (
 
+    ERROR_POLICY,
     FALLBACK_TRIGGERS,
     PHASES,
     STATE_CONFIGURED_UNTESTED,
@@ -98,7 +99,7 @@ from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.fallback_reasons import fallback_reason_class
 from gateway.http import messages as messages_surface
-from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
+from gateway.http.core import InvalidBodyText, Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import (
     MUTATING_METHODS,
     SecurityError,
@@ -120,6 +121,7 @@ from gateway.observability import (
     CONFIDENCE_NONE,
     LimitSnapshot,
     LimitStore,
+    RequestEvent,
     RequestLedger,
     SOURCE_PUBLISHED_ESTIMATE,
     SOURCE_UNKNOWN,
@@ -666,19 +668,115 @@ class GatewayApp:
             result = json_response({"error": {"message": exc.message, "type": exc.error_class}}, 502)
             self._log_request(request, result, started)
             return result
-        except Exception:  # pragma: no cover - defensive
-            result = json_response({"error": {"message": "internal error", "type": "gateway_error"}}, 500)
+        except InvalidBodyText as exc:
+            # One choke for every JSON ingress (F9): a body carrying a lone
+            # surrogate is refused before any handler reads it, so it never
+            # reaches an adapter body encode, a password hash, a machine-key
+            # name or a config field. 400, named field, no rewrite.
+            result = json_response(
+                {
+                    "error": {
+                        "message": (
+                            "request body contains invalid unicode (a lone "
+                            f"surrogate) at {exc.path}; send valid UTF-8 text"
+                        ),
+                        "type": "invalid_request",
+                        "field": exc.path,
+                    }
+                },
+                400,
+            )
+            # The router records every path it runs; a body refused at the
+            # parse choke never gets there, so the refusal is recorded here
+            # or the owner would see a refusal with no ledger row, no
+            # metrics counter and no cause. "policy" is the gateway's own
+            # refusal class, the same one a conversion refusal records.
+            self._record_terminal(
+                request,
+                status=400,
+                error_class=ERROR_POLICY,
+                outcome="refused",
+                reason=f"lone surrogate refused at body parse: {exc.path}: {exc.excerpt}",
+                alias=exc.model,
+                started=started,
+            )
             self._log_request(request, result, started)
+            return result
+        except Exception as exc:
+            result = json_response({"error": {"message": "internal error", "type": "gateway_error"}}, 500)
+            # The cause is logged as a class name only - never str(exc),
+            # which could carry client text - and the terminal outcome is
+            # recorded, so an operator can find the cause of a bare 500.
+            self._record_terminal(
+                request,
+                status=500,
+                error_class="internal",
+                outcome="error",
+                reason=f"unhandled {type(exc).__name__} at the dispatch boundary",
+                alias=None,
+                started=started,
+            )
+            self._log_request(request, result, started, exception=type(exc).__name__)
             return result
         self._log_request(request, result, started)
         return result
 
-    def _log_request(self, request: Request, result: Any, started: float) -> None:
+    def _record_terminal(
+        self,
+        request: Request,
+        *,
+        status: int,
+        error_class: str,
+        outcome: str,
+        reason: str,
+        alias: str | None,
+        started: float,
+    ) -> None:
+        """Record an outcome the routing layer never reached.
+
+        ``Router._record`` covers every path the router runs. A body
+        refused at the parse choke and a handler that died at the dispatch
+        boundary both happen *before* it, so without this the owner would
+        see a refusal or a 500 with no ledger row and no metrics counter
+        (F9). Metadata only: a bounded, escaped excerpt of the refusal -
+        never the request body.
+        """
+        if self.ledger is None:
+            return
+        self.ledger.record(
+            RequestEvent(
+                request_id=new_request_id(),
+                timestamp=utc_now_iso(),
+                requested_alias=alias or "",
+                requested_model=alias or None,
+                status=status,
+                error_class=error_class,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                attempts=[
+                    {
+                        "provider": "",
+                        "model": "",
+                        "outcome": outcome,
+                        "reason": reason[:400],
+                    }
+                ],
+            )
+        )
+
+    def _log_request(
+        self,
+        request: Request,
+        result: Any,
+        started: float,
+        exception: str | None = None,
+    ) -> None:
         """Record one request outcome.
 
         The path is logged without its query string, and the body is never
         logged, so a prompt, a response or a credential cannot reach the
-        log.
+        log. ``exception`` names the class of an unhandled failure - a
+        class name only, never the exception's text, which could carry
+        client-controlled content.
         """
         status = getattr(result, "status", 0)
         error_class = None
@@ -729,6 +827,7 @@ class GatewayApp:
             action=action,
             machine_key_id=machine_key_id,
             machine_key_target=machine_key_target,
+            exception=exception,
         )
 
     # --- surface helpers -------------------------------------------------
