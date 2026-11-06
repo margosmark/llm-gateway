@@ -614,6 +614,57 @@ class HostileJournalImportTests(unittest.TestCase):
             self.assertEqual(identifiers, ["ok"])
 
 
+class NonSqliteValueErrorTests(unittest.TestCase):
+    """F8: insert_many/prune convert a non-sqlite ValueError to LedgerStoreError.
+
+    The first-boot import validates every TEXT param before the batch, so
+    these conversions are defence in depth - but their claim (visible
+    LedgerStoreError + rollback, never the raw UnicodeEncodeError that used
+    to abort first-boot import) was unpinned: reverting either catch to
+    ``sqlite3.Error`` left the whole suite green.
+    """
+
+    def test_insert_many_converts_a_surrogate_row_and_rolls_the_batch_back(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            store = LedgerStore(store_path_for(path))
+            store.open()
+            try:
+                now = int(time.time())
+                body = json.dumps(_row("good", now), separators=(",", ":"), ensure_ascii=True)
+                good = ("good", now, _stamp(now), None, 0, body)
+                surrogate = ("bad", now, _stamp(now), "\ud800", 0, body)
+                # With the catch reverted to sqlite3.Error this escaped as
+                # UnicodeEncodeError - the raw exception F1 killed first
+                # boot with - instead of the store's own error type.
+                with self.assertRaises(LedgerStoreError):
+                    store.insert_many([good, surrogate])
+                self.assertIn("UnicodeEncodeError", store.last_error or "")
+                # The good row beside the bad one must not be committed.
+                self.assertTrue(store.empty())
+                # And the failed batch leaves the store usable.
+                self.assertEqual(store.insert_many([good]), 1)
+                self.assertFalse(store.empty())
+                self.assertIsNone(store.last_error)
+            finally:
+                store.close()
+
+    def test_prune_converts_an_uncastable_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "request-ledger.jsonl"
+            store = LedgerStore(store_path_for(path))
+            store.open()
+            try:
+                # Same conversion rule as append()/insert_many(): a
+                # non-sqlite failure still surfaces as LedgerStoreError
+                # with last_error set, never as the raw ValueError.
+                with self.assertRaises(LedgerStoreError):
+                    store.prune("not-an-epoch")  # type: ignore[arg-type]
+                self.assertIn("ValueError", store.last_error or "")
+            finally:
+                store.close()
+
+
 class WriterFailureVisibilityTests(unittest.TestCase):
     """F2: a non-sqlite failure is recorded; the writer never dies silently."""
 
