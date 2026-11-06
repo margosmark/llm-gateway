@@ -645,7 +645,7 @@ function fixtureState() {
     cooldown_policy: { exhausted_base_seconds: 60, exhausted_max_seconds: 900, transient_max_seconds: 3600, probe_timeout_seconds: 5 },
     cooldown_details: {},
     ledger: [],
-    ledger_durability: { enabled: true, retention_days: 30, billing_system: false },
+    ledger_durability: { enabled: true, retention_days: 30, billing_system: false, store: { path: "/var/lib/gateway/request-ledger.db", bytes: 1048576, rows: 12345, requests: 12345, oldest_row_ts: "2026-10-08T05:50:01Z", journal_path: "/var/lib/gateway/request-ledger.jsonl", journal_bytes: 524288, error: null } },
     totals: { requests: 8, errors: 1, fallbacks: 3, rate_limited: 0, exhausted: 0 },
     usage_costs: {
       window_hours: 24,
@@ -732,6 +732,14 @@ check("Operate now renders exactly one read-only health card per published alias
   assert(text.includes("Probe contention: enabled"));
   assert(text.includes("Healthy"));
   assert.strictEqual(findAll(root, function (node) { return node.tag === "details"; }).length, 1);
+});
+
+check("the ledger card states the store's real on-disk figures, not just a retention promise", function () {
+  const text = collectText(helpers.renderStatusForTest(fixtureState())).join("\n");
+  assert(text.includes("bound by age alone - never by file size"));
+  assert(text.includes("On disk: 1.0 MiB store \u00b7 12,345 rows \u00b7 oldest row 2026-10-08T05:50:01Z \u00b7 512 KiB journal tail"));
+  assert(!text.includes("bounded rotation"));
+  assert(text.includes("an age-based 30-day retention window (no size cap)"));
 });
 
 check("a policy gap is explicit and an orphan cooldown cannot affect an alias", function () {

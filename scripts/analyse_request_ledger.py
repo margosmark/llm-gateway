@@ -1,14 +1,18 @@
 """Read the production request ledger and correlate failure modes.
 
-Prints counts and safe structural fields only. Never prints a prompt, an
-image payload, a token, or a credential.
+The store of record is the SQLite volume (`request-ledger.db`, the 30-day
+window); the plaintext journal files are the debug tail and are read only
+when the store has nothing yet. Prints counts and safe structural fields
+only. Never prints a prompt, an image payload, a token, or a credential.
 """
 
 from __future__ import annotations
 
 import collections
 import json
+import sqlite3
 
+STORE = "/var/lib/gateway/request-ledger.db"
 LEDGERS = (
     "/var/lib/gateway/request-ledger.jsonl",
     "/var/lib/gateway/request-ledger.jsonl.1",
@@ -23,6 +27,23 @@ SENSITIVE = {
 
 def load() -> list[dict]:
     rows: list[dict] = []
+    try:
+        connection = sqlite3.connect(f"file:{STORE}?mode=ro", uri=True)
+    except sqlite3.Error:
+        connection = None
+    if connection is not None:
+        try:
+            for (body,) in connection.execute("SELECT body FROM ledger ORDER BY rowid"):
+                try:
+                    rows.append(json.loads(body))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        except sqlite3.Error:
+            rows = []
+        finally:
+            connection.close()
+        if rows:
+            return rows
     for path in LEDGERS:
         try:
             with open(path, encoding="utf-8") as handle:

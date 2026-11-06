@@ -1,11 +1,28 @@
-"""Asynchronous, bounded, metadata-only request ledger persistence.
+"""Asynchronous, metadata-only request ledger persistence over two stores.
 
-Two durable artifacts share the state directory:
+Three durable artifacts share the state directory:
+
+``request-ledger.db``
+    The **store of record**: SQLite (WAL), one row per durable ledger line,
+    on the persistent volume beside the journal. This is what makes the
+    published retention window real - rows leave only when they are older
+    than :data:`RETENTION_SECONDS` (``LedgerStore.prune``), never because a
+    file grew. At the measured write rate (~400 KiB/h, ~5,190 requests/day)
+    thirty days is ~156k rows / ~150 MB; the previous JSONL design dropped
+    the oldest 5 MiB rotation after ~1.3 days, so its 30-day claim was
+    unreachable by more than an order of magnitude. Boot rebuilds, ring
+    restore, totals and the status figures all read this store (streaming or
+    as single SQL aggregates - a boot never materialises the history).
 
 ``request-ledger.jsonl``
-    The append-only metadata ledger: one line per recorded outcome, with an
-    amendment appended after the original row for the same request.
-    Rotated at 5 MiB with two rotations and a 30-day retention window.
+    The **plain-text journal tail** with the original mechanics: append-only
+    newline JSON, rotated at 5 MiB with two rotations (:data:`MAX_BYTES` x
+    (``MAX_ROTATIONS`` + 1) = 15 MiB maximum). It is *not* the history bound
+    anymore - every row reaches the store first, so rotation only drops the
+    tail's copy. It remains the human-readable tail on the volume and the
+    migration source: the first boot over a legacy journal imports it into
+    the store without losing a row (6,673 requests / 12,795 lines measured
+    at migration time).
 
 ``request-ledger-rollup.json``
     The daily rollup sidecar maintained from the *same* append path: one row
@@ -14,19 +31,19 @@ Two durable artifacts share the state directory:
     vocabulary (folded at ingest - see :mod:`gateway.fallback_reasons`, so
     raw per-second sentences never become sidecar keys), errors by
     ``error_class`` and a status breakdown, plus a ``coverage`` block that
-    states exactly what the rollup covers. The ledger stays the source of
-    truth; :func:`rebuild_rollups` regenerates the sidecar from it, and the
-    store is rebuilt from the ledger on every start so aggregated history
-    never begins at deploy time.
+    states exactly what the rollup covers. The store is the source of
+    truth; :func:`rebuild_rollups` regenerates the sidecar from it (falling
+    back to a legacy journal when the store is empty), and the store is
+    replayed into the rollup on every start so aggregated history never
+    begins at deploy time.
 
-The store's two growth bounds are deliberate and both are visible in
-``coverage``: the request index is count-capped at
-:data:`INDEX_MAX_ENTRIES` entries (oldest-by-last-touch eviction, evicted
-ids remembered for a late amendment), and every persisted structure derives
-from either that cap or the durable ledger's own 5 MiB x 3 rotation, so an
-appliance that runs for months does not grow without limit.
+Growth bounds are deliberate and visible in ``coverage``: the request index
+is count-capped at :data:`INDEX_MAX_ENTRIES` entries (oldest-by-last-touch
+eviction, evicted ids remembered for a late amendment), and the durable
+history is bounded by the 30-day age rule alone - no byte cap, no rotation.
+Both are stated rather than implied.
 
-Both artifacts are metadata only. Neither holds a prompt, a response, a
+Both stores are metadata only. Neither holds a prompt, a response, a
 credential, a provider account identifier, or - in the rollup's case - even
 a request identifier: an aggregated day cannot be traced back to an
 individual call. Cost estimates are deliberately *not* persisted into the
@@ -50,10 +67,17 @@ from typing import Any
 from gateway.bridge.streams import usable_token_count
 from gateway.costs import INVALID_USAGE_MARKER
 from gateway.fallback_reasons import fallback_reason_class
+from gateway.ledger_store import LedgerStore, LedgerStoreError
 
 RETENTION_SECONDS = 30 * 24 * 60 * 60
+#: Journal bounds. These bound the *plain-text tail only* - they no longer
+#: bound history, which lives in the SQLite store and ages out by time.
 MAX_BYTES = 5 * 1024 * 1024
 MAX_ROTATIONS = 2
+#: How often the writer thread re-applies the 30-day age rule to the store
+#: while running (an appliance's uptime is unbounded, so waiting for the
+#: next boot would let history grow past its window). Boot always prunes.
+PRUNE_INTERVAL_SECONDS = 10 * 60
 FIELDS = frozenset({
     "request_id", "timestamp", "requested_alias", "requested_model",
     "serving_provider", "serving_model", "status", "error_class",
@@ -67,7 +91,7 @@ AMENDABLE = frozenset({"status", "error_class", "token_counters", "latency_ms"})
 ROLLUP_SCHEMA = "daily-rollup/v1"
 #: How often the running process refreshes the sidecar from the append path:
 #: bounded both by rows written and by wall-clock time, so a crash can lose at
-#: most this much incremental state. The next start rebuilds from the ledger,
+#: most this much incremental state. The next start rebuilds from the store,
 #: which is the authoritative copy, so the loss is never permanent.
 ROLLUP_SNAPSHOT_ROWS = 50
 ROLLUP_SNAPSHOT_SECONDS = 15.0
@@ -84,14 +108,16 @@ DEFAULT_LEDGER_PATH = "/var/lib/gateway/request-ledger.jsonl"
 #: 300k rows -> +187 MB RSS, i.e. 30k requests/day -> ~540 MB and
 #: 100k/day -> ~1.8 GB on an appliance whose uptime is effectively
 #: unbounded. Every other ledger structure is count-bounded (ring 10_000,
-#: writer queue 20_000, ledger file 5 MiB x 3); this is the only runtime one
+#: writer queue 20_000, journal 5 MiB x 3); this is the only runtime one
 #: that was not.
 #:
 #: 50_000 was chosen so that:
 #:
-#: * a normal boot never evicts - the whole durable ledger (5 MiB x 3 =
-#:   15 MiB, ~40k rows at a typical row size, the bound the security gate
-#:   already accepted for rebuild) fits under the cap;
+#: * a typical boot never evicts - the measured durable history at the
+#:   measured rate (~5,190 requests/day) is ~156k rows over 30 days, so a
+#:   long-running appliance DOES evict index entries at boot; that is the
+#:   designed behaviour (the counted contribution stays in its bucket and
+#:   ``coverage`` reports ``index_evicted``), not a loss;
 #: * it stays several times wider than the 10_000-record ledger ring that
 #:   gates amendments: ``RequestLedger.amend`` only writes an amendment row
 #:   while the event is still in the ring, so an id the product can still
@@ -110,6 +136,11 @@ INDEX_MAX_ENTRIES = 50_000
 DimensionKey = tuple[str, str, str, str]
 
 
+def store_path_for(ledger_path: Path | str) -> Path:
+    """The SQLite store path for a ledger path: ``request-ledger.jsonl`` -> ``request-ledger.db``."""
+    return Path(ledger_path).with_suffix(".db")
+
+
 def rollup_path_for(ledger_path: Path) -> Path:
     """The sidecar path for a ledger path: ``request-ledger.jsonl`` -> ``request-ledger-rollup.json``."""
     path = Path(ledger_path)
@@ -117,16 +148,16 @@ def rollup_path_for(ledger_path: Path) -> Path:
 
 
 def _ledger_files(path: Path) -> list[Path]:
-    """Every ledger file, oldest first, so a later line supersedes an earlier one."""
+    """Every journal file, oldest first, so a later line supersedes an earlier one."""
     return [path.with_suffix(path.suffix + f".{i}") for i in range(MAX_ROTATIONS, 0, -1)] + [path]
 
 
 class RollupStore:
-    """The daily rollup: aggregated, metadata-only, and rebuildable from the ledger.
+    """The daily rollup: aggregated, metadata-only, and rebuildable from the store.
 
     Rows are folded in per request identifier, so an amendment (a later line
     for the same request) *replaces* the earlier contribution instead of
-    being counted twice - the same rule the ledger's own loader applies.
+    being counted twice - the same rule the store's own reader applies.
     """
 
     def __init__(self, path: Path, source: str, *, now: Callable[[], datetime] | None = None) -> None:
@@ -147,9 +178,20 @@ class RollupStore:
         self._rows_expired = 0
         self._rows_superseded = 0
         self._rows_appended = 0
-        self._rebuild: dict[str, Any] = {"status": "pending", "trigger": "", "at": None, "lines_read": 0}
-        self._first: float | None = None
-        self._last: float | None = None
+        self._rebuild: dict[str, Any] = {
+            "status": "pending", "trigger": "", "at": None, "lines_read": 0, "mode": "full",
+        }
+        #: Per-UTC-day [oldest, newest] epoch bounds, kept beside the buckets
+        #: (at most one entry per retained day). The index is count-capped,
+        #: so deriving ``first_row_ts``/``last_row_ts`` from it would shrink
+        #: the stated window to whatever the cap still holds - these bounds
+        #: survive index eviction and answer the honesty question from the
+        #: days the rollup actually still covers.
+        self._day_bounds: dict[str, list[float]] = {}
+        #: Store rowid up to which every line is folded into this rollup.
+        #: Persisted in the sidecar; the next boot replays only what came
+        #: after, which is what makes boot a load instead of a full rebuild.
+        self._watermark = 0
         self._pending = 0
         self._last_save = time.monotonic()
 
@@ -207,12 +249,13 @@ class RollupStore:
                 bucket = _empty_bucket()
                 self._rows[key] = bucket
             self._apply(bucket, delta, +1)
+            bounds = self._day_bounds.setdefault(key[0], [epoch, epoch])
+            if epoch < bounds[0]:
+                bounds[0] = epoch
+            if epoch > bounds[1]:
+                bounds[1] = epoch
             self._index[request_id] = (key, delta, epoch)
             self._evict_overflow()
-            if self._first is None or epoch < self._first:
-                self._first = epoch
-            if self._last is None or epoch > self._last:
-                self._last = epoch
             if appended:
                 self._rows_appended += 1
             self._pending += 1
@@ -235,25 +278,14 @@ class RollupStore:
                 self._evicted_ids.pop(next(iter(self._evicted_ids)))
 
     def rebuild(self, files: Iterable[Path], *, trigger: str = "manual") -> dict[str, Any]:
-        """Regenerate the whole rollup from ledger files.
+        """Regenerate the whole rollup from legacy JSONL journal files.
 
         Idempotent: the previous state is discarded first, so re-running it
-        over the same ledger always produces the same rollup.
+        over the same ledger always produces the same rollup. Kept for the
+        CLI and for legacy journals the store has not consumed yet.
         """
         with self._lock:
-            self._rows.clear()
-            self._index.clear()
-            # The ledger replay re-establishes every amendment relationship,
-            # so the eviction bookkeeping starts over with it.
-            self._evicted_ids.clear()
-            self._index_evicted = 0
-            self._index_amendments_dropped = 0
-            self._rows_skipped = 0
-            self._rows_expired = 0
-            self._rows_superseded = 0
-            self._rows_appended = 0
-            self._first = None
-            self._last = None
+            self._reset_locked()
             lines_read = 0
             status = "complete"
             now = time.time()
@@ -267,13 +299,7 @@ class RollupStore:
                             except ValueError:
                                 self._rows_skipped += 1
                                 continue
-                            stamp = _parse_timestamp(row.get("timestamp")) if isinstance(row, dict) else None
-                            if stamp is not None and now - stamp.timestamp() > RETENTION_SECONDS:
-                                # Past the declared retention window: expected,
-                                # and not a coverage gap.
-                                self._rows_expired += 1
-                                continue
-                            self.ingest(row)
+                            self._ingest_for_rebuild(row, now)
                 except FileNotFoundError:
                     continue
                 except (OSError, ValueError):
@@ -282,13 +308,275 @@ class RollupStore:
                     # gap in the rollup, and the coverage block has to say so
                     # rather than presenting the rows we did read as complete.
                     status = "partial"
-            self._rebuild = {
-                "status": status,
-                "trigger": trigger,
-                "at": self._iso_now(),
-                "lines_read": lines_read,
-            }
+            self._finish_rebuild_locked(status, trigger, lines_read, mode="full")
             return self._snapshot_locked()
+
+    def rebuild_from_store(
+        self,
+        bodies: Iterable[str],
+        *,
+        trigger: str = "manual",
+        skipped: int = 0,
+        expired: int = 0,
+        status: str = "complete",
+        mode: str = "full",
+    ) -> dict[str, Any]:
+        """Regenerate the rollup from the durable store's row bodies.
+
+        Streams: one body at a time, so a 156k-row history is aggregated
+        without ever being held in memory. ``lines_read`` counts store rows
+        scanned. ``skipped``/``expired`` carry what the boot migration and
+        age-prune already established (those rows never became - or no
+        longer are - store rows), so coverage reports them truthfully for
+        this rebuild instead of losing them between paths.
+        """
+        with self._lock:
+            self._reset_locked()
+            self._rows_skipped += int(skipped)
+            self._rows_expired += int(expired)
+            lines_read = 0
+            now = time.time()
+            for body in bodies:
+                lines_read += 1
+                try:
+                    row = json.loads(body)
+                except ValueError:
+                    # Store bodies are sanitised JSON at write time, so this
+                    # is corruption, not a legacy row - and it must be said.
+                    self._rows_skipped += 1
+                    continue
+                self._ingest_for_rebuild(row, now)
+            self._finish_rebuild_locked(status, trigger, lines_read, mode=mode)
+            return self._snapshot_locked()
+
+    def note_source(self, *, skipped: int = 0, expired: int = 0, partial: bool = False) -> None:
+        """Fold source facts found after the rebuild into coverage.
+
+        Used by the runtime age-prune (rows leaving the store while the
+        process runs) so ``rows_expired`` keeps counting them instead of
+        silently shrinking the window.
+        """
+        if not (skipped or expired or partial):
+            return
+        with self._lock:
+            self._rows_skipped += int(skipped)
+            self._rows_expired += int(expired)
+            if partial:
+                self._rebuild["status"] = "partial"
+
+    def _reset_locked(self) -> None:
+        """Drop all folded state so a rebuild starts from nothing."""
+        self._rows.clear()
+        self._index.clear()
+        # The store replay re-establishes every amendment relationship,
+        # so the eviction bookkeeping starts over with it.
+        self._evicted_ids.clear()
+        self._index_evicted = 0
+        self._index_amendments_dropped = 0
+        self._rows_skipped = 0
+        self._rows_expired = 0
+        self._rows_superseded = 0
+        self._rows_appended = 0
+        self._day_bounds.clear()
+        # A rebuilt-from-journal sidecar has no store coverage: clearing the
+        # watermark makes the next boot reject it for the load path and do a
+        # full rebuild instead of trusting a claim it cannot back.
+        self._watermark = 0
+
+    def _ingest_for_rebuild(self, row: Any, now: float) -> None:
+        """One source row during a rebuild: age-check first, then fold."""
+        stamp = _parse_timestamp(row.get("timestamp")) if isinstance(row, dict) else None
+        if stamp is not None and now - stamp.timestamp() > RETENTION_SECONDS:
+            # Past the declared retention window: expected, and not a
+            # coverage gap.
+            self._rows_expired += 1
+            return
+        self.ingest(row)
+
+    def _finish_rebuild_locked(self, status: str, trigger: str, lines_read: int,
+                               *, mode: str = "full") -> None:
+        """Close a (re)build pass. ``mode`` says how the rollup got here:
+        ``full`` read every store/journal line; ``incremental`` loaded the
+        sidecar and replayed only the rows past its watermark. Both are
+        honest statements of what happened, so a reader can tell a load
+        from a rebuild instead of assuming every boot re-read history.
+        """
+        self._rebuild = {
+            "status": status,
+            "trigger": trigger,
+            "at": self._iso_now(),
+            "lines_read": lines_read,
+            "mode": mode,
+        }
+
+    # --- boot-time load (sidecar + watermark) ---------------------------
+
+    @property
+    def watermark(self) -> int:
+        """Store rowid up to which this rollup has folded every line."""
+        with self._lock:
+            return self._watermark
+
+    def note_watermark(self, rowid: int) -> None:
+        """Record that every store line up to ``rowid`` is folded in.
+
+        Called only *after* the fold, never before: a watermark that
+        overstates what was aggregated would silently drop rows from the
+        next boot's replay, while one that lags just replays a row the
+        fold already counted - and the fold is driven by one writer in one
+        order, so lagging is the only direction a race can push it.
+        """
+        if rowid <= 0:
+            return
+        with self._lock:
+            if rowid > self._watermark:
+                self._watermark = int(rowid)
+
+    def load_sidecar(self) -> bool:
+        """Restore buckets, window bounds and counters from the sidecar.
+
+        Returns False, touching nothing, for anything untrustworthy: a
+        missing file, an unreadable or foreign schema, a missing/invalid
+        watermark, or malformed rows. The caller then falls back to a full
+        rebuild - a slow boot is acceptable, a wrong rollup is not.
+        """
+        try:
+            with self.path.open(encoding="utf-8") as source:
+                payload = json.load(source)
+            if not isinstance(payload, dict) or payload.get("schema") != ROLLUP_SCHEMA:
+                return False
+            raw_bounds = payload.get("day_bounds")
+            rows = payload.get("rows")
+            coverage = payload.get("coverage")
+            rebuild = coverage.get("rebuild") if isinstance(coverage, dict) else None
+            if not isinstance(raw_bounds, dict) or not isinstance(rows, list) or not isinstance(rebuild, dict):
+                return False
+            watermark = rebuild.get("store_watermark")
+            if not isinstance(watermark, int) or isinstance(watermark, bool) or watermark < 1:
+                # 0 means "no store line was ever folded" - the signature a
+                # journal-only rebuild leaves behind. Such a sidecar may be
+                # years of correct journal rows and still must not be
+                # trusted against a store it never read.
+                return False
+            buckets: dict[DimensionKey, dict[str, Any]] = {}
+            for entry in rows:
+                if not isinstance(entry, dict):
+                    return False
+                try:
+                    key = (entry["day"], entry["alias"], entry["provider"], entry["model"])
+                except (KeyError, TypeError):
+                    return False
+                bucket = _empty_bucket()
+                for name in bucket:
+                    if name in entry:
+                        bucket[name] = entry[name]
+                buckets[key] = bucket
+            day_bounds: dict[str, list[float]] = {}
+            for day, bounds in raw_bounds.items():
+                if (not isinstance(day, str) or not isinstance(bounds, list) or len(bounds) != 2
+                        or not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                                   for value in bounds)):
+                    return False
+                day_bounds[day] = [float(bounds[0]), float(bounds[1])]
+        except (OSError, ValueError):
+            return False
+        with self._lock:
+            self._rows = buckets
+            self._day_bounds = day_bounds
+            # The amendment index is rebuilt from the store's newest lines
+            # (seed_index) rather than persisted: it is derived state, and
+            # persisting it would double the sidecar's size to save one
+            # bounded query.
+            self._index.clear()
+            self._evicted_ids.clear()
+            self._index_evicted = int(coverage.get("index_evicted") or 0)
+            self._index_amendments_dropped = int(coverage.get("index_amendments_dropped") or 0)
+            self._rows_skipped = int(coverage.get("rows_skipped") or 0)
+            self._rows_expired = int(coverage.get("rows_expired") or 0)
+            self._rows_superseded = int(coverage.get("rows_superseded") or 0)
+            self._rows_appended = int(coverage.get("rows_appended") or 0)
+            self._rebuild = {name: rebuild.get(name)
+                             for name in ("status", "trigger", "at", "lines_read", "mode")}
+            self._watermark = watermark
+            self._pending = 0
+            self._last_save = time.monotonic()
+        return True
+
+    def seed_index(self, store: LedgerStore, *, watermark: int, target: int) -> int:
+        """Rebuild the amendment index from the newest store lines at or
+        below ``watermark``, until ``target`` distinct requests are known.
+
+        Why this exists: boot loads the sidecar instead of re-reading
+        history, so the index - which maps a request id to its folded
+        contribution so a later line supersedes instead of double-counting
+        - would start empty, and a runtime amendment of a pre-boot request
+        would count as a brand-new request. ``target`` is twice the ring
+        capacity: ``RequestLedger.amend`` only succeeds while the event is
+        still in the ring, so the ring's newest ids are always among the
+        newest ``2 x capacity`` distinct ids this seeds. Rows are paged
+        newest-first and inserted oldest-first so eviction order stays
+        correct, and the ``<= watermark`` bound keeps replay rows out of
+        the seed - a replayed amendment must find its ORIGINAL here rather
+        than index itself as its own predecessor.
+        """
+        if target < 1 or watermark <= 0:
+            return 0
+        upper = int(watermark)
+        collected: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        lines_read = 0
+        # Bound the scan even if amend lines somehow outnumber records.
+        scan_cap = target * 10 + INDEX_MAX_ENTRIES
+        while upper > 0 and len(seen) < target and lines_read < scan_cap:
+            page = store.newest_page(upper, page=5000)
+            if not page:
+                break
+            for rowid, request_id, body in page:
+                lines_read += 1
+                if request_id in seen:
+                    continue
+                seen.add(request_id)
+                collected.append((request_id, body))
+                if len(seen) >= target:
+                    break
+            upper = page[-1][0] - 1
+        seeded = 0
+        for request_id, body in reversed(collected):
+            try:
+                row = json.loads(body)
+            except ValueError:
+                continue
+            if not isinstance(row, dict) or set(row) - FIELDS:
+                continue
+            stamp = _parse_timestamp(row.get("timestamp"))
+            if stamp is None:
+                continue
+            epoch = stamp.timestamp()
+            key = (
+                stamp.strftime("%Y-%m-%d"),
+                _dimension(row, "requested_alias"),
+                _dimension(row, "serving_provider"),
+                _dimension(row, "serving_model"),
+            )
+            self._index[request_id] = (key, _row_delta(row), epoch)
+            self._evict_overflow()
+            seeded += 1
+        return seeded
+
+    def finish_boot_load(self, rows_replayed: int) -> None:
+        """Close the load path: coverage says this was an incremental boot.
+
+        ``rows_replayed`` is what this boot read past the sidecar watermark -
+        zero on a clean boot, the crash-recovery count otherwise. Both
+        ``lines_read`` and ``rows_appended`` report it: the rows really were
+        read, and they really were added to the rollup beyond what the
+        sidecar held. Neither is cumulative across processes; a clean boot
+        reports zero for both, exactly as a full rebuild reports zero once
+        its sidecar exists.
+        """
+        with self._lock:
+            self._rows_appended = rows_replayed
+            self._finish_rebuild_locked("complete", "boot", rows_replayed, mode="incremental")
 
     # --- reading --------------------------------------------------------
 
@@ -358,13 +646,17 @@ class RollupStore:
             entry.update({name: dict(value) for name, value in bucket.items() if isinstance(value, dict)})
             entry.update({"day": day, "alias": alias, "provider": provider, "model": model})
             rows.append(entry)
+        first = min((bounds[0] for bounds in self._day_bounds.values()), default=None)
+        last = max((bounds[1] for bounds in self._day_bounds.values()), default=None)
+        rebuild = dict(self._rebuild)
+        rebuild["store_watermark"] = self._watermark
         return {
             "schema": ROLLUP_SCHEMA,
             "generated_at": self._iso_now(),
             "source": self.source,
             "coverage": {
-                "first_row_ts": _iso(self._first) if self._first is not None else None,
-                "last_row_ts": _iso(self._last) if self._last is not None else None,
+                "first_row_ts": _iso(first),
+                "last_row_ts": _iso(last),
                 # Requests currently aggregated: the buckets, not the index.
                 # The count cap evicts index entries while their contribution
                 # stays counted, so ``len(self._index)`` would understate what
@@ -383,15 +675,20 @@ class RollupStore:
                 "rows_superseded": self._rows_superseded,
                 "rows_appended": self._rows_appended,
                 "retention_days": RETENTION_SECONDS // (24 * 60 * 60),
-                "rebuild": dict(self._rebuild),
+                "rebuild": rebuild,
                 "incomplete": bool(self._rows_skipped) or self._rebuild["status"] != "complete",
             },
             "rows": rows,
             "daily": self._daily_locked(),
+            # Day -> [oldest, newest] epoch bounds. Top-level (not coverage)
+            # because it is load state, not a claim about what was read: the
+            # next boot restores the exact window from it instead of
+            # re-deriving it from a count-capped index.
+            "day_bounds": {day: list(bounds) for day, bounds in sorted(self._day_bounds.items())},
         }
 
     def _prune_expired(self) -> None:
-        """Drop contributions the ledger itself would already have pruned.
+        """Drop contributions the store itself would already have pruned.
 
         Entries still in the index expire by age, exactly as before. A
         bucket whose *day* is past the retention window can additionally
@@ -413,13 +710,13 @@ class RollupStore:
         # surviving index entry can still point at a bucket dropped here.
         self._rows = {key: bucket for key, bucket in self._rows.items()
                       if bucket["requests"] > 0 and key[0] >= cutoff_day}
-        # ``first_row_ts``/``last_row_ts`` describe the window the index
-        # still tracks: under count-cap eviction the evicted entries are no
-        # longer enumerated here, but their days are bounded by the rule
-        # above.
-        epochs = [epoch for _key, _delta, epoch in self._index.values()]
-        self._first = min(epochs) if epochs else None
-        self._last = max(epochs) if epochs else None
+        # The window bounds follow the surviving bucket days, not the
+        # (count-capped) index: a day leaves only when it ages out (or its
+        # last contribution expires), so ``first_row_ts`` stays the oldest
+        # day the rollup still covers even after index eviction.
+        surviving_days = {key[0] for key in self._rows}
+        for day in [day for day in self._day_bounds if day not in surviving_days]:
+            self._day_bounds.pop(day, None)
 
     @staticmethod
     def _apply(bucket: dict[str, Any], delta: dict[str, Any], sign: int) -> None:
@@ -448,32 +745,250 @@ def rebuild_rollups(
 ) -> dict[str, Any]:
     """Regenerate the daily rollup sidecar from an existing request ledger.
 
-    Idempotent and safe to re-run: every call starts from an empty rollup and
-    folds the ledger in again, so the result depends only on the ledger's
-    contents. With ``write=False`` nothing touches the filesystem.
+    Reads the SQLite store when one exists and holds rows (the store of
+    record), and falls back to the JSONL journal when it does not, so a
+    legacy volume - or a store that has not been migrated yet - still
+    rebuilds. Idempotent and safe to re-run: every call starts from an empty
+    rollup and folds the ledger in again, so the result depends only on the
+    durable contents. With ``write=False`` nothing touches the filesystem.
     """
     path = Path(ledger_path)
-    store = RollupStore(Path(rollup_path) if rollup_path else rollup_path_for(path), path.name, now=now)
-    store.rebuild(_ledger_files(path), trigger=trigger)
-    payload = store.save() if write else None
-    return payload if payload is not None else store.snapshot()
+    sidecar = Path(rollup_path) if rollup_path else rollup_path_for(path)
+    store_path = store_path_for(path)
+    store: LedgerStore | None = None
+    if store_path.exists():
+        candidate = LedgerStore(store_path)
+        try:
+            candidate.open()
+            if not candidate.empty():
+                store = candidate
+            else:
+                candidate.close()
+        except LedgerStoreError:
+            store = None
+    if store is not None:
+        try:
+            holder = RollupStore(sidecar, store_path.name, now=now)
+            holder.rebuild_from_store(store.iter_bodies(), trigger=trigger, mode="full")
+            holder.note_watermark(store.max_rowid())
+            payload = holder.save() if write else None
+            return payload if payload is not None else holder.snapshot()
+        finally:
+            store.close()
+    store_legacy = RollupStore(sidecar, path.name, now=now)
+    store_legacy.rebuild(_ledger_files(path), trigger=trigger)
+    payload = store_legacy.save() if write else None
+    return payload if payload is not None else store_legacy.snapshot()
 
 
 class LedgerPersistence:
-    """Queue writes off the caller; newline JSON is append-only and rotated."""
+    """Queue writes off the caller; SQLite store of record + JSONL tail."""
 
-    def __init__(self, path: Path, capacity: int = 20000) -> None:
+    def __init__(self, path: Path, capacity: int = 20000, *,
+                 ring_capacity: int = 10000) -> None:
         self.path = Path(path)
+        self.store_path = store_path_for(self.path)
         self.rollup_path = rollup_path_for(self.path)
-        self._rollup = RollupStore(self.rollup_path, self.path.name)
-        # Rebuild the rollup from the ledger before the writer thread starts:
-        # history already on disk is aggregated immediately, so the sidecar
+        #: The ring's capacity, which bounds what a runtime amendment can
+        #: name: the boot-time index seed covers ``2 x`` of it, so every
+        #: request still amendable after a load-based boot is indexed.
+        self._ring_capacity = int(ring_capacity)
+        self._store: LedgerStore | None = None
+        self._store_open_error: str | None = None
+        # Open the store of record first; boot is open -> migrate-if-empty
+        # -> age-prune -> rebuild the rollup from the store, all before the
+        # writer thread starts, so the sidecar is aggregated immediately and
         # never starts empty on a gateway that has been running before.
-        self._rollup.rebuild(_ledger_files(self.path), trigger="boot")
-        self._rollup.save()
+        store = LedgerStore(self.store_path)
+        try:
+            store.open()
+            self._store = store
+        except (LedgerStoreError, OSError) as exc:
+            # A store we cannot open must not stop the gateway: fall back to
+            # the journal, and say so through durability() rather than
+            # pretending the history is intact.
+            self._store_open_error = str(exc)
+            store.close()
+        source = self.store_path.name if self._store is not None else self.path.name
+        self._rollup = RollupStore(self.rollup_path, source)
+        self._rollup_boot()
+
+        self._prune_due = time.monotonic() + PRUNE_INTERVAL_SECONDS
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=capacity)
         self._thread = threading.Thread(target=self._run, name="ledger-writer", daemon=True)
         self._thread.start()
+
+    # --- boot -----------------------------------------------------------
+
+    def _rollup_boot(self) -> None:
+        """Migrate, prune by age, then build the rollup: load the sidecar
+        when it is trustworthy, full-rebuild from the store when it is not.
+
+        The load path (sidecar restore + bounded index seed + watermark
+        replay) keeps a boot over a full 30-day / 156k-row history a
+        bounded operation - measured at ~0.3 s against ~6 s for a full
+        store replay - while the sidecar stays a faithful image of the
+        store. The full path runs on first boot, after a journal import,
+        or when the sidecar is missing, unreadable, journal-derived, or
+        claims more than the store holds. Every failure degrades to the
+        path below it with the error recorded for durability(): a store
+        that cannot read must never stop the gateway from booting with
+        truthful coverage.
+        """
+        store = self._store
+        if store is None:
+            self._rollup.rebuild(_ledger_files(self.path), trigger="boot")
+            self._rollup.save()
+            return
+        carry: dict[str, Any] = {"skipped": 0, "expired": 0, "status": "complete"}
+        imported = False
+        try:
+            if store.empty():
+                # First boot over a legacy journal (or a fresh directory):
+                # consume every journal line into the store, oldest file
+                # first so line order - and therefore later-wins amendment
+                # order - is preserved. One transaction: a crash re-runs it.
+                skipped, import_status = self._import_journal(store)
+                carry["skipped"] = skipped
+                carry["status"] = import_status
+                imported = True
+        except LedgerStoreError as exc:
+            self._store_open_error = str(exc)
+        try:
+            if store.empty():
+                # Nothing durable yet (fresh directory, or an import that
+                # failed and rolled back): the journal read is the honest
+                # equivalent, and the next boot retries the import.
+                self._rollup.rebuild(_ledger_files(self.path), trigger="boot")
+                self._rollup.save()
+                return
+            # The one retention bound: age. Rows past the window leave the
+            # store here (boot) and every PRUNE_INTERVAL_SECONDS while
+            # running - never because of a size cap.
+            carry["expired"] = store.prune(time.time() - RETENTION_SECONDS)
+        except LedgerStoreError as exc:
+            # Rows past the window are still excluded (and counted) by the
+            # rebuild's own age check below; the prune retries next boot.
+            self._store_open_error = str(exc)
+            carry["expired"] = 0
+        # A fresh import means the store was regenerated underneath whatever
+        # sidecar exists: its watermark describes a different store, so the
+        # load path must not compare the two histories.
+        if not imported and self._try_load_sidecar(store, carry):
+            self._rollup.save()
+            return
+        try:
+            max_rowid = store.max_rowid()
+            self._rollup.rebuild_from_store(store.iter_bodies(), trigger="boot",
+                                            mode="full", **carry)
+            self._rollup.note_watermark(max_rowid)
+        except LedgerStoreError as exc:
+            self._store_open_error = str(exc)
+            self._close_store()
+            self._store = None
+            self._rollup.rebuild(_ledger_files(self.path), trigger="boot")
+        self._rollup.save()
+
+    def _try_load_sidecar(self, store: LedgerStore, carry: dict[str, Any]) -> bool:
+        """The load path: restore the sidecar, seed the index, replay the gap.
+
+        Returns False whenever anything is off; the caller then runs the
+        full rebuild, whose first step resets every part of this state, so
+        failing over can never double-fold a row. Order matters: the index
+        is seeded from lines at or below the watermark *before* the replay,
+        so a replayed amendment finds its original instead of indexing
+        itself as its own predecessor.
+        """
+        try:
+            if not self._rollup.load_sidecar():
+                return False
+            watermark = self._rollup.watermark
+            if watermark > store.max_rowid():
+                # The sidecar claims lines the store does not have (the
+                # store was regenerated underneath it): trust the store.
+                return False
+            # Bounded to what an amendment can still name: amend() only
+            # succeeds while the event is in the ring, and the ring holds
+            # `ring_capacity` requests, so the newest
+            # `2 x ring_capacity` distinct ids cover every one of them.
+            self._rollup.seed_index(
+                store, watermark=watermark,
+                target=min(2 * self._ring_capacity, INDEX_MAX_ENTRIES),
+            )
+            replayed = 0
+            lower = watermark
+            while True:
+                page = store.rows_after(lower)
+                if not page:
+                    break
+                now = time.time()
+                for rowid, body in page:
+                    replayed += 1
+                    lower = rowid
+                    try:
+                        row = json.loads(body)
+                    except ValueError:
+                        # Store bodies are sanitised JSON at write time, so
+                        # this is corruption - count it, never guess.
+                        self._rollup.note_source(skipped=1)
+                        continue
+                    self._rollup._ingest_for_rebuild(row, now)
+            if carry["skipped"] or carry["expired"] or carry["status"] != "complete":
+                self._rollup.note_source(
+                    skipped=carry["skipped"], expired=carry["expired"],
+                    partial=carry["status"] != "complete",
+                )
+            self._rollup.finish_boot_load(replayed)
+            return True
+        except LedgerStoreError as exc:
+            self._store_open_error = str(exc)
+            return False
+
+    def _import_journal(self, store: LedgerStore) -> tuple[int, str]:
+        """Fold the JSONL journal + rotations into the store. Returns (skipped, status)."""
+        skipped = 0
+        status = "complete"
+        items: list[tuple[int, str, str, str | None, int, str]] = []
+        for file in _ledger_files(self.path):
+            try:
+                with file.open(encoding="utf-8") as source:
+                    for line in source:
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            skipped += 1
+                            continue
+                        if not isinstance(row, dict) or set(row) - FIELDS:
+                            skipped += 1
+                            continue
+                        if not isinstance(row.get("request_id"), str):
+                            skipped += 1
+                            continue
+                        stamp = _parse_timestamp(row.get("timestamp"))
+                        if stamp is None:
+                            skipped += 1
+                            continue
+                        clean = _sanitize_row(row)
+                        body = json.dumps(clean, separators=(",", ":"), ensure_ascii=True)
+                        items.append((
+                            clean["request_id"],
+                            int(stamp.timestamp()),
+                            str(clean["timestamp"]),
+                            _error_class_for(clean),
+                            int(bool(clean.get("fallback_used"))),
+                            body,
+                        ))
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                # Unreadable or non-UTF-8 journal file: a real gap, reported
+                # through coverage exactly as a rebuild would report it.
+                status = "partial"
+        if items:
+            store.insert_many(items)
+        return skipped, status
+
+    # --- public surface -------------------------------------------------
 
     def submit(self, row: dict[str, Any]) -> bool:
         clean = {key: value for key, value in row.items() if key in FIELDS}
@@ -487,8 +1002,32 @@ class LedgerPersistence:
         """The live daily rollup: schema, coverage and one row per day/dimension."""
         return self._rollup.snapshot()
 
+    def restore(self, limit: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """Ring rows plus whole-store totals for a boot.
+
+        The store path returns at most ``limit`` rows (the newest window)
+        and gets totals from one SQL aggregate, so a boot over a full
+        30-day history never materialises it - the sub-2s state bar (R56)
+        and bounded memory both depend on this. Without a store the journal
+        read is the bounded legacy fallback (it is at most 15 MiB).
+        """
+        rows = self.load(limit)
+        if self._store is not None:
+            try:
+                return rows, self._store.totals()
+            except LedgerStoreError as exc:
+                self._store.last_error = str(exc)
+        return rows, _totals_from_rows(rows)
+
     def load(self, limit: int) -> list[dict[str, Any]]:
-        rows: dict[str, dict[str, Any]] = {}
+        """Rewrite the journal (age + sanitisation) and return ring rows.
+
+        The journal rewrite physically removes expired and unsafe legacy
+        rows from the tail files, exactly as before. Row *content* for the
+        ring comes from the store when one is open (bounded by ``limit``);
+        the journal read remains the fallback.
+        """
+        journal_rows: dict[str, dict[str, Any]] = {}
         now = time.time()
         files = _ledger_files(self.path)
         for file in files:
@@ -505,7 +1044,7 @@ class LedgerPersistence:
                             if not isinstance(row.get("request_id"), str):
                                 continue
                             row = _sanitize_row(row)
-                            rows[row["request_id"]] = row
+                            journal_rows[row["request_id"]] = row
                             retained.append(json.dumps(row, separators=(",", ":"), ensure_ascii=True) + "\n")
                         except (ValueError, TypeError):
                             continue
@@ -513,10 +1052,62 @@ class LedgerPersistence:
                 _rewrite(file, "".join(retained))
             except FileNotFoundError:
                 continue
-        # Return every retained row so callers can restore cumulative totals
-        # and detect when the bounded in-memory ring is only a partial view.
-        # The durable input itself is bounded by MAX_BYTES * (rotations + 1).
-        return list(rows.values())
+        if self._store is not None:
+            rows: list[dict[str, Any]] = []
+            try:
+                for body in self._store.recent(limit):
+                    try:
+                        row = json.loads(body)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+                return rows
+            except LedgerStoreError as exc:
+                self._store.last_error = str(exc)
+        # Fallback: every retained journal row so callers can restore
+        # cumulative totals and detect when the bounded in-memory ring is
+        # only a partial view. The durable input itself is bounded by
+        # MAX_BYTES * (rotations + 1).
+        return list(journal_rows.values())
+
+    def durability(self) -> dict[str, Any]:
+        """What the owner reads in the status view: retention, store figures, errors.
+
+        ``store`` states the size, row count and oldest row of the store of
+        record plus the journal tail's size, so a store that silently stops
+        accepting rows (or a history that stops aging out) is visible where
+        the owner looks - the numbers must never be a claim the data can't
+        back.
+        """
+        info: dict[str, Any] = {
+            "enabled": True,
+            "retention_days": RETENTION_SECONDS // (24 * 60 * 60),
+            "billing_system": False,
+        }
+        store_info: dict[str, Any] = {"path": str(self.store_path)}
+        if self._store is not None:
+            try:
+                store_info.update(self._store.stats())
+                store_info["path"] = str(self.store_path)
+                store_info["error"] = self._store.last_error
+            except LedgerStoreError as exc:
+                store_info["error"] = str(exc)
+        else:
+            store_info["error"] = self._store_open_error or "store unavailable"
+        store_info["journal_path"] = str(self.path)
+        store_info["journal_bytes"] = self._journal_bytes()
+        info["store"] = store_info
+        return info
+
+    def _journal_bytes(self) -> int:
+        total = 0
+        for file in _ledger_files(self.path):
+            try:
+                total += file.stat().st_size
+            except OSError:
+                continue
+        return total
 
     def flush(self, timeout: float = 5.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -535,6 +1126,14 @@ class LedgerPersistence:
         except queue.Full:
             return
         self._thread.join(timeout)
+        self._close_store()
+
+    def _close_store(self) -> None:
+        if self._store is not None:
+            # Closing the last connection checkpoints the WAL into the db.
+            self._store.close()
+
+    # --- writer thread --------------------------------------------------
 
     def _run(self) -> None:
         while True:
@@ -546,30 +1145,17 @@ class LedgerPersistence:
             finally:
                 self._queue.task_done()
 
-    def _prune_rotations(self) -> None:
-        cutoff = time.time() - RETENTION_SECONDS
-        files = [self.path.with_suffix(self.path.suffix + f".{i}") for i in range(1, MAX_ROTATIONS + 1)]
-        files.append(self.path)
-        for file in files:
-            try:
-                retained = []
-                with file.open(encoding="utf-8") as source:
-                    for line in source:
-                        try:
-                            row = json.loads(line)
-                        except (ValueError, TypeError):
-                            continue
-                        if isinstance(row, dict) and _timestamp(row.get("timestamp")) >= cutoff:
-                            retained.append(json.dumps(_sanitize_row(row), separators=(",", ":"), ensure_ascii=True) + "\n")
-                _rewrite(file, "".join(retained))
-            except FileNotFoundError:
-                continue
-
     def _append(self, row: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._prune_rotations()
         clean = _sanitize_row(row)
-        encoded = (json.dumps(clean, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+        body = json.dumps(clean, separators=(",", ":"), ensure_ascii=True)
+        # 1) Store of record first. The invariant this ordering buys: any
+        #    line in the journal is already in the store (or was refused by
+        #    a store error that durability() reports), never the reverse -
+        #    so the first-boot import can never miss a journal line.
+        rowid = self._store_append(clean, body)
+        # 2) The plain-text journal tail, with the original rotation rules.
+        encoded = (body + "\n").encode()
         if self.path.exists() and self.path.stat().st_size + len(encoded) > MAX_BYTES:
             oldest = self.path.with_suffix(self.path.suffix + f".{MAX_ROTATIONS}")
             oldest.unlink(missing_ok=True)
@@ -583,10 +1169,53 @@ class LedgerPersistence:
             os.write(descriptor, encoded)
         finally:
             os.close(descriptor)
-        # The row is on disk now, so fold exactly what was written - no more,
-        # no less - into the rollup and refresh the sidecar when due.
+        # 3) The row is durable now, so fold exactly what was written - no
+        #    more, no less - into the rollup, advance the watermark only
+        #    after that fold, and refresh the sidecar when due.
         self._rollup.ingest(clean, appended=True)
+        if rowid:
+            self._rollup.note_watermark(rowid)
         self._rollup.maybe_save()
+        # 4) Keep the store inside its 30-day window while running.
+        self._maybe_prune_store()
+
+    def _store_append(self, clean: dict[str, Any], body: str) -> int:
+        """One store line; its rowid (0 when it could not be written)."""
+        if self._store is None:
+            return 0
+        request_id = clean.get("request_id")
+        stamp = _parse_timestamp(clean.get("timestamp"))
+        if not isinstance(request_id, str) or stamp is None:
+            # Unrepresentable for the store (as for the rollup); the rollup
+            # counts it as skipped instead of it vanishing silently.
+            return 0
+        try:
+            return self._store.append(
+                request_id=request_id,
+                ts=int(stamp.timestamp()),
+                stamp=str(clean.get("timestamp")),
+                error_class=_error_class_for(clean),
+                fallback_used=int(bool(clean.get("fallback_used"))),
+                body=body,
+            )
+        except LedgerStoreError:
+            # last_error is recorded on the store and surfaced by
+            # durability(); the journal still receives the row below, so a
+            # failing store degrades to a visible journal tail rather than
+            # silent history loss. The watermark does not advance either,
+            # so the next boot replays this row once the store recovers.
+            return 0
+
+    def _maybe_prune_store(self) -> None:
+        if self._store is None or time.monotonic() < self._prune_due:
+            return
+        self._prune_due = time.monotonic() + PRUNE_INTERVAL_SECONDS
+        try:
+            expired = self._store.prune(time.time() - RETENTION_SECONDS)
+        except LedgerStoreError:
+            return  # last_error recorded; surfaced through durability()
+        if expired:
+            self._rollup.note_source(expired=expired)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -595,12 +1224,12 @@ def main(argv: list[str] | None = None) -> int:
         prog="python3 -m gateway.ledger_persistence",
         description="Rebuild the daily analytics rollup sidecar from the durable request ledger.",
     )
-    parser.add_argument("ledger", nargs="?", default=DEFAULT_LEDGER_PATH, help="path to request-ledger.jsonl")
+    parser.add_argument("ledger", nargs="?", default=DEFAULT_LEDGER_PATH, help="path to request-ledger.jsonl (the store beside it is used when present)")
     parser.add_argument("--rollup", default=None, help="sidecar path (default: alongside the ledger)")
     parser.add_argument("--dry-run", action="store_true", help="report the rollup without writing it")
     args = parser.parse_args(argv)
     path = Path(args.ledger)
-    if not path.exists():
+    if not path.exists() and not store_path_for(path).exists():
         print(f"no request ledger at {path}", file=sys.stderr)
         return 2
     payload = rebuild_rollups(path, rollup_path=args.rollup, write=not args.dry_run)
@@ -705,6 +1334,33 @@ def _tally(counts: dict[str, int], name: str, sign: int) -> None:
         counts[name] = value
     else:
         counts.pop(name, None)
+
+
+def _totals_from_rows(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
+    """Whole-ledger totals from already-deduplicated rows (journal fallback).
+
+    Mirrors ``RequestLedger._count`` exactly: one request counted once, on
+    its latest state (the caller's rows are already latest-per-request).
+    """
+    totals = {"requests": 0, "errors": 0, "fallbacks": 0, "rate_limited": 0, "exhausted": 0}
+    for row in rows:
+        totals["requests"] += 1
+        error = row.get("error_class")
+        if error:
+            totals["errors"] += 1
+        if error == "rate_limited":
+            totals["rate_limited"] += 1
+        if error == "exhausted":
+            totals["exhausted"] += 1
+        if row.get("fallback_used"):
+            totals["fallbacks"] += 1
+    return totals
+
+
+def _error_class_for(row: dict[str, Any]) -> str | None:
+    """The store's denormalised error_class column: truthy values as text."""
+    value = row.get("error_class")
+    return str(value) if value else None
 
 
 def _rewrite(path: Path, content: str) -> None:
