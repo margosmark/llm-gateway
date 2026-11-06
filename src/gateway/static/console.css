@@ -122,6 +122,16 @@ td.actions { white-space: nowrap; text-align: right; }
 .capability-detail-row td { background: var(--panel-2); }
 .capability-preview, .capability-evidence { overflow-wrap: anywhere; }
 .capability-preview .notice { white-space: normal; }
+/* The preview result sits below its button; while it holds anything it is
+   boxed off so it can never read as an empty, collapsed gap, and once it is
+   empty again it takes no space at all. */
+.capability-preview:not(:empty) {
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+.capability-preview h4 { margin: 0 0 4px; font-size: 15px; }
+.capability-preview button { margin-top: 4px; }
 .capability-authorisation { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
 .capability-authorisation .capability-field { max-width: 340px; }
 .capability-authorisation input[type="number"] { max-width: 120px; }
