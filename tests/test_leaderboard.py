@@ -556,7 +556,7 @@ class LeaderboardEndpointTests(unittest.TestCase):
         self.assertTrue(payload["available"])
         self.assertIsNone(payload["unavailable_reason"])
         self.assertEqual(payload["schema"], ROLLUP_SCHEMA)
-        self.assertEqual(payload["source"], "request-ledger.jsonl")
+        self.assertEqual(payload["source"], "request-ledger.db")
         self.assertEqual(payload["primary_metric"]["key"], "total_tokens")
         entry = next(item for item in payload["ranked"]
                      if item["model"] == "mimo-v2.6-flash")

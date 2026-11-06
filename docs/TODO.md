@@ -440,16 +440,23 @@ is refused.
 ### T7 — A durable request ledger — `done`
 
 **Landed.** Request outcomes are persisted asynchronously as metadata-only
-records on the state volume in `request-ledger.jsonl`, rotated at 5 MiB with
-two backups and a 30-day retention window. The in-memory ring remains the hot
-view, is restored at startup, and exposes an `amend(request_id, **fields)`
-seam for updating safe outcome metadata without exposing storage details. The
-Status view reports the persistence mode and explicitly says the ledger is
-not a billing system.
+records on the state volume in a SQLite store (`request-ledger.db`, WAL,
+age-only 30-day retention with no size cap). The original design rotated a
+JSONL journal at 5 MiB with two backups, which dropped history after ~1.3
+days at the measured write rate while the console claimed 30 - that
+size-vs-window gap is closed by the store; the journal remains only as a
+debuggable tail and is imported on the first boot. The in-memory ring
+remains the hot view, is restored at startup, and exposes an
+`amend(request_id, **fields)` seam for updating safe outcome metadata
+without exposing storage details. The Status view reports the persistence
+mode and the store's real size, row count and oldest row, and explicitly
+says the ledger is not a billing system.
 
 **Evidence.** `src/gateway/ledger_persistence.py`,
-`tests/test_ledger_persistence.py` (including restart survival and content
-refusal), and the Status payload/UI; full suite passed (385 tests, 2 skipped).
+`src/gateway/ledger_store.py`, `tests/test_ledger_persistence.py`
+(including restart survival and content refusal),
+`tests/test_ledger_store.py` (156k-row volume, bounded boot, legacy
+migration, WAL concurrency), and the Status payload/UI.
 
 ### T8 — Backup, export and import in the console — `todo`
 

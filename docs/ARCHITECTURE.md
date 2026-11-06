@@ -71,11 +71,17 @@ The following state is intentionally in-memory only and disappears on restart:
 * in-flight ChatGPT/Codex device authorization state;
 * limit snapshots.
 
-Request outcomes are also appended asynchronously to `request-ledger.jsonl`
-under the state directory. Expired records are physically pruned on load and before rotation; the append-only metadata log is rotated at 5 MiB
-with two rotated files (15 MiB maximum) and records older than 30 days are
-ignored when loading. The bounded in-memory ring remains the live hot view;
-records are restored after restart. This is operational metadata, not a
+Request outcomes are also appended asynchronously to a SQLite store,
+`request-ledger.db` under the state directory (WAL, single writer - no lock
+on the request hot path). Retention is by age only: records older than 30
+days are physically pruned on load and on a daily timer, and there is no
+size bound on history, so the published window is reachable at measured
+volume. The plaintext `request-ledger.jsonl` journal tail (5 MiB plus two
+rotations) remains for debugging and is imported into the store on the
+first boot. Boot reads the store through the rollup sidecar plus a bounded
+replay and index seed - a full history loads in well under the sub-2 s
+state bar (R56) instead of being re-read wholesale. The bounded in-memory
+ring remains the live hot view; records are restored after restart. This is operational metadata, not a
 complete audit trail and **not a billing system**. A full write queue or
 storage error may drop a persistence update; the request path does not wait
 for disk I/O.

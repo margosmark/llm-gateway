@@ -454,7 +454,7 @@ class StateEndpointAnalyticsTests(unittest.TestCase):
         self.assertTrue(analytics_block["available"])
         self.assertIsNone(analytics_block["unavailable_reason"])
         self.assertEqual(analytics_block["schema"], ROLLUP_SCHEMA)
-        self.assertEqual(analytics_block["source"], "request-ledger.jsonl")
+        self.assertEqual(analytics_block["source"], "request-ledger.db")
 
         coding = analytics_block["fallback"]["alias"]["coding"]
         self.assertEqual(coding["requests"], 1)

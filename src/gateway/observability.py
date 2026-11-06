@@ -155,19 +155,25 @@ class RequestLedger:
         #: Bumped by every mutation below (record, amend, clear), so a
         #: consumer can detect "the ring changed" without scanning it.
         self._version = 0
-        self._persistence = LedgerPersistence(persistence_path) if persistence_path else None
+        self._persistence = (LedgerPersistence(persistence_path, ring_capacity=capacity)
+                             if persistence_path else None)
         self._totals = {"requests": 0, "errors": 0, "fallbacks": 0, "rate_limited": 0, "exhausted": 0}
         if self._persistence:
-            loaded: list[RequestEvent] = []
-            for row in self._persistence.load(capacity):
+            # Restore only a bounded window into the ring. The whole-store
+            # totals arrive as one SQL aggregate from restore(), so a boot
+            # over a full 30-day history never materialises it into memory
+            # (the R56 sub-2s state bar depends on this) while the totals
+            # still cover every retained request - not just the ring.
+            loaded, stored_totals = self._persistence.restore(capacity)
+            events: list[RequestEvent] = []
+            for row in loaded:
                 try:
-                    event = RequestEvent(**row)
+                    events.append(RequestEvent(**row))
                 except TypeError:
                     continue
-                loaded.append(event)
-                self._count(event)
-            self._evicted = max(0, len(loaded) - capacity)
-            self._events.extend(loaded[-capacity:])
+            self._totals = stored_totals
+            self._evicted = max(0, stored_totals["requests"] - capacity)
+            self._events.extend(events[-capacity:])
 
     def _count(self, event: RequestEvent) -> None:
         self._totals["requests"] += 1
@@ -247,7 +253,16 @@ class RequestLedger:
         return True
 
     def durability(self) -> dict[str, Any]:
-        return {"enabled": self._persistence is not None, "retention_days": 30, "billing_system": False}
+        """What the status view shows: retention, store figures and any store error.
+
+        With persistence on this delegates to the ledger, so the store's own
+        size, row count and oldest row are reported where the owner reads -
+        a store that silently stops accepting rows must be visible, not
+        inferred from a number that stays put.
+        """
+        if self._persistence:
+            return self._persistence.durability()
+        return {"enabled": False, "retention_days": 30, "billing_system": False}
 
     def rollup(self) -> dict[str, Any] | None:
         """The durable daily rollup derived from this ledger, or None when persistence is off.
