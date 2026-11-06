@@ -1054,6 +1054,7 @@ class LedgerPersistence:
         journal_rows: dict[str, dict[str, Any]] = {}
         now = time.time()
         files = _ledger_files(self.path)
+        unreadable = False
         for file in files:
             retained: list[str] = []
             try:
@@ -1072,10 +1073,29 @@ class LedgerPersistence:
                             retained.append(json.dumps(row, separators=(",", ":"), ensure_ascii=True) + "\n")
                         except (ValueError, TypeError):
                             continue
-                # Rewrite every file, physically removing expired and unsafe legacy rows.
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                # A file we could not read to the end - unreadable or not
+                # valid UTF-8 - is a real gap, exactly as _import_journal
+                # (:1007) and rebuild() (:305) treat it (F7): report it
+                # through coverage below, and do NOT rewrite the file -
+                # _rewrite would replace it with only the lines read
+                # before the failure, silently truncating every line after
+                # the bad byte.
+                unreadable = True
+                continue
+            # Rewrite every file, physically removing expired and unsafe legacy rows.
+            try:
                 _rewrite(file, "".join(retained))
             except FileNotFoundError:
                 continue
+        if unreadable:
+            # The sidecar load path closes coverage as "complete" before
+            # restore() runs, so this reader has to state its own gap:
+            # the rollup must not claim a complete read over a journal
+            # file it never finished.
+            self._rollup.note_source(partial=True)
         if self._store is not None:
             rows: list[dict[str, Any]] = []
             try:
