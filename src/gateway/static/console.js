@@ -1823,7 +1823,82 @@
         card.appendChild(el("p", { class: "small muted", text: "Jev evaluates the state and questions sent to the native /v1/systemone endpoint. It is a structured-decision provider, not a chat-completion model." }));
       }
     }
+    card.appendChild(renderConcurrencyControl(provider));
     return card;
+  }
+
+  // Per-provider in-flight cap. The server sends both numbers - the saved
+  // override (or null) and the one that applies right now - so the owner
+  // sees the effect of the cloud/local split without knowing the
+  // defaults, and never needs a code change to move this knob again.
+  var CONCURRENCY_HELP =
+    "Over the cap the gateway refuses the request immediately with HTTP 429 " +
+    "(\"local concurrency limit reached for this provider; retry later\"). It does not " +
+    "queue, and this is a local protection - never a limit the provider published. " +
+    "Cloud providers default to 32 requests in flight; the local servers (Ollama, " +
+    "llama.cpp, LM Studio) default to 4 because they share this machine's memory and " +
+    "GPU, where more in-flight streams mean out-of-memory risk rather than more " +
+    "speed. Saving a number overrides the default for this provider only and takes " +
+    "effect on the next request, with no restart. Save an empty value to return to " +
+    "the default.";
+
+  function renderConcurrencyControl(provider) {
+    var effective = typeof provider.max_in_flight_effective === "number"
+      ? provider.max_in_flight_effective
+      : null;
+    var overridden = typeof provider.max_in_flight === "number";
+    var input = el("input", {
+      type: "number", min: "1", step: "1", autocomplete: "off",
+      placeholder: "default", "aria-label": "Maximum requests in flight"
+    });
+    if (overridden) input.value = String(provider.max_in_flight);
+
+    function save(value) {
+      run(api(BASE + "/api/provider", {
+        method: "POST",
+        body: { action: "set_max_in_flight", provider_id: provider.provider_id, max_in_flight: value }
+      }))
+        .then(function (result) {
+          toast(value === null
+            ? "Limit returned to the default (" + result.max_in_flight_effective + " in flight)."
+            : "Limit saved: " + result.max_in_flight_effective + " in flight.", "ok");
+          return refresh();
+        })
+        .catch(function () {});
+    }
+
+    var saveButton = el("button", {
+      class: "primary", type: "button", text: "Save limit",
+      onclick: function () {
+        var raw = String(input.value || "").trim();
+        if (raw === "") { save(null); return; }
+        if (!/^[0-9]+$/.test(raw) || Number(raw) < 1) {
+          // The server refuses the same values with 400; say it here so
+          // the owner is not left reading a toast about a number they
+          // can see is not a whole one.
+          toast("The in-flight limit must be a positive whole number.", "bad");
+          return;
+        }
+        save(Number(raw));
+      }
+    });
+    var clearButton = el("button", {
+      type: "button", text: "Use default",
+      onclick: function () { save(null); }
+    });
+
+    return el("div", {}, [
+      el("h3", { text: "Concurrency" }),
+      el("p", { class: "small", text:
+        "In flight at once: " + (effective === null ? "default" : effective) +
+        (overridden ? " (owner override " + provider.max_in_flight + ")" : " (default for this provider)") }),
+      el("div", { class: "row" }, [
+        el("label", {}, [el("span", { text: "Maximum in flight" }), input]),
+        el("div", { class: "narrow" }, [saveButton]),
+        el("div", { class: "narrow" }, [clearButton])
+      ]),
+      el("p", { class: "small muted", text: CONCURRENCY_HELP })
+    ]);
   }
 
   // What a local endpoint means, stated where the owner types it: that the

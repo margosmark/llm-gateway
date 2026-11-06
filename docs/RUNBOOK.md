@@ -322,6 +322,45 @@ IPv6 half — deliberately fail-closed.
 Capabilities and cost stay **Unknown** until the server or an owner approval
 evidences them, and the gateway never downloads a model.
 
+### Per-provider concurrency (`max_in_flight`)
+
+Every provider has its own in-flight cap: a request that would take a
+provider past its cap is refused **immediately** with HTTP 429, error type
+`rate_limited`, and the body
+`local concurrency limit reached for this provider; retry later`. There is
+no queue and no wait — the caller retries or the request fails fast. A
+streamed response holds its slot until the stream finishes or closes. This
+is a local protection only: it is never a limit the provider published, and
+it is per provider, per gateway process.
+
+| Family | Default | Why |
+|---|---|---|
+| Cloud providers (`anthropic`, `chatgpt_codex`, `opencode_console`, `opencode_go`) | **32** | The owner's number; a cloud account can absorb concurrent streams. |
+| Local servers (`ollama`, `llama_cpp`, `lm_studio`) | **4** | They share this machine's memory and GPU. 32 concurrent streams against a 27B model is an out-of-memory risk, not a speed-up. |
+
+To change one: sign in at `/owner/`, open **Providers** → the provider, and
+use **Concurrency** → **Maximum in flight** → **Save limit**. **Use
+default** (or an empty field) clears the override and returns the provider
+to its default. The card shows both numbers: the saved override and the
+one in force right now.
+
+* A value must be a positive whole number. `0`, a negative, a decimal, a
+  string or a boolean is refused with HTTP 400
+  (`invalid_max_in_flight`) and writes nothing.
+* A cap refusal never opens a cooldown. The route is not benched for the
+  gateway's own capacity, so once a slot frees the next request is served
+  normally — the `rate_limited` circuit still only ever opens for a
+  provider's **own** rate limit.
+* The override is stored in `config.json` as the provider's
+  `max_in_flight` (non-secret, `null` when unset) and is read on **every**
+  acquire, so it takes effect on the next request — no restart, no rebuild.
+* The endpoint is `POST /owner/api/provider` with
+  `{"action": "set_max_in_flight", "provider_id": "...", "max_in_flight": N}`.
+  It is owner-session-gated exactly like every other provider setting
+  (401 without a session); it adds no unauthenticated surface.
+* `GET /owner/api/state` reports `max_in_flight` (the override, `null` when
+  unset) and `max_in_flight_effective` (the number in force) per provider.
+
 ### OpenCode Console Jev / System One
 
 To use Jev, open **Providers → OpenCode Console Jev**, enter the API key in its

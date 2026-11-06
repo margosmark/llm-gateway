@@ -114,7 +114,7 @@ from gateway.logging import RequestLogger
 from gateway.ledger_export import DEFAULT_EXPORT_ROWS, MAX_EXPORT_ROWS, export_records, render_csv, render_json
 from gateway.metrics import render_metrics
 from gateway.routes import validate_alias_routes, validate_phase_routing
-from gateway.provider_concurrency import CappedAdapterRegistry, ProviderConcurrency
+from gateway.provider_concurrency import CappedAdapterRegistry, ProviderConcurrency, check_limit, effective_limit
 from gateway.observability import (
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
@@ -431,7 +431,15 @@ class GatewayApp:
         self.credentials = credentials
         self.router = router
         self.registry = registry
-        self.router._registry = CappedAdapterRegistry(registry, ProviderConcurrency())
+        # The cap is per provider and the owner can override it per
+        # provider, so the guard reads the config on every acquire: the
+        # resolver returns the saved override (or None) and the effective
+        # limit - cloud default, local floor, owner override - is derived
+        # in gateway.provider_concurrency.
+        self.router._registry = CappedAdapterRegistry(
+            registry,
+            ProviderConcurrency(resolver=self._provider_max_in_flight),
+        )
 
         self.profile_auth = profile_auth
         self.policy = policy
@@ -1707,6 +1715,14 @@ class GatewayApp:
                     # typed. It is deliberately absent from the unauthenticated
                     # status payload, the access log, the ledger and errors.
                     "base_url": provider.base_url,
+                    # Owner state only: the saved per-provider cap and the
+                    # number that actually applies to it right now (cloud
+                    # default, local floor, or the override above). Same
+                    # owner-session boundary as base_url.
+                    "max_in_flight": provider.max_in_flight,
+                    "max_in_flight_effective": effective_limit(
+                        provider.provider_id, provider.max_in_flight
+                    ),
                     "credential_present": self.credentials.describe(provider.provider_id)["present"],
                     "models": models,
                 }
@@ -2272,6 +2288,16 @@ class GatewayApp:
 
     # --- provider actions ------------------------------------------------
 
+    def _provider_max_in_flight(self, provider_id: str) -> int | None:
+        """The owner's saved override for this provider, or ``None``.
+
+        Read from the config snapshot on every acquire, so an override
+        saved from the console applies to the next request with no
+        restart and no re-wrapping of the registry.
+        """
+        provider = self.config.snapshot().providers.get(provider_id)
+        return provider.max_in_flight if provider is not None else None
+
     def handle_provider_action(self, request: Request) -> Response:
         denied = self._require_mutation(request)
         if denied is not None:
@@ -2423,6 +2449,45 @@ class GatewayApp:
                         provider.state = STATE_CONFIGURED_UNTESTED
                     provider.last_error = None
             return json_response({"ok": True, "base_url": normalized})
+
+        if action == "set_max_in_flight":
+            # The per-provider in-flight cap. A positive integer sets the
+            # override, null/empty clears it back to the default (cloud
+            # providers take the global default, the local adapters stay
+            # at their low floor). Non-secret, owner-shaped like every
+            # other provider setting: same session gate, same mutation
+            # check, and the access log records the action, never the
+            # value. A non-integer, a bool, zero or a negative value is
+            # refused with 400 and writes nothing.
+            raw_limit = payload.get("max_in_flight")
+            if raw_limit is None or (isinstance(raw_limit, str) and not raw_limit.strip()):
+                normalized_limit = None
+            else:
+                try:
+                    normalized_limit = check_limit(raw_limit, "max_in_flight")
+                except ValueError:
+                    return json_response(
+                        {
+                            "error": {
+                                "message": "max_in_flight must be a positive integer",
+                                "type": "invalid_max_in_flight",
+                            }
+                        },
+                        400,
+                    )
+            with self.config.mutate() as config:
+                provider = config.providers.get(provider_id)
+                if provider is None:
+                    provider = _new_provider_state(provider_id, adapter.kind)
+                    config.providers[provider_id] = provider
+                provider.max_in_flight = normalized_limit
+            return json_response(
+                {
+                    "ok": True,
+                    "max_in_flight": normalized_limit,
+                    "max_in_flight_effective": effective_limit(provider_id, normalized_limit),
+                }
+            )
 
         if action == "disconnect":
             handle = self.credentials.provider_handle(provider_id)
@@ -2824,6 +2889,9 @@ class GatewayApp:
         error = result.get("error")
         if error is not None:
             status = {"unknown_alias": 404, "alias_incomplete": 409}.get(error["type"], 502)
+            refusal = error.get("status")
+            if isinstance(refusal, int) and not isinstance(refusal, bool):
+                status = refusal
             return json_response({"error": error}, status)
         return json_response(result)
 
@@ -2861,7 +2929,12 @@ class GatewayApp:
         except (RoutingError, AdapterError, ConversionError) as exc:
             message = getattr(exc, "message", str(exc))
             code = getattr(exc, "code", "route_test_failed")
-            return {"ok": False, "error": {"message": message, "type": code}}
+            error: dict[str, Any] = {"message": message, "type": code}
+            if code == "rate_limited" and getattr(exc, "status", None) == 429:
+                # The gateway's own capacity refusal, not an upstream one:
+                # report it here exactly as the inference path does.
+                error["status"] = 429
+            return {"ok": False, "error": error}
         return {
             "ok": True,
             "serving_provider": routed.attribution.serving_provider,

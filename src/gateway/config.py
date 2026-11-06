@@ -225,6 +225,13 @@ class ModelEntry:
         )
 
 
+def _positive_int(value: Any) -> int | None:
+    """A positive ``int``, or ``None`` for anything else (never a ``bool``)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 @dataclass
 class ProviderState:
     """Connection state for one provider. Never holds credential material."""
@@ -243,6 +250,12 @@ class ProviderState:
     #: stays ``None`` until the owner saves one, which is what keeps a local
     #: provider fail-closed at boot with no outbound call.
     base_url: str | None = None
+    #: The owner's per-provider in-flight cap, or ``None`` for the default
+    #: (cloud providers take the global default, the local adapters stay
+    #: low - see :mod:`gateway.provider_concurrency`). Non-secret, owner
+    #: set from the console; read live on every acquire, so a saved value
+    #: needs no restart.
+    max_in_flight: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -253,6 +266,7 @@ class ProviderState:
             "last_error": self.last_error,
             "catalog_observed_at": self.catalog_observed_at,
             "base_url": self.base_url,
+            "max_in_flight": self.max_in_flight,
             "models": {key: value.to_dict() for key, value in sorted(self.models.items())},
         }
 
@@ -288,6 +302,11 @@ class ProviderState:
             # has no endpoint, and a non-string value is treated as absent
             # rather than passed downstream to a URL parser.
             base_url=data.get("base_url") if isinstance(data.get("base_url"), str) and data.get("base_url") else None,
+            # Tolerant the same way: only a positive integer survives the
+            # round trip, so a hand-edited config with 0, a negative, a
+            # bool or a string falls back to the default instead of
+            # disabling the provider or crashing the boot path.
+            max_in_flight=_positive_int(data.get("max_in_flight")),
         )
 
     def enabled_models(self) -> list[ModelEntry]:

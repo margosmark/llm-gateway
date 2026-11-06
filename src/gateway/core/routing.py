@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from gateway.adapters.base import Adapter, AdapterError, CLASS_MESSAGES, ProviderRequest, ProviderResponse
+from gateway.provider_concurrency import ProviderConcurrencyLimit
 from gateway.bridge.model import ConversionError
 # The anthropic bridge is a superset dispatcher: it handles every Anthropic
 # pair and delegates the OpenAI-family pairs to gateway.bridge.requests, so
@@ -1090,10 +1091,22 @@ class Router:
                             "model": candidate.route.model,
                             "outcome": "error",
                             "error_class": exc.error_class,
-                            "reason": CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN]),
+                            # The class message would blame the provider for
+                            # a refusal the gateway itself made.
+                            "reason": (
+                                "the gateway's own in-flight cap refused this request"
+                                if isinstance(exc, ProviderConcurrencyLimit)
+                                else CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN])
+                            ),
                         }
                     )
-                    self._maybe_open_circuit(alias, candidate, exc, request_id)
+                    # A local capacity refusal is not evidence about the
+                    # provider: opening a circuit here would turn "retry
+                    # later" into a multi-minute bench of a route that was
+                    # never at fault, so the caller would then see 503
+                    # instead of the fast 429 it was promised.
+                    if not isinstance(exc, ProviderConcurrencyLimit):
+                        self._maybe_open_circuit(alias, candidate, exc, request_id)
 
                     if is_last:
                         break
@@ -1101,7 +1114,13 @@ class Router:
                         alias, exc.error_class, eligible[index + 1], needs_tools
                     )
                     if not allowed:
-                        exc.message = f"{CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN])} (fallback not used: {reason})"
+                        # The gateway's own capacity refusal keeps its
+                        # message: the generic class text would say the
+                        # *provider* rate-limited a request the gateway
+                        # refused locally, and the caller needs the
+                        # "retry later" answer it was promised.
+                        if not isinstance(exc, ProviderConcurrencyLimit):
+                            exc.message = f"{CLASS_MESSAGES.get(exc.error_class, CLASS_MESSAGES[ERROR_UNKNOWN])} (fallback not used: {reason})"
                         break
                     attribution.fallback_reason = reason
                     attribution.fallback_used = True
@@ -1135,12 +1154,19 @@ class Router:
                 )
 
         # Every eligible route failed.
+        # A provider failure is an upstream failure and is reported as
+        # 502, even when the provider rejected its own credential, because
+        # the caller's credential was not what was rejected. The one
+        # exception is the gateway's *own* capacity refusal
+        # (ProviderConcurrencyLimit carries http_status=429): nothing went
+        # upstream, so it is a local 429 with no queueing.
+        failure_status = getattr(last_error, "http_status", 502) if last_error is not None else 503
         self._record(
             request_id=request_id,
             alias_name=alias_name,
             payload=payload,
             attribution=attribution,
-            status=502 if last_error is not None else 503,
+            status=failure_status,
             error_class=(
                 last_error.error_class
                 if last_error is not None
@@ -1163,11 +1189,12 @@ class Router:
             )
         # A provider failure is an upstream failure. It is reported as 502
         # even when the provider rejected its own credential, because the
-        # caller's credential was not what was rejected.
+        # caller's credential was not what was rejected - except for the
+        # gateway's own capacity refusal, which carries its own status.
         raise RoutingError(
             last_error.message,
             code=last_error.error_class,
-            status=502,
+            status=failure_status,
             detail={"attempts": attribution.attempts},
         )
 

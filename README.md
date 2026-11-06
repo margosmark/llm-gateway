@@ -610,10 +610,17 @@ and invoke every published route.
 
 ## Local concurrency protection
 
-Inference calls are capped at four in-flight requests per provider, per gateway
-process. This local cap rejects excess requests with `rate_limited` and does
-not represent a provider guarantee or published provider limit. Streaming
-requests hold their slot until their response stream completes.
+Inference calls are capped per provider, per gateway process: **32**
+in-flight requests for cloud providers and **4** for the local servers
+(Ollama, llama.cpp, LM Studio), which share this machine's memory and GPU.
+The owner can override any provider's cap in the owner console
+(**Providers → Concurrency → Maximum in flight**), and the override is
+stored in `config.json` as `max_in_flight` and applied without a restart.
+This local cap rejects excess requests with HTTP 429 `rate_limited` and the
+message `local concurrency limit reached for this provider; retry later` —
+it does not queue. It does not represent a provider guarantee or published
+provider limit. Streaming requests hold their slot until their response
+stream completes.
 
 ## Sensitive data and observability
 
