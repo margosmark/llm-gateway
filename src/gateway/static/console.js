@@ -1826,11 +1826,21 @@
     return card;
   }
 
-  // What a local endpoint means, stated where the owner types it: which
-  // addresses are accepted, what loopback means under this deployment's
-  // host networking, and what enrolling a token does.
+  // What a local endpoint means, stated where the owner types it: that the
+  // field takes a root origin and the gateway appends the OpenAI paths, the
+  // URL shape each of the three servers expects, which addresses are
+  // accepted, what loopback means under this deployment's host networking,
+  // and what enrolling a token does.
   var LOCAL_ENDPOINT_HELP =
-    "Requests go only to this address. It must be a private or loopback address " +
+    "Enter the server's ROOT origin, not a full API path: the gateway appends " +
+    "/v1/chat/completions and /v1/models itself (and /api/show on Ollama), and a " +
+    "trailing /v1 is stripped. Shapes: Ollama is http://HOST:11434; llama.cpp " +
+    "(llama-server) is http://HOST:PORT for whatever --port you passed — current " +
+    "upstream builds default to 9931, older builds and the official Docker images " +
+    "to 8080, and --host defaults to 127.0.0.1 so the server must be started " +
+    "LAN-facing to accept another machine; LM Studio is http://HOST:PORT from its " +
+    "local-network port display. Requests go only to this address. It must be a " +
+    "private or loopback address " +
     "(127.0.0.0/8, 10/8, 172.16/12, 192.168/16, fc00::/7); public addresses and " +
     "link-local addresses such as 169.254.169.254 are refused, and the address is " +
     "checked again against the actual connection before any request byte is sent. " +
@@ -1843,7 +1853,9 @@
   var LOCAL_AUTH_TEXT =
     "All three local servers are keyless by default, so no token is needed. If you " +
     "enabled one on the server itself (llama-server --api-key, LM Studio Require " +
-    "Auth), enrol it here or the connection test fails with an authentication error.";
+    "Auth), enrol it here or the connection test fails with an authentication error. " +
+    "Ollama ignores any Authorization value it receives, so enrolling a token for " +
+    "Ollama changes nothing; the gateway sends no credential unless you enrol one.";
 
   var LOCAL_PRIVACY_TEXT =
     "Requests to this provider stay on this LAN. Falling back from it to a cloud " +
