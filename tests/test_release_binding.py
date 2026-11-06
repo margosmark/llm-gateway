@@ -200,12 +200,12 @@ class NoRecordTests(_FileTestCase):
 
 
 class SchemaTests(_FileTestCase):
-    def test_the_four_key_schema_is_unchanged(self) -> None:
+    def test_the_five_key_schema_is_unchanged(self) -> None:
         self.write_mountinfo(PRODUCTION_MOUNTINFO.format(container=CONTAINER_A))
         self.write_record({"image_revision": DIGEST, "container_id": CONTAINER_A})
         self.assertEqual(
             sorted(self.identity().keys()),
-            ["image_revision", "service", "source_revision", "source_tree"],
+            ["image_revision", "mcp_contract_version", "service", "source_revision", "source_tree"],
         )
 
 

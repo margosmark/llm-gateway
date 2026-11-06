@@ -26,6 +26,7 @@ from gateway.adapters.base import (
 )
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
+from gateway.buildinfo import MCP_CONTRACT_VERSION
 from gateway.config import ConfigStore, ModelEntry, Profile, ProviderState, RouteRef
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
@@ -217,6 +218,7 @@ class GatewayHarness:
                 "source_revision": "testcommit",
                 "source_tree": "testtree",
                 "image_revision": "sha256:" + "a" * 64,
+                "mcp_contract_version": MCP_CONTRACT_VERSION,
             },
             base_url=f"http://{self.authority}:{self.port}",
             mounts=("/owner",),
@@ -721,12 +723,12 @@ class MetadataDetailsTests(unittest.TestCase):
         self.harness = GatewayHarness()
         self.addCleanup(self.harness.close)
 
-    def test_version_has_the_fixed_four_key_schema(self) -> None:
+    def test_version_has_the_fixed_five_key_schema(self) -> None:
         status, payload, _ = self.harness.request("GET", "/version")
         self.assertEqual(status, 200)
         self.assertEqual(
             sorted(payload.keys()),
-            ["image_revision", "service", "source_revision", "source_tree"],
+            ["image_revision", "mcp_contract_version", "service", "source_revision", "source_tree"],
         )
         self.assertEqual(payload["service"], "personal-llm-gateway")
 

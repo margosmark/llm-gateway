@@ -717,8 +717,9 @@ text, or the answer distribution.
 
 ## Release identity
 
-`GET /version` returns exactly four keys: `service`, `source_revision`,
-`source_tree`, and `image_revision`. The first two revisions are build inputs;
+`GET /version` returns exactly five keys: `service`, `source_revision`,
+`source_tree`, `image_revision`, and `mcp_contract_version`. The first two
+revisions are build inputs;
 the image revision is read from `release.json` in the data directory only when
 the release step recorded that digest for the container that is currently
 running — the record carries the container id, and the running id is resolved

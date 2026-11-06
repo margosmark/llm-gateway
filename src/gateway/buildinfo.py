@@ -1,6 +1,6 @@
 """Release identity.
 
-``GET /version`` returns a fixed four-key schema. It must never return
+``GET /version`` returns a fixed five-key schema. It must never return
 configuration, credentials, prompts, completions, provider account details,
 or arbitrary environment values.
 
@@ -30,8 +30,36 @@ Two sources feed the identity:
     impossible - the digest does not exist while the image is being built -
     so there is no build-time fallback for this field.
 
+``mcp_contract_version``
+    An integer handshake label for the ``gateway-owner-mcp`` write gate.
+    It is a module-level literal in **this** module only: it is never read
+    from ``release.json``, from the environment, or from any other file, so
+    no runtime-writable surface can move it (see
+    ``tests/test_mcp_contract_guard.py``).
+
+    **It increments ONLY when one of the four gated payload families
+    changes.** The four gated families are the read payloads the package
+    schema-gates on:
+
+    1. ``version``       - ``GET /version``
+    2. ``state``         - ``GET /owner/api/state``
+    3. ``leaderboard``   - ``GET /owner/api/leaderboard``
+    4. ``capabilities``  - ``GET /owner/api/capabilities``
+
+    "Changes" means any key added, removed or re-typed at **any** nesting
+    depth of those four payloads (not merely a required-key set change: a
+    nested addition such as ``state.providers[].max_in_flight`` counts).
+    A change to any of them requires ``MCP_CONTRACT_VERSION`` to be
+    incremented **by hand, in the same change**, together with a refresh of
+    ``tests/fixtures/mcp_contract_baseline.json``.
+
+    Nothing in this repository increments it automatically: there is no
+    script, test or CI step that writes ``MCP_CONTRACT_VERSION``. An
+    automatic bump would be an automatic widening of the write gate and is
+    forbidden.
+
 Nothing in this module reads an arbitrary environment variable into the
-response: only the four fields below are ever exposed.
+response: only the five fields below are ever exposed.
 """
 
 from __future__ import annotations
@@ -45,6 +73,12 @@ from typing import Any
 SERVICE = "personal-llm-gateway"
 
 UNKNOWN = "unknown"
+
+#: The MCP write-gate contract version this gateway publishes. It is the
+#: only thing ``gateway-owner-mcp`` pins on (``TESTED_CONTRACT_VERSION``);
+#: see the module docstring for the four gated payload families and the
+#: bump rule. Hand-edited only - never derived, never auto-incremented.
+MCP_CONTRACT_VERSION = 1
 
 #: Build-time values. Overridden by the Dockerfile via ARG.
 _BUILD_SOURCE_REVISION = os.environ.get("GATEWAY_SOURCE_REVISION", UNKNOWN)
@@ -133,8 +167,13 @@ def _read_release_file(path: Path) -> dict[str, Any]:
 def release_identity(
     release_path: Path | None = None,
     mountinfo_path: Path | None = None,
-) -> dict[str, str]:
-    """Return the fixed four-key release identity."""
+) -> dict[str, str | int]:
+    """Return the fixed five-key release identity.
+
+    ``mcp_contract_version`` comes from the module constant only - it is
+    deliberately not read from ``release_path`` - so a runtime-writable
+    release record can never move the write-gate label.
+    """
     path = release_path if release_path is not None else DEFAULT_RELEASE_PATH
     release = _read_release_file(path)
 
@@ -160,4 +199,5 @@ def release_identity(
         "source_revision": source_revision,
         "source_tree": source_tree,
         "image_revision": image_revision,
+        "mcp_contract_version": MCP_CONTRACT_VERSION,
     }

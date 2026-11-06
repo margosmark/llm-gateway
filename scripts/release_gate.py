@@ -7,7 +7,7 @@ rebuilds or substitutes the artifact it is checking.
 
 What it checks:
 
-* **Identity.** ``/version`` returns the fixed four-key schema, and the
+* **Identity.** ``/version`` returns the fixed five-key schema, and the
   image revision it reports is the digest of the candidate.
 * **Exposure.** The listener refuses a wildcard bind. The setup surface is
   not reachable from a non-loopback peer.
@@ -49,7 +49,7 @@ SECRET_PATTERNS = {
 }
 
 # The fixed /version schema.
-EXPECTED_VERSION_KEYS = {"service", "source_revision", "source_tree", "image_revision"}
+EXPECTED_VERSION_KEYS = {"service", "source_revision", "source_tree", "image_revision", "mcp_contract_version"}
 EXPECTED_BIND_ADDRESS = "127.0.0.1"
 EXPECTED_BIND_PORT = 18775
 
@@ -696,7 +696,7 @@ def main(argv: list[str]) -> int:
         status, payload = http(base + "/version")
         keys = set(payload.keys()) if isinstance(payload, dict) else set()
         gate.record(
-            "/version returns the fixed four-key schema",
+            "/version returns the fixed five-key schema",
             status == 200 and keys == EXPECTED_VERSION_KEYS,
             f"status={status} keys={sorted(keys)}",
         )

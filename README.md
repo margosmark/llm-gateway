@@ -54,7 +54,7 @@ never breaks your client's configuration.
 |---|---|---|---|
 | Owner console and configuration | `http://10.10.11.109:8765/owner/` | Owner account (username + password) | Full configuration, credential enrollment, provider actions, and status; requires sign-in, except the first-run setup and sign-in endpoints themselves |
 | API | `http://10.10.11.109:8765/v1/` | LAN, keyless by default | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/messages`, `POST /v1/responses`, plus native Jev `GET /v1/systemone/models` and `POST /v1/systemone`. Keyless until the owner sets an optional client API key; with one set, every `/v1` request must send `Authorization: Bearer <key>` |
-| Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed four-key metadata |
+| Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed five-key metadata |
 | Request preview | `POST /owner/api/preview` | Trusted LAN | Shows the converted upstream request without calling a provider; Chat Completions body format |
 | Prometheus metrics | `http://10.10.11.109:8765/metrics` | Trusted LAN | Metadata-only operational metrics |
 
@@ -632,7 +632,7 @@ stream completes.
   export, URL, or routine log. A caller token is shown only in the direct
   response that issues it.
 * `/version` exposes no arbitrary environment value: it has only its fixed
-  four-key release schema.
+  five-key release schema.
 
 Status, analytics and exports are metadata only. A request ledger records
 which alias was asked for, which provider and model actually served it, how
@@ -880,7 +880,7 @@ To check what is running:
 curl -s http://10.10.11.109:8765/version
 ```
 
-`/version` has exactly four keys, and `image_revision` is the digest of
+`/version` has exactly five keys, and `image_revision` is the digest of
 the image that is actually running only when the release step recorded it
 for the running container; otherwise it is `unknown`, never a stale
 digest. The runbook has the rest:

@@ -9,8 +9,11 @@
 > provider-only for `clear_cooldowns`; the shipped gateway and server
 > accept `route|provider|all`, sanctioned by build card `t_0b1664c6`
 > beyond the spec — see `docs/REVIEW.md` R70 and `docs/OWNER_AUTH.md`.
-> The text below is the spec verbatim: attachment sha256
+> The text from the horizontal rule through the end of `## Source references`
+> is the spec verbatim: attachment sha256
 > `2afa3c88425e8164cf3747e0552a2b646ca0e18c0d5fa6c9a9b1aafdd18c3449`.
+> An **addendum** — not part of the vendored spec, added 2026-11-06 by card
+> `t_d43744ae` — follows it at the end of this file.
 
 ---
 
@@ -129,3 +132,63 @@ Timeouts: connect 2s, normal read 10s, write 15s; provider test/refresh ceiling 
 ## Source references
 
 All paths/lines are from pinned `origin/main` SHA above. Route table and existing endpoints: `src/gateway/http/app.py:407-454`. Trusted LAN anonymous baseline: `src/gateway/auth.py:85-89`, `src/gateway/http/app.py:563-572`. Security Host/Origin/forwarded policy: `src/gateway/http/security.py:65-107`. State/leaderboard/capability handlers: `src/gateway/http/app.py:988-1008`, `1010-1025`, `1044-1065`, `1174-1182`, `1237-1250`. Provider mutations: `src/gateway/http/app.py:1636-1713`, cooldown clear `1781-1800`; alias save/publish `1945-2029`; capability decisions `1458-1515+`. Provider tests and alias tests can contact upstream: `src/gateway/http/app.py:1657-1665`, `2041-2052`. Owner-auth candidate `53918c1` (not the `origin/main` baseline) documents separate owner cookie and client key: `docs/OWNER_AUTH.md:11-49`, `91-100`; candidate explicitly states not deployed at `docs/OWNER_AUTH.md:7-9`.
+
+---
+
+## Addendum — the MCP contract version (not part of the vendored spec)
+
+Added 2026-11-06 by card `t_d43744ae`. This section is the gateway-side
+half of acceptance items **A18** (contract/version mismatch) and **A24**
+(pinning) above: the pin is an integer contract version the gateway
+publishes, not a git SHA.
+
+### What is published
+
+`mcp_contract_version` (integer, starting at `1`) is part of the release
+identity, so it appears on every surface that carries that identity:
+
+| Surface | Path |
+|---|---|
+| public release identity | `GET /version` |
+| owner state (what `gateway_get_version` reads through `/version`, and `state.release`) | `GET /owner/api/state` |
+
+It is a single module-level literal, `MCP_CONTRACT_VERSION` in
+`src/gateway/buildinfo.py`. No other module defines it, it is never read
+from `release.json`, from the environment, or from any other file, and
+nothing in this repository increments it. An automatic bump would be an
+automatic widening of the write gate and is forbidden.
+
+### The four gated payload families
+
+The label increments **only** when one of these four read payloads changes:
+
+| # | Family | Endpoint |
+|---|---|---|
+| 1 | `version` | `GET /version` |
+| 2 | `state` | `GET /owner/api/state` |
+| 3 | `leaderboard` | `GET /owner/api/leaderboard` |
+| 4 | `capabilities` | `GET /owner/api/capabilities` |
+
+"Changes" means a key added, removed, or re-typed at **any** nesting depth
+of those payloads — not merely a required-key set change. A nested addition
+such as `state.providers[].max_in_flight` is exactly the class of change a
+presence-only check cannot see, and it counts.
+
+### How the rule is enforced
+
+* `tests/test_mcp_contract_guard.py` captures the four families as
+  `key-path -> type` maps and compares them against the newest **committed**
+  snapshot in `tests/fixtures/mcp_contract_baseline.json` that still differs
+  from the current schema. A differing schema with an unchanged constant
+  fails: that is a gated change that shipped without a bump. The snapshot is
+  read from git history rather than from the working tree, so regenerating
+  the file cannot hide a change from the guard.
+* The guard is proven by mutation on every candidate that touches it: change
+  one field of a family → RED; increment the constant → GREEN; restore the
+  tree → clean.
+* Refreshing the snapshot is `PYTHONPATH=src python3
+  scripts/capture_mcp_contract.py`; that script writes the snapshot only and
+  never touches the constant.
+* The package side (`margosmark/gateway-owner-mcp`) refuses writes when the
+  gateway reports no contract version, a lower one, or a higher one, with
+  `CONTRACT_VERSION_UNSUPPORTED`. Absent and unknown both fail closed.
