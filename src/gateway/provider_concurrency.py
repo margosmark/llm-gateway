@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gateway.adapters.base import AdapterError, ProviderResponse
-from gateway.config import ERROR_RATE_LIMITED
+from gateway.config import ERROR_RATE_LIMITED, MAX_IN_FLIGHT_CEILING
 
 #: The process-wide default for a provider the owner has not overridden.
 #: Cloud providers get this.
@@ -29,10 +29,14 @@ def check_limit(value: Any, field: str = "provider concurrency limit") -> int:
     """Validate a concurrency limit: a positive ``int``, never a ``bool``.
 
     ``bool`` is rejected because it is an ``int`` subclass, so ``True``
-    would otherwise silently mean a limit of one.
+    would otherwise silently mean a limit of one. ``MAX_IN_FLIGHT_CEILING``
+    bounds the other end: a limit no request could ever reach is the cap
+    switched off, not a limit, so it is refused rather than stored.
     """
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{field} must be a positive integer")
+    if value > MAX_IN_FLIGHT_CEILING:
+        raise ValueError(f"{field} must be a positive integer no greater than {MAX_IN_FLIGHT_CEILING}")
     return value
 
 
@@ -108,6 +112,94 @@ class ProviderConcurrency:
                 self._active[provider_id] = active - 1
 
 
+class _StreamLease:
+    """The in-flight slot held by one streaming provider call.
+
+    The slot is released **exactly once**, whichever exit path reaches it
+    first:
+
+    * the stream generator's ``finally`` - exhaustion, an upstream error,
+      or ``close()`` once the stream has been entered, and
+    * the request handler's own ``finally`` through
+      ``release_if_unstarted`` - the path that has to exist because
+      closing a generator that was never started runs no code at all. A
+      client that resets the connection after the request body is read
+      but before the response headers leave the process (or a ``HEAD``
+      request) abandons the stream before its first ``next()``, and
+      without this handler-side release the slot stayed held until the
+      gateway restarted: ``4`` such resets kill a local provider, ``32``
+      a cloud one (finding F1 of security gate `t_3fd0925e`,
+      ``docs/REVIEW.md`` R71).
+
+    ``release_if_unstarted`` deliberately does nothing once the stream has
+    started: while a stream is running the slot is genuinely held, and
+    the stream's own ``finally`` releases it when the stream actually
+    ends. Releasing it at handler exit instead would hand the slot to the
+    next request while the abandoned stream was still being read.
+    """
+
+    __slots__ = ("_limits", "_lock", "_provider_id", "_released", "_started")
+
+    def __init__(self, limits: ProviderConcurrency, provider_id: str) -> None:
+        self._limits = limits
+        self._provider_id = provider_id
+        self._started = False
+        self._released = False
+        self._lock = threading.Lock()
+
+    def mark_started(self) -> None:
+        with self._lock:
+            self._started = True
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._limits.release(self._provider_id)
+
+    def release_if_unstarted(self) -> None:
+        with self._lock:
+            if self._started or self._released:
+                return
+            self._released = True
+        self._limits.release(self._provider_id)
+
+
+class _LeasedStream:
+    """A provider's stream with its in-flight slot lease attached.
+
+    ``ProviderResponse.stream`` is wrapped and converted on its way to the
+    HTTP response, but this object is what ``invoke`` hands back, so the
+    request handler can always find the lease through
+    ``release_if_unstarted`` - even when the stream itself is never
+    entered and no line of the stream generator ever runs.
+    """
+
+    __slots__ = ("_lease", "_stream")
+
+    def __init__(self, stream: Any, lease: _StreamLease) -> None:
+        self._stream = stream
+        self._lease = lease
+
+    def __iter__(self) -> _LeasedStream:
+        return self
+
+    def __next__(self) -> Any:
+        return next(self._stream)
+
+    def close(self) -> None:
+        """Abandon the stream and give the slot back (idempotent)."""
+        try:
+            self._stream.close()
+        finally:
+            self._lease.release()
+
+    def release_if_unstarted(self) -> None:
+        """Give the slot back only if the stream was never entered."""
+        self._lease.release_if_unstarted()
+
+
 class _CappedAdapter:
     def __init__(self, adapter: Any, limits: ProviderConcurrency) -> None:
         self._adapter = adapter
@@ -128,17 +220,20 @@ class _CappedAdapter:
             self._limits.release(provider_id)
             return response
 
+        lease = _StreamLease(self._limits, provider_id)
+
         def held_stream():
+            lease.mark_started()
             try:
                 yield from response.stream
             finally:
-                self._limits.release(provider_id)
+                lease.release()
 
         return ProviderResponse(
             status=response.status,
             headers=response.headers,
             body=response.body,
-            stream=held_stream(),
+            stream=_LeasedStream(held_stream(), lease),
             content_type=response.content_type,
             dialect=response.dialect,
         )
