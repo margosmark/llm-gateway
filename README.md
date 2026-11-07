@@ -52,7 +52,7 @@ never breaks your client's configuration.
 
 | Surface | Address | Who can reach it | What it does |
 |---|---|---|---|
-| Owner console and configuration | `http://10.10.11.109:8765/owner/` | Owner account (username + password) | Full configuration, credential enrollment, provider actions, and status; requires sign-in, except the first-run setup and sign-in endpoints themselves |
+| Owner console and configuration | `http://10.10.11.109:8765/owner/` | Owner account (username + password) | Full configuration, credential enrollment, provider actions, and status; requires sign-in, except the first-run setup and sign-in endpoints themselves — and except while the owner has set `owner_console_auth=false`, which serves them without a session (see `docs/OWNER_AUTH.md`) |
 | API | `http://10.10.11.109:8765/v1/` | LAN, keyless by default | `GET /v1/models`, `GET /v1/alias-catalog`, `POST /v1/chat/completions`, `POST /v1/messages`, `POST /v1/responses`, plus native Jev `GET /v1/systemone/models` and `POST /v1/systemone`. Keyless until the owner sets an optional client API key; with one set, every `/v1` request must send `Authorization: Bearer <key>` |
 | Release identity | `http://10.10.11.109:8765/version` | LAN, anonymous | Fixed five-key metadata |
 | Request preview | `POST /owner/api/preview` | Trusted LAN | Shows the converted upstream request without calling a provider; Chat Completions body format |
@@ -938,7 +938,9 @@ them.
 * **The model API has no authentication boundary by default.** Until the owner
   sets the optional client API key, any reachable peer can invoke published
   models on `/v1`. Owner sign-in protects the console and the configuration
-  API, not the model API. The network must still be trusted: the gateway does
+  API, not the model API — except while the owner has set
+  `owner_console_auth=false`, which serves `/owner/*` without a session
+  (`docs/OWNER_AUTH.md`). The network must still be trusted: the gateway does
   not protect against an on-path LAN attacker.
 * **The bridge is verified against a recorded corpus**, not yet against live
   provider captures. The corpus and its round-trip runner are in

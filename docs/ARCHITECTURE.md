@@ -10,7 +10,7 @@ The gateway starts one standard-library HTTP server from `gateway.cli`:
 
 | Listener | Default bind | Mounts | Purpose |
 |---|---|---|---|
-| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version`, `/metrics` | direct owner console/configuration behind the owner session, console-minted machine keys for automation on the same listener, a keyless-by-default OpenAI-compatible API (optional client key), and metadata-only Prometheus exposition |
+| Trusted LAN | explicit private IP, port `8765` | `/owner/`, `/v1/`, `/health`, `/version`, `/metrics` | direct owner console/configuration behind the owner session (unless the owner has set `owner_console_auth=false`, which serves it without a session), console-minted machine keys for automation on the same listener, a keyless-by-default OpenAI-compatible API (optional client key), and metadata-only Prometheus exposition |
 
 The owner console, credential forms, provider actions, and client API share the
 same listener. `cli.py` refuses wildcard and unsupported binds. Supported classes are
@@ -259,7 +259,9 @@ the rest of the state.
    `POST /owner/api/auth/login`. Every other `/owner/*` route requires a
    valid owner session cookie (`gw_owner_session`, `HttpOnly`,
    `SameSite=Strict`, `Path=/`, 12-hour TTL, validated server-side) and
-   answers `401 authentication_required` before its handler runs — a
+   answers `401 authentication_required` before its handler runs — always,
+   except while the owner has set `owner_console_auth=false`, which serves
+   them without a session (`docs/OWNER_AUTH.md`); with the gate on, a
    streaming endpoint cannot emit a frame and a mutation cannot half-apply
    without one.
 4. First run has no account: `ensure_setup_code()` (`src/gateway/owner_auth.py`)
@@ -280,7 +282,8 @@ the rest of the state.
    page load or ordinary configuration save calls a provider.
 7. `GET /version`, `GET /health` and `GET /metrics` remain unauthenticated;
    `/v1/*` stays keyless until an owner sets a client API key
-   (`POST /owner/api/auth/client-key`, owner session required).
+   (`POST /owner/api/auth/client-key`, owner session required unless the
+   owner has set `owner_console_auth=false`).
 
 **Deployed vs candidate.** The running gateway still serves the previous
 boundary — no login, and a reachable LAN peer administers `/owner/*`
@@ -558,7 +561,8 @@ backstop for a process that exits without it.
   * **redirects are never followed**, to a private or a public address, so a
     credential is never replayed elsewhere;
   * the endpoint is written only by the owner-only `set_base_url` provider
-    action (401 without a session), and its refusal reasons are fixed
+    action (401 without a session unless the owner has set
+    `owner_console_auth=false`), and its refusal reasons are fixed
     strings that never echo the refused value;
   * **keyless by default** — no `Authorization` header at all unless the
     owner enrols an optional local token for a server that demands one — a
