@@ -1,16 +1,75 @@
+/* Owner console visual system — design spec t_f5e4c18b (§3 tokens, §6 density).
+ *
+ * Every colour pair below is measured (WCAG 2.1 relative luminance); the ratio
+ * rides with the token so a later edit has to argue with the number:
+ *
+ *   text on bg #0f1115 / panel #171a21 / panel-2 #1d212a
+ *     --fg          #e6e8ec  15.40 / 14.19 / 13.14   AA PASS
+ *     --muted       #98a1b3   7.27 /  6.70 /  6.20   AA PASS
+ *     --fg-disabled #8b949e   6.14 /  5.66 /  5.24   AA PASS
+ *     --accent      #4c8dff   5.90 /  5.44 /  5.03   AA PASS (text, links, focus ring)
+ *     --ok          #3fb950   7.44 /  6.85 /  6.34   AA PASS
+ *     --warn        #d29922   7.49 /  6.90 /  6.38   AA PASS
+ *     --bad         #f85149   5.64 /  5.19 /  4.81   AA PASS
+ *     --cool        #56d4dd  10.67 /  9.83 /  9.10   AA PASS
+ *     --purple      #a371f7   5.64 /  5.19 /  4.81   AA PASS
+ *
+ *   fills (white #ffffff text)
+ *     --accent-fill  #2f6fe0   4.70  AA PASS  (was #4c8dff → 3.20 FAIL)
+ *     --danger-fill  #d1242f   5.24  AA PASS  (ink #e6e8ec on it = 4.27 FAIL → never)
+ *
+ *   borders
+ *     --line           #2a2f3a  1.41 / 1.30 / 1.20  decorative dividers only
+ *     --border-section #3d4553  1.96 / 1.80 / 1.67  grouping edges only
+ *     --border-control #6a7383  3.95 / 3.64 / 3.37  controls/pills/rings — >=3:1 non-text floor
+ *
+ * Layout contract asserted by tests/console_dom_test.js (do not edit away):
+ *   `.empty-state {`, `button:focus-visible`,
+ *   `.table-wrap { max-width: 100%; overflow-x: auto; }`,
+ *   `.capability-preview:not(:empty)`.
+ */
 :root {
   color-scheme: light dark;
+  /* surfaces — the console's existing identity, unchanged */
   --bg: #0f1115;
   --panel: #171a21;
   --panel-2: #1d212a;
-  --line: #2a2f3a;
+  /* ink */
   --fg: #e6e8ec;
   --muted: #98a1b3;
+  --fg-disabled: #8b949e;
+  /* borders: three tiers, three meanings */
+  --line: #2a2f3a;
+  --border-section: #3d4553;
+  --border-control: #6a7383;
+  /* accent: text/ring value and the separately measured button fill */
   --accent: #4c8dff;
+  --accent-fill: #2f6fe0;
+  --danger-fill: #d1242f;
+  /* status */
   --ok: #3fb950;
   --warn: #d29922;
   --bad: #f85149;
-  --radius: 8px;
+  --cool: #56d4dd;
+  --purple: #a371f7;
+  /* type scale */
+  --fs-sm: 12.5px;
+  --fs-base: 15px;
+  --fs-md: 16.5px;
+  --fs-lg: 19px;
+  --fs-xl: 24px;
+  /* spacing: 4px base */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  /* radius */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-pill: 999px;
+  --radius: var(--radius-md);
 }
 
 * { box-sizing: border-box; }
@@ -19,17 +78,20 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: var(--fs-base)/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
+/* A mutation in flight is a page-level state, not a silent drop. */
+body[aria-busy="true"] { cursor: progress; }
+body[aria-busy="true"] button:not(:disabled) { cursor: progress; }
 
 a { color: var(--accent); }
 
 header.top {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--sp-4);
   flex-wrap: wrap;
-  padding: 12px 20px;
+  padding: var(--sp-3) var(--sp-5);
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   position: sticky;
@@ -39,46 +101,74 @@ header.top {
 
 header.top h1 { font-size: 16px; margin: 0; font-weight: 600; }
 
-nav.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+nav.tabs { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
 
 nav.tabs button {
   background: transparent;
   border: 1px solid transparent;
   color: var(--muted);
   padding: 6px 12px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font: inherit;
 }
 
-nav.tabs button[aria-current="page"] { background: var(--panel-2); color: var(--fg); border-color: var(--line); }
+nav.tabs button[aria-current="page"] { background: var(--panel-2); color: var(--fg); border-color: var(--border-section); }
 nav.tabs button:hover { color: var(--fg); }
 
 .spacer { flex: 1 1 auto; }
 
-main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+main { padding: var(--sp-5); max-width: 1100px; margin: 0 auto; }
 
-section { margin-bottom: 28px; }
+section { margin-bottom: var(--sp-6); }
 
-h2 { font-size: 17px; margin: 0 0 10px; }
-h3 { font-size: 15px; margin: 18px 0 8px; }
+h2 { font-size: var(--fs-md); margin: 0 0 10px; line-height: 1.3; }
+h3 { font-size: var(--fs-base); margin: 18px 0 8px; line-height: 1.3; }
+
+/* Section eyebrows: a scan structure the cards did not have before. */
+.eyebrow {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: var(--sp-4) 0 var(--sp-2);
+}
+.eyebrow:first-child { margin-top: 0; }
 
 .card {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 14px;
+  border: 1px solid var(--border-section);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  margin-bottom: var(--sp-5);
 }
+
+/* The static trust note (console.html): the designer's compact treatment
+ * (§3) plus audit finding 8's collapsed disclosure. The honesty line stays
+ * visible in one row; the full text is still in the served document. */
+body > aside.card {
+  margin: 16px 24px 12px;
+  border-left: 3px solid var(--accent);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  line-height: 1.5;
+}
+body > aside.card summary { cursor: pointer; font-weight: 600; color: var(--fg); }
+body > aside.card details > p { margin: 8px 0 0; max-width: 78ch; }
 
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
+/* An error is red wherever it renders: inline, auth slot, or card body. */
+.bad { color: var(--bad); }
 
-button, .btn {
+/* --- controls --------------------------------------------------------- *
+ * Control boundaries use --border-control (>=3:1); --line stays decorative. */
+button, .btn, .secondary, .button {
   background: var(--panel-2);
   color: var(--fg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
   padding: 7px 12px;
   cursor: pointer;
   font: inherit;
@@ -90,21 +180,42 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   outline: 3px solid var(--accent);
   outline-offset: 2px;
 }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+button.primary:hover:not(:disabled) { filter: brightness(0.92); }
+/* Destructive: outline red at rest, unmistakable solid fill on hover
+ * (white on --danger-fill = 5.24). */
 button.danger { border-color: var(--bad); color: var(--bad); }
+button.danger:hover:not(:disabled) {
+  background: var(--danger-fill);
+  border-color: var(--danger-fill);
+  color: #fff;
+}
+/* Previously unstyled intents: neutral outline vs the default filled chip. */
+button.secondary { background: transparent; border-color: var(--border-control); color: var(--fg); }
+button.secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+a.button {
+  display: inline-block;
+  background: var(--panel-2);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  color: var(--fg);
+  text-decoration: none;
+}
+a.button:hover { border-color: var(--accent); color: var(--accent); }
 
 input, select, textarea {
   background: var(--bg);
   color: var(--fg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
   padding: 7px 9px;
   font: inherit;
   width: 100%;
 }
 
 label { display: block; margin-bottom: 10px; }
-label > span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 13px; }
+label > span { display: block; margin-bottom: var(--sp-1); color: var(--muted); font-size: var(--fs-sm); }
 
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
 .row > * { flex: 1 1 180px; }
@@ -112,7 +223,7 @@ label > span { display: block; margin-bottom: 4px; color: var(--muted); font-siz
 
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { color: var(--muted); font-weight: 500; font-size: 13px; }
+th { color: var(--muted); font-weight: 500; font-size: var(--fs-sm); }
 td.actions { white-space: nowrap; text-align: right; }
 .capability-panel { min-width: 560px; white-space: normal; padding: 8px; }
 .capability-panel label { display: inline-flex; align-items: center; gap: 6px; margin: 4px 12px 8px 0; }
@@ -122,9 +233,34 @@ td.actions { white-space: nowrap; text-align: right; }
 .capability-detail-row td { background: var(--panel-2); }
 .capability-preview, .capability-evidence { overflow-wrap: anywhere; }
 .capability-preview .notice { white-space: normal; }
+/* The preview result sits below its button; while it holds anything it is
+   boxed off so it can never read as an empty, collapsed gap, and once it is
+   empty again it takes no space at all. */
+.capability-preview:not(:empty) {
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+.capability-preview h4 { margin: 0 0 4px; font-size: var(--fs-base); }
+.capability-preview button { margin-top: 4px; }
 .capability-authorisation { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
 .capability-authorisation .capability-field { max-width: 340px; }
 .capability-authorisation input[type="number"] { max-width: 120px; }
+
+/* Numbered evidence → authorise sequence on the paid-run surface. */
+.step-label { display: flex; align-items: center; gap: 8px; }
+.step-label .step-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-control);
+  font-size: 11px;
+  font-weight: 600;
+}
+.capability-evidence { border-left: 3px solid var(--cool); padding-left: 10px; }
 
 @media (max-width: 640px) {
   .capability-panel { min-width: 0; }
@@ -133,9 +269,9 @@ td.actions { white-space: nowrap; text-align: right; }
 .pill {
   display: inline-block;
   padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  font-size: 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-control);
+  font-size: var(--fs-sm);
 }
 .pill.ok { color: var(--ok); border-color: var(--ok); }
 .pill.warn { color: var(--warn); border-color: var(--warn); }
@@ -151,15 +287,19 @@ td.actions { white-space: nowrap; text-align: right; }
   border-left: 3px solid var(--accent);
   background: var(--panel-2);
   padding: 10px 12px;
-  border-radius: 0 var(--radius) var(--radius) 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
   margin: 10px 0;
 }
 .notice.warn { border-left-color: var(--warn); }
 .notice.bad { border-left-color: var(--bad); }
 
+/* One grouped announcement instead of one live region per gap. */
+.policy-gaps ul { margin: var(--sp-2) 0 0; padding-left: 18px; }
+.policy-gaps li { margin: 3px 0; overflow-wrap: anywhere; }
+
 .empty-state {
   border: 1px solid var(--accent);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   padding: 12px;
   margin: 12px 0;
   color: var(--fg);
@@ -169,13 +309,13 @@ td.actions { white-space: nowrap; text-align: right; }
 
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 
-.route { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; margin-bottom: 8px; background: var(--panel-2); }
+.route { border: 1px solid var(--border-section); border-radius: var(--radius-md); padding: 10px; margin-bottom: 8px; background: var(--panel-2); }
 .route .head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
 
 pre.token {
   background: var(--bg);
   border: 1px solid var(--warn);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   padding: 10px;
   overflow-x: auto;
   white-space: pre-wrap;
@@ -191,23 +331,41 @@ pre.token {
 }
 #toast .msg {
   background: var(--panel-2);
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-section);
   border-left: 3px solid var(--accent);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   margin-top: 8px;
 }
 #toast .msg.bad { border-left-color: var(--bad); }
 #toast .msg.ok { border-left-color: var(--ok); }
+#toast .msg.warn { border-left-color: var(--warn); }
 
-.login { max-width: 380px; margin: 80px auto; }
+/* --- sign-in / first-run setup --------------------------------------- *
+ * Same grid as the interior; banner line, title, then the card. */
+main.auth { padding-top: var(--sp-6); }
+.login-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: var(--sp-4); }
+.login-head h1 { font-size: var(--fs-xl); font-weight: 650; margin: 0; }
+.login-tag {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-pill);
+  padding: 2px 10px;
+}
+.auth-card { max-width: 560px; }
+.auth-card.has-error { border-color: var(--warn); }
+.auth-card .notice-dismiss { color: var(--muted); }
+/* Reserved alert line: the error never shoves the button around. */
+.auth-error { min-height: 22px; margin: var(--sp-1) 0 10px; color: var(--bad); font-size: 13.5px; }
+.auth-fields > label { margin-bottom: 14px; }
 
 dl.kv { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 6px 14px; margin: 0; }
 dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; word-break: break-all; }
 
 @media (max-width: 640px) {
-  main { padding: 14px; }
+  main { padding: var(--sp-4); }
   dl.kv { grid-template-columns: 1fr; }
   dl.kv dt { margin-top: 8px; }
   .table-wrap { max-width: 100%; overflow-x: auto; }
@@ -255,7 +413,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
 
 /* Routing health is the primary, read-only status surface. */
 .routing-health-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 12px; }
-.route-health-card { min-width: 0; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+.route-health-card { min-width: 0; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--border-section); border-radius: var(--radius-md); padding: 14px; }
 .route-health-card h3 { margin-top: 0; }
 .health-routes { display: grid; grid-template-columns: minmax(84px, 110px) minmax(0, 1fr); gap: 6px 10px; }
 .health-routes dt { color: var(--muted); }
@@ -273,15 +431,25 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .health-routes { grid-template-columns: minmax(72px, 88px) minmax(0, 1fr); }
   .trigger-list { gap: 6px; }
   .trigger-list li { font-size: 13px; }
-  header.top { position: static; padding: 12px 14px; }
+  header.top { position: static; padding: var(--sp-3) 14px; }
   nav.tabs { max-width: 100%; }
   table { display: block; max-width: 100%; overflow-x: auto; }
 }
 
+/* Density: below 700px the tab strip must stop eating a fifth of the
+ * screen — 14px labels, 2px gaps, tighter chrome (spec §6). */
+@media (max-width: 700px) {
+  nav.tabs { gap: 2px; }
+  nav.tabs button { font-size: 14px; padding: 5px 8px; }
+  header.top { gap: 8px; padding: 10px 14px; }
+  .card { padding: var(--sp-4); }
+  main { padding: var(--sp-4); }
+}
+
 /* The save preview: the owner confirms exactly what changes before
  * anything mutates; cancel or a rejected save says the config is unchanged. */
-.save-preview { border: 1px solid var(--warn); border-radius: var(--radius); background: var(--panel-2); padding: 12px; margin: 12px 0; }
-.save-preview h4 { margin: 0 0 4px; font-size: 15px; }
+.save-preview { border: 1px solid var(--warn); border-radius: var(--radius-md); background: var(--panel-2); padding: 12px; margin: 12px 0; }
+.save-preview h4 { margin: 0 0 4px; font-size: var(--fs-base); }
 .save-preview h4:focus { outline: 3px solid var(--warn); outline-offset: 2px; }
 .preview-lines { margin: 8px 0 12px; padding-left: 20px; }
 .preview-lines li { margin: 3px 0; overflow-wrap: anywhere; }
