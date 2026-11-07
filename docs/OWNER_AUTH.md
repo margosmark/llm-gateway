@@ -183,7 +183,8 @@ stream): `GET /v1/models`, `GET /v1/alias-catalog`,
 
 - `GET /version`, `GET /health`, `GET /metrics` are unchanged.
 - **Set / rotate / clear** from Settings → Access
-  (`POST /owner/api/auth/client-key`, owner session required). The owner
+  (`POST /owner/api/auth/client-key`, owner session required — by default;
+  with `owner_console_auth=false` it needs none). The owner
   supplies the key they will hand to clients; it must be 32-256
   characters.
   The response carries only a random display id and the transition, plus

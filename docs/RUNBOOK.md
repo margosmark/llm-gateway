@@ -97,7 +97,10 @@ the gateway host itself (§1.4). Port `8766` stays reserved and refused.
 Three credentials, deliberately separate:
 
 * **Owner console and configuration API** (`/owner/*`) are protected by one
-  owner account: username and password, verified server-side with PBKDF2,
+  owner account — always, except while the owner has set
+  `owner_console_auth=false`, which serves them without a session
+  (`docs/OWNER_AUTH.md` §Turning console sign-in off) — username and
+  password, verified server-side with PBKDF2,
   delivered as an `HttpOnly`, `SameSite=Strict` session cookie with a
   12-hour TTL. A fresh gateway has no account at all — you create the first
   one in first-run setup (§1.4) using a one-time setup code read from the
@@ -357,7 +360,9 @@ one in force right now.
 * The endpoint is `POST /owner/api/provider` with
   `{"action": "set_max_in_flight", "provider_id": "...", "max_in_flight": N}`.
   It is owner-session-gated exactly like every other provider setting
-  (401 without a session); it adds no unauthenticated surface.
+  (401 without a session while console sign-in is on — the default; with
+  `owner_console_auth=false` it is served without one, see
+  `docs/OWNER_AUTH.md`); it adds no unauthenticated surface.
 * `GET /owner/api/state` reports `max_in_flight` (the override, `null` when
   unset) and `max_in_flight_effective` (the number in force) per provider.
 
@@ -550,7 +555,9 @@ login: the pre-auth surface is exactly the console shell and its assets,
 `GET /owner/api/auth/session`, `POST /owner/api/auth/setup` and
 `POST /owner/api/auth/login`; every other `/owner/*` route answers `401
 authentication_required` before its handler runs until a valid session
-cookie is presented (§1.4). Browser mutations still require the exact
+cookie is presented (§1.4) — always, except while the owner has set
+`owner_console_auth=false`, which serves them without a session
+(`docs/OWNER_AUTH.md`). Browser mutations still require the exact
 canonical `Origin`; CSRF is carried by the `SameSite=Strict` cookie plus the
 existing `Origin`/`Host` checks, not by a bootstrap token. The OpenCode
 integration above calls `/v1`, which stays keyless until an owner sets a
