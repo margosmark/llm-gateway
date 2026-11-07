@@ -800,6 +800,17 @@ class GatewayApp:
             headers.append(("Retry-After", str(int(math.ceil(exc.retry_after)))))
         return json_response(exc.payload(), exc.status, headers)
 
+    def console_auth_required(self) -> bool:
+        """Whether ``/owner`` routes demand a signed-in owner session.
+
+        Reads the ``owner_console_auth`` config key through the store on
+        every call, so a toggle takes effect on the very next request.
+        The parse lives in ``GatewayConfig.from_dict`` and is fail-closed:
+        absent, ``null``, ``0``, ``"no"`` or any other non-``false``
+        value returns ``True`` here, and nothing in this path can raise.
+        """
+        return self.config.snapshot().owner_console_auth
+
     def _authorize(self, request: Request) -> Response | None:
         """The access boundaries, kept apart on purpose.
 
@@ -810,7 +821,10 @@ class GatewayApp:
         and goes to :meth:`_authorize_machine_key` (which decides by
         surface and scope, and never falls back to the cookie); every
         other request needs the session cookie, always - or nothing at
-        all for the pre-auth console paths.
+        all for the pre-auth console paths, or for every owner path when
+        the owner has explicitly turned the console session gate off with
+        ``owner_console_auth=false`` (a browser-session-only opt-out: the
+        bearer branches above are decided first and are unaffected).
         """
         path = request.path
         if path == "/v1" or path.startswith("/v1/"):
@@ -900,6 +914,23 @@ class GatewayApp:
         )
 
     def _require_owner_session(self, request: Request) -> Response | None:
+        if not self.console_auth_required():
+            # ``owner_console_auth=false``: the console session gate is
+            # off, so this request is served as the owner without a
+            # session. The mode never invents a session: an identity is
+            # attached only when a real cookie resolves, so the console
+            # and ``/owner/api/auth/session`` keep telling the truth
+            # about what was (and was not) established. The machine-key
+            # and client-key paths never reach this branch - they are
+            # decided in ``_authorize`` before the session check.
+            token = self._session_token(request)
+            info = self.owner_auth.session_info(token)
+            request.context["owner_authenticated"] = True
+            if info is not None:
+                request.context["owner_username"] = info["username"]
+                request.context["owner_session"] = token
+                request.context["owner_expires_at"] = info["expires_at"]
+            return None
         token = self._session_token(request)
         info = self.owner_auth.session_info(token)
         if info is None:
@@ -974,11 +1005,19 @@ class GatewayApp:
 
         Deliberately carries nothing but those facts before sign-in; the
         client-key state and the username only appear with a session.
+
+        ``console_auth`` states the mode (``enabled``/``disabled``) and is
+        present in both. ``authenticated`` stays **session truth** in both
+        modes: with ``owner_console_auth=false`` almost every request
+        carries no session and must not be reported as having one - the
+        console reads ``console_auth`` to skip the login view instead of
+        being handed a session it never established.
         """
         token = self._session_token(request)
         info = self.owner_auth.session_info(token)
         payload: dict[str, Any] = {
             "authenticated": info is not None,
+            "console_auth": "enabled" if self.console_auth_required() else "disabled",
             "setup_required": self.owner_auth.setup_required,
             "username": None,
         }
@@ -1807,54 +1846,77 @@ class GatewayApp:
             requested_days=requested_days,
             prices=price_snapshot,
         )
-        return json_response(
-            {
-                "initialized": config.initialized,
-                "revision": config.revision,
-                "snapshot_interval_seconds": snapshot_interval_seconds(config),
-                "access_mode": config.access_mode,
-                "access_mode_description": access_mode_description(config.access_mode),
-                "surface": self._surface(request),
-                "can_mutate": may_mutate,
-                "can_enroll_credentials": self._can_enroll_credentials(request),
-                "authenticated": bool(request.context.get("owner_authenticated")),
-                # The signed-in owner and the client-key state (presence and
-                # transition only - never a hash, never the value).
-                "owner": {"username": request.context.get("owner_username")},
-                "access": {"client_key": self.owner_auth.client_key_status()},
-                "providers": providers,
-                "aliases": aliases,
-                "profiles": profiles,
-                "published_models": [alias.name for alias in sorted(config.published_aliases(), key=lambda a: a.name)],
-                "limits": self.limits.all(),
-                "ledger": annotate_events(recent_ledger, _prices=price_snapshot),
-                "totals": self.ledger.totals() if self.ledger else {},
-                "usage_costs": aggregate_usage(ledger_snapshot, window_hours=24, evicted_events=ledger_evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
-                "analytics": analytics,
-                "request_statistics": {window: aggregate_statistics(ledger_snapshot, window, _prices=price_snapshot) for window in ("hour", "day", "month")} if self.ledger else {},
-                "provider_health": provider_health(providers, self.router.circuits.details(), ledger_snapshot),
-                "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
-                "cooldowns": self.router.circuits.snapshot(),
-                "cooldown_details": self.router.circuits.details(),
-                "cooldown_policy": {
-                    "exhausted_base_seconds": EXHAUSTED_BASE_SECONDS,
-                    "exhausted_max_seconds": self.router.circuits.exhausted_max_seconds,
-                    "rate_limited_max_seconds": self.router.circuits.rate_limited_max_seconds,
-                    "transient_max_seconds": self.router.circuits.transient_max_seconds,
-                    "probe_timeout_seconds": PROBE_TIMEOUT_SECONDS,
-                    "transient_failure_threshold": TRANSIENT_FAILURE_THRESHOLD,
-                },
-                "release": self._release_identity() if self._release_identity else {},
-                "base_url": self.base_url,
-                "fallback_triggers": list(FALLBACK_TRIGGERS),
-                "fallback_policy_warnings": trigger_coverage_warnings,
-                "device_code": {
-                    "prerequisite": PREREQUISITE,
-                    "anti_phishing": ANTI_PHISHING,
-                },
-                "checklist": self._checklist(config),
-            }
-        )
+        payload = {
+            "initialized": config.initialized,
+            "revision": config.revision,
+            "snapshot_interval_seconds": snapshot_interval_seconds(config),
+            "access_mode": config.access_mode,
+            "access_mode_description": access_mode_description(config.access_mode),
+            "surface": self._surface(request),
+            "can_mutate": may_mutate,
+            "can_enroll_credentials": self._can_enroll_credentials(request),
+            # Session truth in both modes, never the mode's verdict:
+            # with ``owner_console_auth=false`` every request here is
+            # authorised as the owner (`can_mutate`) while almost none
+            # carries a session, and this field must not claim one.
+            "authenticated": bool(request.context.get("owner_session")),
+            # The signed-in owner and the client-key state (presence and
+            # transition only - never a hash, never the value).
+            "owner": {"username": request.context.get("owner_username")},
+            "access": {"client_key": self.owner_auth.client_key_status()},
+            "providers": providers,
+            "aliases": aliases,
+            "profiles": profiles,
+            "published_models": [alias.name for alias in sorted(config.published_aliases(), key=lambda a: a.name)],
+            "limits": self.limits.all(),
+            "ledger": annotate_events(recent_ledger, _prices=price_snapshot),
+            "totals": self.ledger.totals() if self.ledger else {},
+            "usage_costs": aggregate_usage(ledger_snapshot, window_hours=24, evicted_events=ledger_evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
+            "analytics": analytics,
+            "request_statistics": {window: aggregate_statistics(ledger_snapshot, window, _prices=price_snapshot) for window in ("hour", "day", "month")} if self.ledger else {},
+            "provider_health": provider_health(providers, self.router.circuits.details(), ledger_snapshot),
+            "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
+            "cooldowns": self.router.circuits.snapshot(),
+            "cooldown_details": self.router.circuits.details(),
+            "cooldown_policy": {
+                "exhausted_base_seconds": EXHAUSTED_BASE_SECONDS,
+                "exhausted_max_seconds": self.router.circuits.exhausted_max_seconds,
+                "rate_limited_max_seconds": self.router.circuits.rate_limited_max_seconds,
+                "transient_max_seconds": self.router.circuits.transient_max_seconds,
+                "probe_timeout_seconds": PROBE_TIMEOUT_SECONDS,
+                "transient_failure_threshold": TRANSIENT_FAILURE_THRESHOLD,
+            },
+            "release": self._release_identity() if self._release_identity else {},
+            "base_url": self.base_url,
+            "fallback_triggers": list(FALLBACK_TRIGGERS),
+            "fallback_policy_warnings": trigger_coverage_warnings,
+            "device_code": {
+                "prerequisite": PREREQUISITE,
+                "anti_phishing": ANTI_PHISHING,
+            },
+            "checklist": self._checklist(config),
+        }
+        if config.owner_console_auth is False:
+            # Machine-readable mode marker, present exactly when the
+            # console session gate is off: the operator's reminder that
+            # this listener is open. It is deliberately not always in the
+            # payload - the default (auth-required) body stays byte-identical
+            # to the MCP contract snapshot, because gateway-owner-mcp pins
+            # ``mcp_contract_version`` by exact equality and a bump would
+            # refuse every one of its writes until that package is
+            # re-validated and released.
+            # The canned description below claims sign-in protects this
+            # console; with the gate off that sentence would be a lie in a
+            # machine-readable field - which is how an open console gets
+            # forgotten.
+            payload["access_mode_description"] = (
+                "Owner console sign-in is OFF (owner_console_auth=false): this console "
+                "and every configuration API are reachable without a session. The "
+                "machine key and the model client key are separate controls and are "
+                "not affected by this flag."
+            )
+            payload["console_auth"] = "disabled"
+        return json_response(payload)
 
     def handle_backup_export(self, request: Request) -> Response:
         config = self.config.snapshot()
@@ -3048,6 +3110,34 @@ class GatewayApp:
             return json_response(
                 {"error": {"message": "trusted LAN mode is anonymous and cannot be changed to authenticated access", "type": "unsupported_access_mode"}},
                 400,
+            )
+        if action == "owner_console_auth":
+            # Owner-credentials control: flipping the console session gate
+            # is a human-owner action, never an automation credential's.
+            # A machine key may change aliases and providers, but not the
+            # login boundary; and with the gate off this passes for every
+            # request, which is exactly what lets the operator turn it
+            # back on without a session.
+            if request.context.get("machine_key_authenticated"):
+                return self._machine_denied(
+                    "machine_key_forbidden",
+                    "machine keys cannot change the owner console login boundary",
+                )
+            denied = self._require_signed_in_owner(request)
+            if denied is not None:
+                return denied
+            required = payload.get("required")
+            if not isinstance(required, bool):
+                return json_response(
+                    {"error": {"message": "owner_console_auth must be true or false", "type": "invalid_setting"}},
+                    400,
+                )
+            with self.config.mutate() as config:
+                config.owner_console_auth = required
+            return json_response(
+                {"ok": True, "owner_console_auth": required},
+                200,
+                [("Cache-Control", "no-store")],
             )
         if action == "initialize":
             with self.config.mutate() as config:

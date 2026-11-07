@@ -58,6 +58,13 @@ or clear. Document and test the two access boundaries separately.
   default admin/admin credential. Keep a separate setup listener,
   `GATEWAY_SETUP_BIND`, an SSH-tunnel requirement, and port `:8766` prohibited;
   `8766` remains reserved and rejected at argument parsing.
+- Console sign-in has exactly one opt-out, and it is an **owner-credentials
+  control**: the config key `owner_console_auth` (default `true`, fail-closed
+  parse — only the literal JSON boolean `false` turns the console session gate
+  off; absent, `null`, `0` and `"no"` all leave authentication REQUIRED). It
+  governs the browser session only — it must never weaken the machine key or
+  the model client key boundaries, and a machine key must never be able to flip
+  it. Details and risk: `docs/OWNER_AUTH.md`, `docs/TRUSTED_LAN_ADMIN_MODE.md`.
 - Preserve forwarded-header rejection and canonical `Host`/`Origin` checks.
   Cross-site browser mutations must still be refused; do not invent a
   proxy-trust model.

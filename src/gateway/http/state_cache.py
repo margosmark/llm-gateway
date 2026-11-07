@@ -34,8 +34,13 @@ circuits              structural digest of ``details()`` with the two
                       re-renders immediately, while a countdown ticking
                       down does not evict the cache every second
 limits                digest of ``LimitStore.all()``
-request               query string, surface, and the mutation/credential
-                      verdicts derived from the request
+request               query string, surface, the mutation/credential
+                      verdicts derived from the request, and the owner
+                      username the render would print - the last one only
+                      became observable when ``owner_console_auth=false``
+                      served a signed-in and an anonymous request with
+                      identical verdicts, so without it the cached body
+                      could hand one identity to the other
 release identity      the **result** of ``release_identity()`` - a plain
                       five-key dict (four strings plus the integer
                       ``mcp_contract_version``). The function re-reads
@@ -183,7 +188,8 @@ class StateCache:
                 for key, detail in sorted(circuit_details.items())
             }],
             ["limits", app.limits.all()],
-            ["request", [request.raw_query, app._surface(request), app._can_mutate(request), app._can_enroll_credentials(request)]],
+            ["request", [request.raw_query, app._surface(request), app._can_mutate(request), app._can_enroll_credentials(request),
+                         request.context.get("owner_username")]],
             # Owner-auth mutations (a client key set/rotated/cleared, a
             # password change, a session issued or revoked) change what the
             # snapshot reports, so the store's revision is part of the key.

@@ -632,6 +632,16 @@ class GatewayConfig:
     revision: int = 0
     initialized: bool = False
     access_mode: str = ACCESS_LAN_NOAUTH
+    #: Owner-console session gate (the ``owner_console_auth`` config key).
+    #: ``True`` - the default - means every ``/owner`` route demands a
+    #: signed-in owner session. ``False`` opts out: the console serves the
+    #: owner without a session. The parse is deliberately fail-closed
+    #: (``from_dict``): only the literal JSON ``false`` disables the gate,
+    #: so an absent key, ``null``, ``0``, ``"no"`` or any other value
+    #: leaves authentication REQUIRED instead of opening the console by
+    #: accident. This flag governs the browser session only - it never
+    #: touches the machine key or the model client key.
+    owner_console_auth: bool = True
     providers: dict[str, ProviderState] = field(default_factory=dict)
     aliases: dict[str, Alias] = field(default_factory=dict)
     profiles: dict[str, Profile] = field(default_factory=dict)
@@ -642,6 +652,7 @@ class GatewayConfig:
             "revision": self.revision,
             "initialized": self.initialized,
             "access_mode": self.access_mode,
+            "owner_console_auth": self.owner_console_auth,
             "providers": {key: value.to_dict() for key, value in sorted(self.providers.items())},
             "aliases": {key: value.to_dict() for key, value in sorted(self.aliases.items())},
             "profiles": {key: value.to_dict() for key, value in sorted(self.profiles.items())},
@@ -678,10 +689,19 @@ class GatewayConfig:
             access_mode = ACCESS_LAN_NOAUTH
         settings = data.get("settings")
         revision = data.get("revision")
+        # ``owner_console_auth`` parses fail-closed: the console session
+        # gate stays REQUIRED unless the stored value is the literal
+        # boolean ``false``. Absent, ``null``, ``0``, ``"no"``, ``1`` or a
+        # nested object all mean "authentication required", and this line
+        # cannot raise - a parse error must never be able to skip the
+        # gate (``is not False`` is an identity test on purpose: truthy
+        # coercion would let ``0`` and ``"no"`` through as "disabled").
+        owner_console_auth = data.get("owner_console_auth")
         return cls(
             revision=revision if isinstance(revision, int) and revision >= 0 else 0,
             initialized=bool(data.get("initialized", False)),
             access_mode=access_mode,
+            owner_console_auth=owner_console_auth is not False,
             providers=providers,
             aliases=aliases,
             profiles=profiles,

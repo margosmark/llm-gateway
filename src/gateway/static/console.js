@@ -38,6 +38,12 @@
   var STALE_AFTER_MS = 60000;
   var lastFetchAt = null;
   var refreshUnavailable = false;
+  // The owner-console session gate (config key owner_console_auth), as the
+  // server's pre-auth probe reported it at bootstrap. "disabled" means no
+  // sign-in is required: the console must never render a login view, and
+  // must never claim a session it did not establish - the mode and the
+  // session are separate facts, which is why the probe sends both.
+  var consoleAuthMode = "enabled";
 
   // --- tiny helpers -----------------------------------------------------
 
@@ -265,8 +271,37 @@
 
   // The two boundaries, stated plainly and separately: the console needs an
   // owner sign-in; the model API is keyless unless a client key is set.
+  //
+  // The first boundary has an owner-set opt-out (owner_console_auth). When
+  // it is off, the console says so loudly instead of pretending the sign-in
+  // that never happened exists.
+  function consoleAuthDisabled() {
+    if (state && state.console_auth) return state.console_auth === "disabled";
+    return consoleAuthMode === "disabled";
+  }
+
+  // What the bootstrap does with the server's own pre-auth answer: the shell
+  // when a session exists OR the session gate is off, the sign-in view only
+  // when a session is actually required and actually absent. Pure so a test
+  // can drive all four combinations without a browser.
+  function authViewDecision(session) {
+    session = session || {};
+    if (session.console_auth === "disabled") return "shell";
+    if (session.authenticated) return "shell";
+    return "auth";
+  }
+
   function accessNotice() {
     var key = clientKeyState();
+    if (consoleAuthDisabled()) {
+      return "Owner console sign-in is OFF (owner_console_auth=false): every device that " +
+        "can reach this listener is an administrator, including you. " +
+        (key.enabled
+          ? "The model API still requires the client API key" + (key.display_id ? " (id " + key.display_id + ")" : "") +
+            ", sent as an Authorization: Bearer header."
+          : "The model API is keyless by default — any device on the LAN can call /v1 until you set a client API key in Settings → Access.") +
+        " See docs/OWNER_AUTH.md to turn sign-in back on.";
+    }
     if (key.enabled) {
       return "Owner sign-in protects this console (signed in as " + ownerName() + "). " +
         "The model API requires the client API key" + (key.display_id ? " (id " + key.display_id + ")" : "") +
@@ -281,7 +316,13 @@
     api(BASE + "/api/auth/logout", { method: "POST", body: {} })
       .then(function () {
         state = null;
+        // With the session gate off there is no sign-in view to fall back
+        // to: the shell is served without a session, so redraw that.
+        if (consoleAuthDisabled()) {
+          return refresh();
+        }
         renderAuthView({ authenticated: false });
+        return null;
       })
       .catch(function (error) {
         toast(error.message || "sign-out failed", "bad");
@@ -322,11 +363,29 @@
     header.appendChild(nav);
     header.appendChild(el("span", { class: "spacer" }));
     if (state) {
-      header.appendChild(el("span", { class: "pill warn", text: "signed in as " + ownerName() }));
+      var sessionUser = state.owner && state.owner.username;
+      // With the session gate off and no session on this request, there is
+      // nobody to be "signed in as": the header says what is true instead
+      // of inventing an identity (the sign-in view is skipped for the same
+      // reason - see authViewDecision).
+      if (consoleAuthDisabled() && !sessionUser) {
+        header.appendChild(el("span", { class: "pill bad", text: "console sign-in is OFF" }));
+      } else {
+        header.appendChild(el("span", { class: "pill warn", text: "signed in as " + ownerName() }));
+      }
       header.appendChild(el("span", { class: "small muted", text: "rev " + state.revision }));
-      header.appendChild(el("button", { type: "button", text: "Sign out", onclick: signOut }));
+      if (!(consoleAuthDisabled() && !sessionUser)) {
+        header.appendChild(el("button", { type: "button", text: "Sign out", onclick: signOut }));
+      }
     }
     app.appendChild(header);
+    if (consoleAuthDisabled()) {
+      // Persistent and unmistakable, on every tab: a silently-open admin
+      // console is the failure this flag creates, so the console states
+      // the mode where the owner cannot miss it.
+      app.appendChild(el("aside", { class: "notice bad", role: "alert", text:
+        "OWNER CONSOLE SIGN-IN IS OFF (owner_console_auth=false). Anyone who can reach this listener can change configuration, mint credentials and read every owner surface. See docs/OWNER_AUTH.md to turn sign-in back on." }));
+    }
     app.appendChild(el("aside", { class: "card", role: "note", text: accessNotice() }));
     (state && state.fallback_policy_warnings || []).forEach(function (warning) {
       app.appendChild(el("aside", { class: "card warn", role: "alert", text: "Policy gap: " + warning }));
@@ -3697,8 +3756,15 @@
     // sign-in and the normal shell from the server's own answer, never
     // from a client-side guess about whether an account exists.
     api(BASE + "/api/auth/session").then(function (session) {
-      if (session && session.authenticated) return refresh();
-      renderAuthView(session || {});
+      session = session || {};
+      // The mode and the session are separate facts. Record the mode first
+      // so every later render knows whether sign-in is required, then let
+      // the server's own answer decide between the shell and sign-in: no
+      // login view when the gate is off, no shell without a session when
+      // it is on.
+      consoleAuthMode = session.console_auth === "disabled" ? "disabled" : "enabled";
+      if (authViewDecision(session) === "shell") return refresh();
+      renderAuthView(session);
       return null;
     }).catch(function (error) {
       renderAuthView({ error: error.message || "cannot reach the gateway" });
@@ -3941,6 +4007,32 @@
           state = previousState;
           leaderboardPayload = previousPayload;
           leaderboardPhase = previousPhase;
+        }
+      },
+      authViewDecisionForTest: function (session) {
+        // The bootstrap's own decision, driven with a fixture pre-auth
+        // probe answer: "shell" or "auth", never a client-side guess.
+        return authViewDecision(session);
+      },
+      renderShellForTest: function (view) {
+        // The persistent chrome - header pill, the mode banner, the access
+        // notice - against a fixture state, so a test can assert what every
+        // tab shows while the console session gate is off.
+        var previousState = state;
+        var previousApp = app;
+        var previousTab = tab;
+        var previousMode = consoleAuthMode;
+        state = view;
+        tab = "status";
+        app = document.createElement("div");
+        try {
+          renderShell();
+          return app;
+        } finally {
+          state = previousState;
+          app = previousApp;
+          tab = previousTab;
+          consoleAuthMode = previousMode;
         }
       }
     };
