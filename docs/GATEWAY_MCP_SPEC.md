@@ -192,7 +192,11 @@ presence-only check cannot see, and it counts.
   before this rule existed still compares like-for-like). The window
   *edges* - `window.from`/`to`, `first_row_ts`, `series[*].day`,
   `cells[*].day`, `generated_at` - are values, not path segments, and a
-  `key-path -> type` map already records them as a stable `str`. Without
+  `key-path -> type` map records each of them as one fixed type instead of
+  a calendar-bearing path segment: `str` for the populated fields, while
+  the committed baseline (captured on an empty ledger) records
+  `generated_at` as `NoneType` and carries no `first_row_ts` key at all,
+  because its `coverage` container is `None`. Without
   this the committed baseline went stale at every UTC midnight and the
   guard failed on the calendar instead of on a change: a guard that fails
   on the calendar is a guard that gets waived, and a waived guard is a

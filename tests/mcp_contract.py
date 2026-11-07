@@ -63,8 +63,11 @@ GATED_FAMILIES: dict[str, str] = {
 # The window edges themselves - ``analytics.window.from``/``to``,
 # ``leaderboard.window.from``, ``first_row_ts``, ``series[*].day``,
 # ``cells[*].day``, ``generated_at`` - are **values**, not path segments, so
-# a key-path -> type map already records them as a stable ``str`` and they
-# cannot roll; the rules below are written against the segment, not against
+# a key-path -> type map records each as one fixed type - ``str`` for the
+# populated fields, ``NoneType`` for the empty ones in the committed
+# baseline (captured on an empty ledger, where ``first_row_ts`` is absent
+# with its ``coverage`` container) - and they cannot roll; the rules below
+# are written against the segment, not against
 # the ``analytics.usage`` name, so a sibling date-keyed family (a monthly
 # bucket, a per-day rollup keyed by ISO timestamp) is covered without
 # anyone having to know its name.
