@@ -59,6 +59,76 @@ One username/password account. It protects `GET /owner/` and every
   cookie-carrying browser mutation still faces the exact-Origin check
   before the session is consulted.
 
+### Turning console sign-in off (`owner_console_auth`)
+
+Console sign-in is an **owner-credentials control with an explicit,
+default-ON opt-out**. The config key `owner_console_auth` (boolean) is
+read alongside the rest of the gateway config:
+
+| stored value | behaviour |
+|---|---|
+| absent | auth **REQUIRED** — fail-closed |
+| `null`, `0`, `1`, `"no"`, `"false"`, `""`, a list or object | auth **REQUIRED** — fail-closed parse |
+| `true` | auth required (the default: today's behaviour, byte-for-byte) |
+| `false` | console auth off: every `/owner` route serves the owner without a session |
+
+Only the literal JSON boolean `false` disables the gate. The parse in
+`GatewayConfig.from_dict` is an identity test (`is not False`) and cannot
+raise, so a typo, a missing key, a `null` or a drifted default can never
+open the console by accident — the failure this flag would otherwise be
+perfect at creating.
+
+**What changes when it is off**
+
+- `GET /owner/api/auth/session` keeps reporting **session truth** —
+  `authenticated` stays `false` when no cookie was presented — and adds
+  `console_auth: "disabled"`, which is what the console uses to skip the
+  login view instead of being handed a session it never established.
+- `GET /owner/api/state` carries `console_auth: "disabled"` and replaces
+  the canned `access_mode_description` with an explicit warning. The
+  default (auth-required) body is unchanged byte for byte: no extra key
+  and no `mcp_contract_version` bump, because `gateway-owner-mcp` pins
+  that version by exact equality.
+- The console shows a persistent `OWNER CONSOLE SIGN-IN IS OFF` alert on
+  every tab and a `console sign-in is OFF` header pill; a request with no
+  cookie claims no identity (`owner.username` is `null`), while a real
+  cookie still reports the real username.
+- Owner mutations are authorised without a cookie (`can_mutate: true`).
+
+**What does not change — the fence**
+
+- **Machine key:** `/owner/api/machine-keys` stays human-session-only, an
+  unknown or read-scoped key is still refused, a write-scoped key still
+  writes, and a machine key can never flip this flag
+  (`403 machine_key_forbidden`). The flag governs the browser session
+  only.
+- **Model client key:** `/v1` still requires the client API key when one
+  is set, in both states — proven identically in
+  `tests/test_owner_console_auth_flag.py`.
+- Route table, `Host`/`Origin`/forwarded-header checks and every leak
+  invariant: no password hash, setup code, machine-key material or
+  session token appears in any response in either state.
+
+**Turning it back on.** While signed in, `POST /owner/api/settings` with
+`{"action": "owner_console_auth", "required": true}` takes effect on the
+next request. The config key itself works too, but `ConfigStore` reads
+the file once at startup, so a hand edit needs a restart to be seen.
+With the gate off that endpoint is reachable without
+a session *by design* — that is the mode — and the only value that
+changes how much protection exists is the re-arm, which is fail-safe: it
+always closes the console, never opens it. `required` must be a real
+boolean; `"false"`, `0` and `null` are refused with `400 invalid_setting`
+and change nothing.
+
+**Risk — read this before turning it off.** With `owner_console_auth=false`
+every device that can reach the listener is an administrator of the
+console: it can change configuration, mint and revoke machine keys, and
+read every owner surface. The console and `/owner/api/state` both say so
+persistently so the state cannot be forgotten. Password change is
+identity-bound and still needs a real session; if you are locked out
+while the gate is off, use `python -m gateway --reset-owner-password`
+on the gateway host (next section).
+
 ### Local recovery (forgotten password)
 
 ```sh
