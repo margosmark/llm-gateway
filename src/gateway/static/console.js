@@ -3422,13 +3422,15 @@
     });
   }
 
-  function field(id, label, type, value) {
+  function field(id, label, type, value, ac) {
     return el("label", {}, [
       el("span", { text: label }),
       // value is opt-in: only a field that has a value to restore passes one,
       // so a fresh render still starts empty.
+      // ac is opt-in too: credential fields pass a static autocomplete token,
+      // everything else keeps the default "off".
       el("input", {
-        id: id, type: type, autocomplete: "off",
+        id: id, type: type, autocomplete: ac || "off",
         value: value === undefined || value === null ? null : String(value)
       })
     ]);
@@ -3571,9 +3573,9 @@
         el("h3", { text: "Owner account" }),
         el("dl", { class: "kv" }, accountRows),
         el("div", { class: "row" }, [
-          field("password-current", "Current password", "password"),
-          field("password-next", "New password", "password"),
-          field("password-confirm", "Repeat new password", "password")
+          field("password-current", "Current password", "password", undefined, "current-password"),
+          field("password-next", "New password", "password", undefined, "new-password"),
+          field("password-confirm", "Repeat new password", "password", undefined, "new-password")
         ]),
         el("button", { type: "button", text: "Change password", onclick: changePassword }),
         el("h3", { text: "Model client API key" }),
@@ -3827,9 +3829,13 @@
       : "Owner sign-in for the console. The model API is a separate boundary: keyless by default, with an optional client API key you can set after signing in." });
     var fields = [];
     if (setupRequired) fields.push(field("setup-code", "One-time setup code", "text"));
-    fields.push(field("auth-username", "Username", "text", session.username || ""));
-    fields.push(field("auth-password", "Password", "password"));
-    if (setupRequired) fields.push(field("auth-password2", "Repeat password", "password"));
+    fields.push(field("auth-username", "Username", "text", session.username || "", "username"));
+    // Same id serves both modes: sign-in fills an existing password,
+    // first-run setup creates a new one. Static literal either way.
+    fields.push(setupRequired
+      ? field("auth-password", "Password", "password", undefined, "new-password")
+      : field("auth-password", "Password", "password", undefined, "current-password"));
+    if (setupRequired) fields.push(field("auth-password2", "Repeat password", "password", undefined, "new-password"));
     var children = [];
     // Stacked, label above, full width: two cramped columns at 420px was
     // the measured failure of the old row layout.
