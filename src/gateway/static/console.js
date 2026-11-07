@@ -82,6 +82,15 @@
           var serverError = data && data.error;
           var message = (serverError && serverError.message) || ("request failed: " + response.status);
           if (serverError && serverError.field) message += " (field: " + serverError.field + ")";
+          // A 429 carries its wait only in Retry-After; the owner is told to
+          // wait, so the number belongs in the message. Parsed, never echoed
+          // as free text, so a stubbed header can never leak into a message.
+          if (response.status === 429 && response.headers && response.headers.get) {
+            var retryAfter = response.headers.get("retry-after");
+            if (retryAfter && /^\d+$/.test(String(retryAfter))) {
+              message += " — retry in " + String(retryAfter) + "s";
+            }
+          }
           var err = new Error(message);
           err.payload = data;
           throw err;
@@ -91,10 +100,12 @@
     });
   }
 
+  // The toast is the console's feedback channel, so it is a live region:
+  // appended outside #app, it must still announce (WCAG 4.1.3).
   function toast(message, kind) {
     var host = document.getElementById("toast");
     if (!host) {
-      host = el("div", { id: "toast" });
+      host = el("div", { id: "toast", role: "status", "aria-live": "polite", "aria-atomic": "false" });
       document.body.appendChild(host);
     }
     var node = el("div", { class: "msg " + (kind || "") }, [message]);
@@ -102,9 +113,21 @@
     setTimeout(function () { node.remove(); }, kind === "bad" ? 9000 : 5000);
   }
 
+  function setBusy(flag) {
+    busy = flag;
+    if (!document.body) return;
+    if (flag) document.body.setAttribute("aria-busy", "true");
+    else document.body.removeAttribute("aria-busy");
+  }
+
   function run(promise, successMessage) {
-    if (busy) return Promise.resolve();
-    busy = true;
+    if (busy) {
+      // A dropped click has to say so: no request is sent, and the owner
+      // learns the previous one is still in flight.
+      toast("Still working on the previous action — nothing new was sent.", "warn");
+      return Promise.resolve();
+    }
+    setBusy(true);
     return promise
       .then(function (result) {
         if (successMessage) toast(successMessage, "ok");
@@ -114,15 +137,23 @@
         toast(error.message || "something went wrong", "bad");
         throw error;
       })
-      .finally(function () { busy = false; });
+      .finally(function () { setBusy(false); });
   }
 
   // --- formatting -------------------------------------------------------
 
+  // Dates arrive in two shapes: ISO strings (fixture/tests) and epoch
+  // seconds from /owner/api/machine-keys. A bare number below 1e12 is
+  // seconds, not milliseconds — feeding it to new Date() is what painted
+  // 1/21/1970 on every key's "Last used".
   function when(value) {
     if (!value) return "Unknown";
     try {
-      return new Date(value).toLocaleString();
+      var stamp = value;
+      if (typeof value === "number" && value < 1e12) stamp = value * 1000;
+      var date = new Date(stamp);
+      if (isNaN(date.getTime())) return value;
+      return date.toLocaleString();
     } catch (e) {
       return value;
     }
@@ -328,19 +359,61 @@
     }
     app.appendChild(header);
     app.appendChild(el("aside", { class: "card", role: "note", text: accessNotice() }));
-    (state && state.fallback_policy_warnings || []).forEach(function (warning) {
-      app.appendChild(el("aside", { class: "card warn", role: "alert", text: "Policy gap: " + warning }));
-    });
+    // One grouped, single-announcement card instead of one role=alert card
+    // per gap: six gaps used to be six live-region announcements per redraw.
+    var gaps = (state && state.fallback_policy_warnings) || [];
+    if (gaps.length) {
+      var gapList = el("ul");
+      gaps.forEach(function (warning) { gapList.appendChild(el("li", { text: String(warning) })); });
+      app.appendChild(el("aside", {
+        class: "card warn policy-gaps",
+        role: "alert",
+        "aria-label": "Policy gaps"
+      }, [
+        el("strong", { text: "Policy gap: " + (gaps.length === 1 ? "1 open gap" : gaps.length + " open gaps") }),
+        gapList
+      ]));
+    }
 
     var main = el("main", { id: "main" });
     app.appendChild(main);
   }
 
+  // A redraw rebuilds the whole DOM, so without this the focused element
+  // falls back to <body> after every save, mint or tab switch and the next
+  // Tab starts again from the top of the document. The key is the element's
+  // id where it has one, otherwise its tag plus its visible label.
+  function focusKeyOf(node) {
+    if (!node || node === document.body) return null;
+    var id = node.id || (node.getAttribute && node.getAttribute("id"));
+    if (id) return { id: String(id) };
+    var tag = node.tag || node.tagName;
+    var text = String(node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    if (!tag || !text) return null;
+    return { tag: String(tag).toLowerCase(), text: text };
+  }
+
+  function restoreFocus(key) {
+    if (!key || !document) return;
+    var target = null;
+    if (key.id && document.getElementById) target = document.getElementById(key.id);
+    if (!target && key.tag && document.querySelectorAll) {
+      var nodes = document.querySelectorAll(key.tag);
+      Array.prototype.forEach.call(nodes, function (node) {
+        if (target) return;
+        if (focusKeyOf(node) && focusKeyOf(node).text === key.text) target = node;
+      });
+    }
+    if (target && typeof target.focus === "function") target.focus();
+  }
+
   function draw() {
+    var focusKey = focusKeyOf(document.activeElement);
     renderShell();
     var main = document.getElementById("main");
     if (!state) {
       main.appendChild(el("p", { class: "muted", text: "Loading…" }));
+      restoreFocus(focusKey);
       return;
     }
 
@@ -354,6 +427,7 @@
       backup: renderBackup
     }[tab] || renderStatus;
     main.appendChild(renderer());
+    restoreFocus(focusKey);
   }
 
 
@@ -362,10 +436,15 @@
   function renderStatus() {
     var frag = document.createDocumentFragment();
     var aliases = Array.isArray(state.aliases) ? state.aliases.filter(function (alias) { return alias.enabled; }) : [];
+    // The empty-state sentence lives once, in routingHealthSummary() below;
+    // this header line only points at what to do next.
+    var healthIntro = aliases.length
+      ? "Read-only view of published aliases and their configured fallback policy."
+      : "Nothing published yet — create and publish an alias in Models & Routes and its routing health appears here.";
     var health = el("section", { class: "routing-health", "aria-labelledby": "routing-health-title" }, [
       el("div", { class: "card" }, [
         el("h2", { id: "routing-health-title", text: "Operate now · Routing health" }),
-        el("p", { class: "small muted", text: aliases.length ? "Read-only view of published aliases and their configured fallback policy." : "No published aliases yet. Configure and publish an alias to see routing health." }),
+        el("p", { class: "small muted", text: healthIntro }),
         routingHealthSummary(aliases)
       ])
     ]);
@@ -1101,6 +1180,9 @@
       // single-entry clear for the wildcard circuit).
       var clearButton = el("button", {
         type: "button", text: "Clear",
+        // Two rows both say "Clear": the accessible name names the target.
+        "aria-label": "Clear the cooldown on " + providerLabel(entry.provider) +
+          (providerWide ? " (whole provider)" : " → " + (entry.model || key)),
         onclick: function () {
           var body = providerWide
             ? { action: "clear_cooldowns", provider_id: entry.provider, scope: "provider" }
@@ -1135,6 +1217,8 @@
     card.appendChild(el("div", { class: "small" }, [
       el("button", {
         type: "button", text: "Clear all cooldowns",
+        class: "danger",
+        "aria-label": "Clear all " + keys.length + " local cooldowns",
         onclick: function () {
           clearCooldowns(
             { action: "clear_cooldowns", scope: "all" },
@@ -1688,7 +1772,8 @@
 
   function renderLeaderboard() {
     var frag = document.createDocumentFragment();
-    var header = el("div", { class: "card" }, [el("h2", { text: "Model leaderboard" })]);
+    // Tab title, not a second copy of the ranking card's "Model leaderboard".
+    var header = el("div", { class: "card" }, [el("h2", { text: "Leaderboard" })]);
     var selector = el("select", {
       "aria-label": "Leaderboard window (UTC days)",
       onchange: function () {
@@ -1774,7 +1859,7 @@
         el("div", { class: "narrow" }, [statePill(provider.state)]),
         el("div", { class: "narrow" }, [
           el("button", {
-            type: "button", text: "Test connection",
+            type: "button", class: "secondary", text: "Test connection",
             onclick: function () {
               run(api(BASE + "/api/provider", { method: "POST", body: { action: "test", provider_id: provider.provider_id } }))
                 .then(function (result) {
@@ -1787,7 +1872,7 @@
         ]),
         el("div", { class: "narrow" }, [
           el("button", {
-            type: "button", text: "Refresh model catalog",
+            type: "button", class: "secondary", text: "Refresh model catalog",
             onclick: function () {
               run(api(BASE + "/api/provider", { method: "POST", body: { action: "refresh", provider_id: provider.provider_id } }))
                 .then(function (result) {
@@ -1800,7 +1885,7 @@
         ]),
         el("div", { class: "narrow" }, [
           el("button", {
-            type: "button", text: "Clear cooldowns",
+            type: "button", class: "danger", text: "Clear cooldowns",
             onclick: function () {
               // A deliberate recovery action: the owner confirms the
               // subscription/reset window is open before the local
@@ -1834,6 +1919,8 @@
       })
     ]);
 
+    // Scan structure: everything under this label enrols or tests a credential.
+    card.appendChild(el("div", { class: "eyebrow", text: "Credential" }));
     if (provider.provider_id === "chatgpt_codex") {
       card.appendChild(renderDeviceCode(provider));
     } else if (isLocalProvider(provider.provider_id)) {
@@ -1891,7 +1978,7 @@
     }
 
     var saveButton = el("button", {
-      class: "primary", type: "button", text: "Save limit",
+      class: "secondary", type: "button", text: "Save limit",
       onclick: function () {
         var raw = String(input.value || "").trim();
         if (raw === "") { save(null); return; }
@@ -1964,7 +2051,7 @@
     var input = el("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "http://127.0.0.1:11434" });
     input.value = provider.base_url || "";
     var save = el("button", {
-      class: "primary", type: "button", text: "Save endpoint",
+      class: "secondary", type: "button", text: "Save endpoint",
       onclick: function () {
         var url = input.value.trim();
         run(api(BASE + "/api/provider", { method: "POST", body: { action: "set_base_url", provider_id: provider.provider_id, base_url: url } }))
@@ -2028,7 +2115,9 @@
       ])
     ]);
     var block = el("div", {}, [
-      el("h3", { text: heading || "Connect OpenCode Go" }),
+      // The form must name the provider whose key is being pasted: the old
+      // fallback titled every unlabelled card "Connect OpenCode Go".
+      el("h3", { text: heading || ("Connect " + providerLabel(provider.provider_id)) }),
       el("p", { class: "small muted", text: "The key is stored in an owner-only credential store, separately from any other provider, and is never displayed again." }),
       wrap
     ]);
@@ -2160,6 +2249,12 @@
     // unregistered pair is policy, not a malfunction.
     var registryLine = el("p", { class: "small muted" });
     panel.appendChild(registryLine);
+    // Numbered flow on the only surface that spends money: evidence first,
+    // authorisation second. The evidence region wears the cool rule.
+    panel.appendChild(el("div", { class: "step-label" }, [
+      el("span", { class: "step-no", text: "1" }),
+      el("span", { class: "small muted", text: "Evidence" })
+    ]));
     var evidence = el("div", { class: "capability-evidence", role: "status", "aria-live": "polite" });
     panel.appendChild(evidence);
     api(readUrl).then(function (data) {
@@ -2236,6 +2331,10 @@
 
     function renderAuthorisationPrompt() {
       authHost.textContent = "";
+      authHost.appendChild(el("div", { class: "step-label" }, [
+        el("span", { class: "step-no", text: "2" }),
+        el("span", { class: "small muted", text: "Authorise" })
+      ]));
       authHost.appendChild(el("h4", { text: "Authorise a paid probe run" }));
       authHost.appendChild(el("p", { class: "small", text: "Probes are paid inference requests sent to the configured OpenCode Go account for " + target.provider_id + " / " + target.model_id + ", billed through that account as the billing route. OpenCode Go publishes no request-level max-charge control, so no hard dollar ceiling can be enforced: the price shown is a worst-case estimate for this exact run, not a cap. The spend ceiling below bounds the estimate the gateway will accept before sending — it is not a provider-enforced limit." }));
       var ceilingInput = el("input", { type: "number", min: "0.01", step: "any", value: "0.1" });
@@ -3219,10 +3318,35 @@
       importInput,
       el("button", { type: "button", text: "Validate and import", onclick: function () {
         if (!importInput.files || !importInput.files[0]) { toast("Choose a backup JSON file first", "bad"); return; }
-        importInput.files[0].text().then(function (text) { return JSON.parse(text); }).then(function (payload) {
-          return api(BASE + "/api/backup/import", { method: "POST", body: payload });
-        }).then(function () { return refresh(); }).then(function () { toast("Configuration imported", "ok"); draw(); })
-          .catch(function (error) { toast(error.message || "Invalid backup", "bad"); });
+        importInput.files[0].text().then(function (text) {
+          // Parse before anything else: a JSON typo is refused here, never
+          // POSTed, and never shown as a raw engine SyntaxError.
+          var payload;
+          try {
+            payload = JSON.parse(text);
+          } catch (parseError) {
+            toast("That file is not valid JSON (" +
+              (parseError && parseError.message ? parseError.message : "parse failed") +
+              "). Nothing was imported.", "bad");
+            return null;
+          }
+          if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            toast("That file is not a gateway configuration object. Nothing was imported.", "bad");
+            return null;
+          }
+          // Import replaces the configuration wholesale, so it confirms like
+          // every other destructive write in this console.
+          var confirmed = global.confirm(
+            "Import this configuration backup?\n\n" +
+            "The import replaces the current configuration with this file's contents. " +
+            "Credentials are not part of the export and are left untouched.\n\n" +
+            "Only continue once you have checked what the file contains."
+          );
+          if (!confirmed) return null;
+          return api(BASE + "/api/backup/import", { method: "POST", body: payload })
+            .then(function () { return refresh(); })
+            .then(function () { toast("Configuration imported", "ok"); draw(); });
+        }).catch(function (error) { toast(error.message || "Invalid backup", "bad"); });
       } }),
       el("label", { class: "small", text: "Scheduled snapshot interval (stored in the state volume)" }),
       intervalSelect,
@@ -3298,10 +3422,15 @@
     });
   }
 
-  function field(id, label, type) {
+  function field(id, label, type, value) {
     return el("label", {}, [
       el("span", { text: label }),
-      el("input", { id: id, type: type, autocomplete: "off" })
+      // value is opt-in: only a field that has a value to restore passes one,
+      // so a fresh render still starts empty.
+      el("input", {
+        id: id, type: type, autocomplete: "off",
+        value: value === undefined || value === null ? null : String(value)
+      })
     ]);
   }
 
@@ -3499,7 +3628,12 @@
         machineKeys.reveal = (result && result.machine_key) || null;
         return fetchMachineKeys();
       })
-      .catch(function (error) { toast(error.message || "could not create the key", "bad"); });
+      .then(function () {
+        // The one-time reveal is on screen now: focus its Copy button
+        // instead of leaving focus on <body> at the top of the page.
+        var copy = document.getElementById("machine-key-copy");
+        if (copy && typeof copy.focus === "function") copy.focus();
+      })      .catch(function (error) { toast(error.message || "could not create the key", "bad"); });
   }
 
   function rotateMachineKey(row) {
@@ -3514,7 +3648,12 @@
         machineKeys.reveal = (result && result.machine_key) || null;
         return fetchMachineKeys();
       })
-      .catch(function (error) { toast(error.message || "could not rotate the key", "bad"); });
+      .then(function () {
+        // The one-time reveal is on screen now: focus its Copy button
+        // instead of leaving focus on <body> at the top of the page.
+        var copy = document.getElementById("machine-key-copy");
+        if (copy && typeof copy.focus === "function") copy.focus();
+      })      .catch(function (error) { toast(error.message || "could not rotate the key", "bad"); });
   }
 
   function revokeMachineKey(row) {
@@ -3564,7 +3703,7 @@
         value: String(reveal.key || "")
       }),
       el("div", { class: "row" }, [
-        el("button", { type: "button", text: "Copy key", onclick: copyMachineKeyReveal }),
+        el("button", { id: "machine-key-copy", type: "button", text: "Copy key", onclick: copyMachineKeyReveal }),
         el("button", {
           type: "button",
           text: "I have stored it",
@@ -3681,19 +3820,28 @@
   function buildAuthView(session) {
     session = session || {};
     var setupRequired = !!session.setup_required;
-    var children = [];
-    children.push(el("aside", { class: "card", role: "note", text: setupRequired
+    // Banner first (the console's honesty signature), then the sign-in card
+    // on the same grid as the interior screens.
+    var banner = el("aside", { class: "card", role: "note", text: setupRequired
       ? "First-run setup: the one-time setup code is printed by the gateway at startup and kept in the owner_setup_code file on the gateway host. It is single-use and never shown in this console."
-      : "Owner sign-in for the console. The model API is a separate boundary: keyless by default, with an optional client API key you can set after signing in." }));
-    if (session.error) {
-      children.push(el("p", { class: "small bad", text: String(session.error) }));
-    }
+      : "Owner sign-in for the console. The model API is a separate boundary: keyless by default, with an optional client API key you can set after signing in." });
     var fields = [];
     if (setupRequired) fields.push(field("setup-code", "One-time setup code", "text"));
-    fields.push(field("auth-username", "Username", "text"));
+    fields.push(field("auth-username", "Username", "text", session.username || ""));
     fields.push(field("auth-password", "Password", "password"));
     if (setupRequired) fields.push(field("auth-password2", "Repeat password", "password"));
-    children.push(el("div", { class: "row" }, fields));
+    var children = [];
+    // Stacked, label above, full width: two cramped columns at 420px was
+    // the measured failure of the old row layout.
+    children.push(el("div", { class: "auth-fields" }, fields));
+    // One reserved alert line under the fields: the server's own reason
+    // lands here without shoving the button around. Never a client guess.
+    children.push(el("p", {
+      id: "auth-error",
+      class: "auth-error",
+      role: "alert",
+      text: session.error ? String(session.error) : ""
+    }));
     children.push(el("button", {
       type: "button",
       class: "primary",
@@ -3701,7 +3849,14 @@
       onclick: submitAuthView
     }));
     var card = [el("h2", { text: setupRequired ? "Set up the owner account" : "Owner sign-in" })].concat(children);
-    return el("main", {}, [el("div", { class: "card" }, card)]);
+    return el("main", { class: "auth" }, [
+      el("div", { class: "login-head" }, [
+        el("h1", { class: "login-title", text: "Personal LLM Gateway" }),
+        el("span", { class: "login-tag", text: "owner console" })
+      ]),
+      banner,
+      el("div", { class: "card auth-card" + (session.error ? " has-error" : "") }, card)
+    ]);
   }
 
   function renderAuthView(session) {
@@ -3709,6 +3864,13 @@
     if (!app) return;
     app.innerHTML = "";
     app.appendChild(buildAuthView(authSession));
+    // A failed attempt re-renders the view: focus must land back in the
+    // form, not on <body>.
+    if (authSession.error) {
+      var password = document.getElementById("auth-password");
+      var target = password || document.getElementById("auth-username");
+      if (target && typeof target.focus === "function") target.focus();
+    }
   }
 
   function submitAuthView() {
@@ -3729,7 +3891,7 @@
       path = BASE + "/api/auth/login";
       body = { username: username, password: password };
     }
-    busy = true;
+    setBusy(true);
     api(path, { method: "POST", body: body })
       .then(function () {
         authSession = {};
@@ -3737,12 +3899,14 @@
       })
       .catch(function (error) {
         // Show the server's own reason: throttled, wrong setup code, wrong
-        // password - never a client-side guess.
+        // password - never a client-side guess. The typed username is kept
+        // (it is not a secret and it is what the owner just typed); the
+        // password fields are rebuilt empty, as before.
         var payload = error.payload || {};
         var detail = (payload.error && payload.error.message) || error.message || "sign-in failed";
-        renderAuthView({ setup_required: setupRequired, error: detail });
+        renderAuthView({ setup_required: setupRequired, error: detail, username: username });
       })
-      .finally(function () { busy = false; });
+      .finally(function () { setBusy(false); });
   }
 
   // --- bootstrap --------------------------------------------------------
