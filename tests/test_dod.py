@@ -15,7 +15,12 @@ import json
 import unittest
 
 from gateway.config import ModelEntry, ProviderState, RouteRef
-from tests.test_end_to_end import FAKE_PROVIDER, FakeAdapter, GatewayHarness
+from tests.test_end_to_end import (
+    FAKE_PROVIDER,
+    FIXTURE_SOURCE_REVISION,
+    FakeAdapter,
+    GatewayHarness,
+)
 
 
 class DefinitionOfDoneTests(unittest.TestCase):
@@ -172,7 +177,7 @@ class DefinitionOfDoneTests(unittest.TestCase):
             sorted(payload.keys()),
             ["image_revision", "mcp_contract_version", "service", "source_revision", "source_tree"],
         )
-        self.assertEqual(payload["source_revision"], "testcommit")
+        self.assertEqual(payload["source_revision"], FIXTURE_SOURCE_REVISION)
         self.assertTrue(payload["image_revision"].startswith("sha256:"))
 
     # --- fixture ----------------------------------------------------------

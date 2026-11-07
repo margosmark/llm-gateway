@@ -202,6 +202,19 @@ presence-only check cannot see, and it counts.
   windows really move) and
   `test_a_real_field_change_in_any_gated_family_still_goes_red` (add,
   remove and re-type still fail, in each of the four families).
+* **The captured release shape is product code.** `GatewayHarness` does not
+  hand-write the `version`/`state` `release` identity: it boots the app with
+  `gateway.buildinfo.release_identity()` over a controlled release record and
+  mount table, and
+  `test_the_release_payload_is_built_by_product_code` asserts the payloads on
+  the wire equal that builder's output. A key added, dropped or renamed in the
+  builder therefore moves the capture and turns the guard red (proven both
+  ways: a sixth key → RED with "MCP_CONTRACT_VERSION did not (still 1)",
+  restore → GREEN) instead of changing production while the guard stayed
+  green on the fixture's private copy of the keys. `handle_version`'s
+  no-injection fallback - a branch that serves neither under the harness nor
+  in production (`cli` always injects the builder) - is pinned to the same key
+  set by `test_the_version_fallback_carries_the_product_identity_keys`.
 * The guard is proven by mutation on every candidate that touches it: change
   one field of a family → RED; increment the constant → GREEN; restore the
   tree → clean.

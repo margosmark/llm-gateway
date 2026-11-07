@@ -23,6 +23,12 @@ This file is the control that keeps the label honest:
 * ``test_the_constant_is_the_only_source`` - no second literal of the
   constant exists anywhere in ``src/``, and no runtime-writable file
   (``release.json``, the environment) can move it.
+* ``test_the_release_payload_is_built_by_product_code`` - **the fidelity
+  control.** The ``version``/``state`` release shape the guard captures is
+  ``gateway.buildinfo.release_identity()``'s own output, served through a
+  controlled release record and mount table, not a hand-written copy of its
+  keys in the fixture. A key added, dropped or renamed in the product now
+  moves the capture and turns this guard red, instead of shipping unseen.
 
 There is no auto-bump path: nothing in this repository writes
 ``MCP_CONTRACT_VERSION``.
@@ -30,6 +36,7 @@ There is no auto-bump path: nothing in this repository writes
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -314,6 +321,94 @@ class McpContractGuardTests(unittest.TestCase):
         self.assertIsInstance(release, dict)
         assert isinstance(release, dict)
         self.assertEqual(release.get("mcp_contract_version"), MCP_CONTRACT_VERSION)
+
+    # --- fidelity: the captured release shape is product code ------------
+
+    def test_the_release_payload_is_built_by_product_code(self) -> None:
+        """The captured ``version``/``state`` release shape *is* the product's.
+
+        The harness used to inject its own five-key ``release_identity``
+        lambda, so a key added, dropped or renamed in
+        ``gateway.buildinfo.release_identity()`` changed what production
+        serves while ``capture()`` stayed byte-identical and this guard
+        stayed green (t_c40105ba). The fixture now runs the product builder
+        over a controlled release record and mount table; this asserts the
+        payloads on the wire equal that builder's output, so the guard can
+        only ever be green on the product's real shape - and a stub that
+        drifts back into the fixture fails here too.
+        """
+        expected = release_identity(
+            release_path=self.harness.release_path,
+            mountinfo_path=self.harness.mountinfo_path,
+        )
+        status, version, _ = self.harness.request("GET", "/version")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(version, dict)
+        assert isinstance(version, dict)
+        self.assertEqual(version, expected)
+
+        status, state, _ = self.harness.request("GET", "/owner/api/state", auth=True)
+        self.assertEqual(status, 200)
+        self.assertIsInstance(state, dict)
+        assert isinstance(state, dict)
+        self.assertEqual(state.get("release"), expected)
+
+    def test_the_version_fallback_carries_the_product_identity_keys(self) -> None:
+        """``handle_version``'s no-injection fallback keeps product parity.
+
+        That branch never serves under the harness (the fixture always
+        injects the builder) and never in production (``cli`` always passes
+        it), so nothing else notices when its hand-written dict drifts from
+        ``buildinfo.release_identity()`` - mutating it moved nothing in the
+        t_b07f5e09 proof. Its keys are pinned to the product's here; a
+        fallback that simply calls the builder passes by construction.
+        """
+        path = mcp_contract.REPO_ROOT / "src" / "gateway" / "http" / "app.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        handler = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "handle_version"
+            ),
+            None,
+        )
+        self.assertIsNotNone(handler, "handle_version disappeared from gateway/http/app.py")
+        assert isinstance(handler, (ast.FunctionDef, ast.AsyncFunctionDef))
+        assignment = next(
+            (
+                node
+                for node in handler.body
+                if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "identity" for target in node.targets)
+            ),
+            None,
+        )
+        self.assertIsNotNone(assignment, "handle_version no longer binds an identity")
+        assert isinstance(assignment, ast.Assign)
+        value = assignment.value
+        self.assertIsInstance(
+            value,
+            ast.IfExp,
+            "handle_version's identity is no longer an injected-or-fallback expression",
+        )
+        assert isinstance(value, ast.IfExp)
+        fallback = value.orelse
+        if isinstance(fallback, ast.Call):
+            # The fallback calls the builder: parity by construction.
+            name = getattr(fallback.func, "id", None) or getattr(fallback.func, "attr", None)
+            self.assertEqual(name, "release_identity")
+            return
+        self.assertIsInstance(fallback, ast.Dict, "unrecognised handle_version fallback")
+        assert isinstance(fallback, ast.Dict)
+        keys = sorted(
+            key.value
+            for key in fallback.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        )
+        product = sorted(release_identity(release_path=Path("/nonexistent/release.json")))
+        self.assertEqual(keys, product)
 
     # --- the constant cannot move at runtime (AC5) -----------------------
 
