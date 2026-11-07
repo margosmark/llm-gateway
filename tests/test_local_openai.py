@@ -47,7 +47,7 @@ from gateway.http.core import Headers, Request
 from gateway.http.security import SecurityPolicy, build_allowed_hosts, build_canonical_origins
 from gateway.logging import RequestLogger
 from gateway.observability import LimitStore, RequestLedger
-from tests.local_fixture import SYNTHETIC_TOKEN, ClosedPort, LocalFixture
+from tests.local_fixture import DEFAULT_SHOW, SYNTHETIC_TOKEN, ClosedPort, LocalFixture
 from tests.owner_session import cookie_header
 
 PORT = 8765
@@ -393,11 +393,23 @@ class OllamaEvidenceTests(LocalAdapterTestCase):
         self.assertEqual(status, 200)
         entry = self.harness.entry("ollama", "local-test-model")
         self.assertTrue(entry.supports_image_input, "Ollama publishes 'vision'")
+        self.assertTrue(entry.supports_function_tools, "Ollama publishes 'tools'")
         self.assertEqual(entry.context_window, 8192)
         self.assertEqual(entry.context_limit, 8192)
-        # Ollama publishes no tool-use capability value, so tools stay false.
-        self.assertFalse(entry.supports_function_tools)
         self.assertEqual(fixture.paths().count("/api/show"), 1)
+
+    def test_show_without_tools_leaves_function_tools_false(self) -> None:
+        # Fail closed is preserved: a server whose capabilities list lacks
+        # "tools" (or an older build that omits it) never gains tools.
+        show = dict(DEFAULT_SHOW, capabilities=["completion", "thinking", "vision"])
+        fixture = LocalFixture(show=show)
+        self.addCleanup(fixture.close)
+        self.harness.set_endpoint("ollama", fixture.base_url)
+        status, _ = self.harness.refresh("ollama")
+        self.assertEqual(status, 200)
+        entry = self.harness.entry("ollama", "local-test-model")
+        self.assertTrue(entry.supports_image_input, "'vision' is still present")
+        self.assertFalse(entry.supports_function_tools)
 
     def test_a_server_without_show_leaves_everything_unknown(self) -> None:
         # llama-server and LM Studio answer 404 (or 405) on /api/show.
