@@ -27,6 +27,14 @@ class ConversionError(Exception):
     """
 
     def __init__(self, message: str, capability: str | None = None) -> None:
+        # Bridge sites interpolate the offending client value into the
+        # message. A lone surrogate from a JSON "\ud800" escape cannot be
+        # UTF-8 encoded, so verbatim text would poison every downstream
+        # consumer: attempts[] reasons in the ledger ring, the owner-console
+        # state render, the error envelope. backslashreplace rewrites the
+        # surrogate to literal escape text and leaves every encodable
+        # character byte-identical (F9).
+        message = message.encode("utf-8", "backslashreplace").decode("utf-8")
         super().__init__(message)
         self.message = message
         self.capability = capability
