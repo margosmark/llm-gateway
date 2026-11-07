@@ -260,11 +260,20 @@ class LocalOpenAIAdapter:
         if not isinstance(payload, dict):
             return
         capabilities = payload.get("capabilities")
-        if isinstance(capabilities, list) and "vision" in capabilities:
-            # Documented evidence for image input. Nothing else in the list
-            # is mapped: Ollama publishes no capability value for tool use,
-            # so tools stay false until the owner approves them.
-            info.supports_image_input = True
+        if isinstance(capabilities, list):
+            if "vision" in capabilities:
+                # Documented evidence for image input.
+                info.supports_image_input = True
+            if "tools" in capabilities:
+                # ``capabilities`` is Ollama's documented "List of supported
+                # features" (docs.ollama.com/api-reference/show-model-details,
+                # read 2026-10-31), and a tool-capable model publishes
+                # ``tools`` in it (observed on qwen3.8:27b the same day:
+                # ["completion", "vision", "tools", "thinking"], plus a
+                # valid tool_call on its OpenAI surface). Same evidence
+                # class as ``vision``: read only inside an explicit
+                # refresh; the owner-approval path is unaffected.
+                info.supports_function_tools = True
         model_info = payload.get("model_info")
         if isinstance(model_info, dict):
             for key, value in model_info.items():

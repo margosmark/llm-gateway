@@ -36,7 +36,7 @@ DEFAULT_CHAT: dict[str, Any] = {
 }
 
 DEFAULT_SHOW: dict[str, Any] = {
-    "capabilities": ["completion", "thinking", "vision"],
+    "capabilities": ["completion", "thinking", "vision", "tools"],
     "model_info": {"llama.context_length": 8192, "llama.embedding_length": 4096},
     "details": {"family": "fixture"},
 }
