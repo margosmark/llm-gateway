@@ -183,6 +183,25 @@ presence-only check cannot see, and it counts.
   fails: that is a gated change that shipped without a bump. The snapshot is
   read from git history rather than from the working tree, so regenerating
   the file cannot hide a change from the guard.
+* **Volatile paths are normalised at capture time.** A path segment that
+  carries a calendar - `analytics.usage.<YYYY-MM-DD>` (the 7-day rollup
+  window), a month bucket, an ISO timestamp key - is recorded as its *shape*
+  (`analytics.usage.<date>`, `<month>`, `<timestamp>`), never as the day the
+  snapshot happened to be taken, and every snapshot read back from git
+  history goes through the same normalisation (so a baseline committed
+  before this rule existed still compares like-for-like). The window
+  *edges* - `window.from`/`to`, `first_row_ts`, `series[*].day`,
+  `cells[*].day`, `generated_at` - are values, not path segments, and a
+  `key-path -> type` map already records them as a stable `str`. Without
+  this the committed baseline went stale at every UTC midnight and the
+  guard failed on the calendar instead of on a change: a guard that fails
+  on the calendar is a guard that gets waived, and a waived guard is a
+  dead guard. Proven in both directions by
+  `test_the_snapshot_is_date_independent_across_a_rollover` (capture at D,
+  D+1 and D+8 - across the 7-day edge - byte-identical while the raw
+  windows really move) and
+  `test_a_real_field_change_in_any_gated_family_still_goes_red` (add,
+  remove and re-type still fail, in each of the four families).
 * The guard is proven by mutation on every candidate that touches it: change
   one field of a family → RED; increment the constant → GREEN; restore the
   tree → clean.
