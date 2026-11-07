@@ -50,7 +50,11 @@ def export_records(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def render_json(records: list[dict[str, Any]]) -> bytes:
-    return json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # backslashreplace: exports are allow-listed metadata, but a lone
+    # surrogate in any field would otherwise break the whole export (F9).
+    return json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8", "backslashreplace"
+    )
 
 
 def render_csv(records: list[dict[str, Any]]) -> bytes:
@@ -58,4 +62,4 @@ def render_csv(records: list[dict[str, Any]]) -> bytes:
     writer = csv.DictWriter(output, fieldnames=FIELDS, lineterminator="\r\n")
     writer.writeheader()
     writer.writerows(records)
-    return output.getvalue().encode("utf-8")
+    return output.getvalue().encode("utf-8", "backslashreplace")

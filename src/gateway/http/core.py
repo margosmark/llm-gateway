@@ -65,6 +65,91 @@ def _check_json_nesting(text: str) -> None:
             depth = max(0, depth - 1)
 
 
+def escape_text(value: str) -> str:
+    """Rewrite lone surrogates to UTF-8-safe escape text.
+
+    A clean string comes back byte-identical, so this is safe to apply
+    unconditionally at a capture boundary (F9).
+    """
+    return value.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+class InvalidBodyText(Exception):
+    """A parsed request body carries lone-surrogate text the gateway refuses.
+
+    Raised only by :meth:`Request.json`, so every JSON ingress - the model
+    API and the owner-console forms alike - passes through the same choke.
+
+    Deliberately **not** a ``ValueError``: handlers catch ``ValueError`` to
+    fall back to an empty payload, and a refused body must be *refused* with
+    a 400 at the dispatch boundary rather than silently rewritten to ``{}``.
+    Lone surrogates are never legitimate client input.
+    """
+
+    def __init__(self, path: str, excerpt: str, model: str | None) -> None:
+        super().__init__(f"lone surrogate in request body at {path}")
+        #: Where in the body the unencodable text sits (already escaped).
+        self.path = path
+        #: A bounded, escaped JSON rendering of the offending string, for
+        #: the ledger's forensic reason - never the whole body.
+        self.excerpt = excerpt
+        #: The request's ``model`` field when it has one, already escaped,
+        #: so a refusal can still be attributed to an alias.
+        self.model = model
+
+
+#: Longest field path kept on a refusal; a hostile body can nest long keys.
+_MAX_FIELD_PATH = 160
+
+
+def find_unencodable(value: Any) -> tuple[str, str] | None:
+    """The first string in *value* that cannot be UTF-8 encoded, with its path.
+
+    ``json.loads`` accepts the ``\\ud800`` escape and yields a lone
+    surrogate, which every later strict ``encode("utf-8")`` raises on.
+    Encoding here in C is both the exact predicate and cheap enough to run
+    over a whole body.
+
+    The walk is iterative (an explicit stack, document order preserved):
+    the parser accepts up to :data:`MAX_JSON_NESTING` levels - far past
+    Python's recursion limit - so a recursive walk raised ``RecursionError``
+    on a deep-but-legal body and handed the client the very bare 500 this
+    choke exists to remove (caught by the F6 deep-nesting probe).
+    """
+    stack: list[tuple[str, Any]] = [("$", value)]
+    while stack:
+        path, node = stack.pop()
+        if isinstance(node, str):
+            try:
+                node.encode("utf-8")
+            except UnicodeEncodeError:
+                return path, node
+            continue
+        children: list[tuple[str, Any]] = []
+        if isinstance(node, dict):
+            for key, item in node.items():
+                if isinstance(key, str):
+                    try:
+                        key.encode("utf-8")
+                    except UnicodeEncodeError:
+                        return f"{path}.<key>", key
+                    child = f"{path}.{escape_text(key)}"
+                else:
+                    child = f"{path}[key]"
+                if len(child) > _MAX_FIELD_PATH:
+                    child = child[:_MAX_FIELD_PATH] + "..."
+                children.append((child, item))
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                child = f"{path}[{index}]"
+                if len(child) > _MAX_FIELD_PATH:
+                    child = child[:_MAX_FIELD_PATH] + "..."
+                children.append((child, item))
+        # Pushed in reverse so pop() yields the original document order.
+        stack.extend(reversed(children))
+    return None
+
+
 class Headers:
     """Case-insensitive header mapping that keeps repeated headers."""
 
@@ -140,14 +225,37 @@ class Request:
         return values[0] if values else default
 
     def json(self) -> Any:
+        """Parse the body as JSON.
+
+        Raises ``ValueError`` for a body that is not valid JSON, and
+        :class:`InvalidBodyText` for a body whose strings cannot be UTF-8
+        encoded (a lone ``\\ud800``-style surrogate, which ``json.loads``
+        accepts but every later strict encode raises on). The surrogate
+        refusal is the one choke that closes every JSON ingress at once:
+        the model API, the owner forms, passwords and machine-key names
+        never receive such a string.
+        """
         if not self.body:
             return None
         try:
             text = self.body.decode("utf-8")
             _check_json_nesting(text)
-            return json.loads(text)
+            payload = json.loads(text)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("request body is not valid JSON") from exc
+        hit = find_unencodable(payload)
+        if hit is not None:
+            path, offender = hit
+            excerpt = json.dumps(offender, ensure_ascii=True)
+            if len(excerpt) > 120:
+                excerpt = excerpt[:120] + "..."
+            model = payload.get("model") if isinstance(payload, dict) else None
+            raise InvalidBodyText(
+                escape_text(path),
+                excerpt,
+                escape_text(model) if isinstance(model, str) else None,
+            )
+        return payload
 
     @property
     def origin(self) -> str | None:
@@ -185,7 +293,13 @@ class StreamResponse:
 
 
 def json_response(payload: Any, status: int = 200, headers: Sequence[tuple[str, str]] = ()) -> Response:
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # backslashreplace: a lone surrogate that survived every earlier
+    # boundary cannot be UTF-8 encoded, so it would raise here and turn a
+    # clean response into a bare 500. The escape text keeps the payload
+    # buildable; encodable characters are byte-identical (F9).
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8", "backslashreplace"
+    )
     base = [("Content-Type", "application/json; charset=utf-8")]
     return Response(status, [*base, *headers], body)
 
