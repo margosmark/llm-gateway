@@ -78,6 +78,7 @@ from gateway.capability_probe import (
 )
 from gateway.config import (
 
+    ERROR_POLICY,
     FALLBACK_TRIGGERS,
     PHASES,
     STATE_CONFIGURED_UNTESTED,
@@ -99,7 +100,7 @@ from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.fallback_reasons import fallback_reason_class
 from gateway.http import messages as messages_surface
-from gateway.http.core import Request, Response, Router as HttpRouter, StreamResponse, json_response
+from gateway.http.core import InvalidBodyText, Request, Response, Router as HttpRouter, StreamResponse, json_response
 from gateway.http.security import (
     MUTATING_METHODS,
     SecurityError,
@@ -121,6 +122,7 @@ from gateway.observability import (
     CONFIDENCE_NONE,
     LimitSnapshot,
     LimitStore,
+    RequestEvent,
     RequestLedger,
     SOURCE_PUBLISHED_ESTIMATE,
     SOURCE_UNKNOWN,
@@ -642,7 +644,18 @@ class GatewayApp:
         except RoutingError as exc:
             headers = ([("Retry-After", str(exc.retry_after_seconds))]
                        if exc.status == 503 and exc.retry_after_seconds is not None else [])
-            result = json_response(exc.to_dict(), exc.status, headers)
+            try:
+                result = json_response(exc.to_dict(), exc.status, headers)
+            except Exception:  # noqa: BLE001 - last-resort envelope; # pragma: no cover - defensive
+                # A hostile payload must never turn a clean 4xx/5xx into a
+                # bare 500 with a traceback: canned envelope, original
+                # status, no serialization step that can fail (F9).
+                canned = b'{"error":{"message":"internal error","type":"gateway_error"}}'
+                result = Response(
+                    exc.status,
+                    [("Content-Type", "application/json; charset=utf-8"), *headers],
+                    canned,
+                )
             self._log_request(request, result, started)
             return result
         except ConversionError as exc:
@@ -656,19 +669,115 @@ class GatewayApp:
             result = json_response({"error": {"message": exc.message, "type": exc.error_class}}, 502)
             self._log_request(request, result, started)
             return result
-        except Exception:  # pragma: no cover - defensive
-            result = json_response({"error": {"message": "internal error", "type": "gateway_error"}}, 500)
+        except InvalidBodyText as exc:
+            # One choke for every JSON ingress (F9): a body carrying a lone
+            # surrogate is refused before any handler reads it, so it never
+            # reaches an adapter body encode, a password hash, a machine-key
+            # name or a config field. 400, named field, no rewrite.
+            result = json_response(
+                {
+                    "error": {
+                        "message": (
+                            "request body contains invalid unicode (a lone "
+                            f"surrogate) at {exc.path}; send valid UTF-8 text"
+                        ),
+                        "type": "invalid_request",
+                        "field": exc.path,
+                    }
+                },
+                400,
+            )
+            # The router records every path it runs; a body refused at the
+            # parse choke never gets there, so the refusal is recorded here
+            # or the owner would see a refusal with no ledger row, no
+            # metrics counter and no cause. "policy" is the gateway's own
+            # refusal class, the same one a conversion refusal records.
+            self._record_terminal(
+                request,
+                status=400,
+                error_class=ERROR_POLICY,
+                outcome="refused",
+                reason=f"lone surrogate refused at body parse: {exc.path}: {exc.excerpt}",
+                alias=exc.model,
+                started=started,
+            )
             self._log_request(request, result, started)
+            return result
+        except Exception as exc:
+            result = json_response({"error": {"message": "internal error", "type": "gateway_error"}}, 500)
+            # The cause is logged as a class name only - never str(exc),
+            # which could carry client text - and the terminal outcome is
+            # recorded, so an operator can find the cause of a bare 500.
+            self._record_terminal(
+                request,
+                status=500,
+                error_class="internal",
+                outcome="error",
+                reason=f"unhandled {type(exc).__name__} at the dispatch boundary",
+                alias=None,
+                started=started,
+            )
+            self._log_request(request, result, started, exception=type(exc).__name__)
             return result
         self._log_request(request, result, started)
         return result
 
-    def _log_request(self, request: Request, result: Any, started: float) -> None:
+    def _record_terminal(
+        self,
+        request: Request,
+        *,
+        status: int,
+        error_class: str,
+        outcome: str,
+        reason: str,
+        alias: str | None,
+        started: float,
+    ) -> None:
+        """Record an outcome the routing layer never reached.
+
+        ``Router._record`` covers every path the router runs. A body
+        refused at the parse choke and a handler that died at the dispatch
+        boundary both happen *before* it, so without this the owner would
+        see a refusal or a 500 with no ledger row and no metrics counter
+        (F9). Metadata only: a bounded, escaped excerpt of the refusal -
+        never the request body.
+        """
+        if self.ledger is None:
+            return
+        self.ledger.record(
+            RequestEvent(
+                request_id=new_request_id(),
+                timestamp=utc_now_iso(),
+                requested_alias=alias or "",
+                requested_model=alias or None,
+                status=status,
+                error_class=error_class,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                attempts=[
+                    {
+                        "provider": "",
+                        "model": "",
+                        "outcome": outcome,
+                        "reason": reason[:400],
+                    }
+                ],
+            )
+        )
+
+    def _log_request(
+        self,
+        request: Request,
+        result: Any,
+        started: float,
+        exception: str | None = None,
+    ) -> None:
         """Record one request outcome.
 
         The path is logged without its query string, and the body is never
         logged, so a prompt, a response or a credential cannot reach the
-        log.
+        log. ``exception`` names the class of an unhandled failure - a
+        class name only, never the exception's text, which could carry
+        client-controlled content.
         """
         status = getattr(result, "status", 0)
         error_class = None
@@ -706,6 +815,14 @@ class GatewayApp:
         # the key value never enters this context.
         target = request.context.get("machine_key_target")
         machine_key_target = target if isinstance(target, str) and target else None
+        if exception is None:
+            # A handler that converts its own failure into a response (the
+            # capability-decision blanket clause) notes the exception class
+            # here, so this one access line still names the cause instead of
+            # masking a genuine bug as a client error. Class name only - the
+            # same never-str(exc) rule as above; client text never enters it.
+            noted = request.context.get("handler_exception")
+            exception = noted if isinstance(noted, str) and noted else None
         self.logger.log(
             method=request.method,
             path=request.path,
@@ -719,6 +836,7 @@ class GatewayApp:
             action=action,
             machine_key_id=machine_key_id,
             machine_key_target=machine_key_target,
+            exception=exception,
         )
 
     # --- surface helpers -------------------------------------------------
@@ -2351,7 +2469,25 @@ class GatewayApp:
             return json_response({"error": {"message": "Invalid capability decision", "type": "invalid_request"}}, 400)
         except RuntimeError as exc:
             return json_response({"error": {"message": "Capability proposal conflict or resolved", "type": "conflict"}}, 409)
-        except Exception:
+        except InvalidBodyText:
+            # InvalidBodyText is deliberately not a ValueError, but it IS an
+            # Exception, so the blanket clause below would swallow it here -
+            # before the dispatch boundary's F9 choke could run. That clause
+            # returns a bare 400 with no field, no terminal ledger row and no
+            # metrics counter, so a hostile body on this route would be
+            # forensically invisible (every other route records +1 policy row
+            # and +1 gateway_errors_total{error_class="policy"}). Re-raise and
+            # let the boundary answer exactly like every other JSON ingress:
+            # 400 with the named field, the escaped excerpt in the ledger and
+            # the counter. (F1, t_a93d59e3)
+            raise
+        except Exception as exc:
+            # A genuine bug in this handler must not pose as a client error
+            # *silently*: note the class name - never str(exc), which could
+            # carry client text - so the one access line the dispatch
+            # boundary writes names the cause. The response conversion is
+            # unchanged. (companion to F1, t_a93d59e3)
+            request.context["handler_exception"] = type(exc).__name__
             return json_response({"error": {"message": "Capability decision could not be applied", "type": "invalid_request"}}, 400)
 
     # --- provider actions ------------------------------------------------

@@ -381,6 +381,203 @@ check("the capability panel sends the owner gate fields only from an explicit au
   }
 });
 
+// --- capability preview placement and feedback --------------------------
+// The defect these cover: the preview result used to render into an
+// initially-empty div ABOVE the button, so on a fast LAN the whole cycle
+// finished before the owner's eye reached it and the control read as inert.
+
+function renderPreviewPanel(fetchImpl) {
+  global.fetch = fetchImpl;
+  const panel = domStub.createElement("div");
+  helpers.renderCapabilityPanelForTest(
+    { provider_id: "opencode_go" },
+    { model_id: "mimo-v2.6-flash" },
+    panel,
+    { can_mutate: true }
+  );
+  return panel;
+}
+
+function previewParts(panel) {
+  const buttons = findAll(panel, (node) => node.tag === "button");
+  return {
+    button: buttons.find((b) => b.textContent === "Preview selected probes"),
+    output: findAll(panel, (node) => node.className === "capability-preview")[0],
+    hint: findAll(panel, (node) => String((node.attributes || {}).id || "").indexOf("capability-preview-hint-") === 0)[0],
+  };
+}
+
+function selectFirstProbe(panel) {
+  const box = findAll(panel, (node) => node.tag === "input" && node.attributes.type === "checkbox")[0];
+  box.checked = true;
+  if (box.listeners.change) box.listeners.change();
+  return box;
+}
+
+function authorisePreviewPanel(panel) {
+  const ceiling = findAll(panel, (node) => node.tag === "input" && node.attributes.type === "number")[0];
+  ceiling.value = "0.1";
+  const grant = findAll(panel, (node) => node.tag === "button").find((b) => b.textContent === "Authorise billing route");
+  grant.listeners.click();
+}
+
+check("the preview output renders below its button, with feedback before the response arrives", function () {
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  global.setTimeout = function () { return 0; };  // toast cleanup must not outlive the check
+  globalThis.confirm = function () { return true; };
+  const jsonResponse = (payload) => syncResolve({
+    ok: true,
+    headers: { get: () => "application/json" },
+    json: () => syncResolve(payload),
+    text: () => syncResolve(JSON.stringify(payload)),
+  });
+  let panel, parts, atRequest;
+  global.fetch = function (url) {
+    if (url.indexOf("/api/capabilities/preview") !== -1) {
+      // fetch() runs synchronously inside the click handler, after the
+      // loading state was written and before any response exists: this is
+      // the state the owner sees within one frame of clicking.
+      atRequest = {
+        outputAfterButton: panel.children.indexOf(parts.output) > panel.children.indexOf(parts.button),
+        loadingText: collectText(parts.output).join(" "),
+        buttonLabel: parts.button.textContent,
+        buttonDisabled: parts.button.disabled,
+      };
+      return jsonResponse(AVAILABLE_PREVIEW);
+    }
+    return jsonResponse({ runs: [], proposals: [], approvals: [] });
+  };
+  try {
+    panel = renderPreviewPanel(global.fetch);
+    parts = previewParts(panel);
+
+    // Before anything is ticked the button is gated and says why.
+    assert.strictEqual(parts.button.attributes.disabled, "", "the preview button starts gated");
+    assert(
+      parts.hint.textContent.indexOf("Select at least one probe") !== -1,
+      "a disabled preview button explains itself, got: " + parts.hint.textContent
+    );
+    assert.strictEqual(parts.button.attributes["aria-describedby"], parts.hint.attributes.id, "the reason line is announced with the button");
+
+    // Ticking a probe moves the reason to the next missing step.
+    selectFirstProbe(panel);
+    assert(
+      parts.hint.textContent.indexOf("Authorise the billing route") !== -1,
+      "the reason follows the next missing step, got: " + parts.hint.textContent
+    );
+
+    authorisePreviewPanel(panel);
+    assert.strictEqual(parts.button.disabled, false, "the button unlocks once authorised with a probe ticked");
+    assert.strictEqual(parts.hint.textContent, "", "the reason line clears when the button becomes usable");
+
+    parts.button.listeners.click();
+
+    // Feedback exists before the response, and it is where the click was.
+    assert(atRequest, "the preview request was sent");
+    assert.strictEqual(atRequest.outputAfterButton, true, "the result region is below the button at click time");
+    assert(atRequest.loadingText.indexOf("Loading preview…") !== -1, "loading is visible in the result region, got: " + atRequest.loadingText);
+    assert.strictEqual(atRequest.buttonLabel, "Previewing…", "the button reflects the in-flight state");
+    assert.strictEqual(atRequest.buttonDisabled, true, "the in-flight button cannot be double-clicked");
+
+    // After the click the result is a later sibling of the button and holds
+    // the rendered outcome — never an empty, collapsed region.
+    assert(
+      panel.children.indexOf(parts.output) > panel.children.indexOf(parts.button),
+      "the preview output is a later sibling of the preview button"
+    );
+    assert.strictEqual(parts.output.children.length > 0, true, "the result region holds content after a successful click");
+    const rendered = collectText(parts.output).join("\n");
+    assert(rendered.indexOf("Preview available") !== -1, "the outcome is labelled, got: " + rendered);
+    assert(rendered.indexOf("Run selected probes") !== -1, "an available preview offers the run button");
+    assert.strictEqual(parts.button.textContent, "Preview selected probes", "the button label returns when the request settles");
+    assert.strictEqual(parts.button.disabled, false, "the button is usable again after the preview");
+
+    // A region that holds content must never be laid out at zero height.
+    const css = fs.readFileSync(path.join(__dirname, "..", "src", "gateway", "static", "console.css"), "utf8");
+    assert(
+      css.indexOf(".capability-preview:not(:empty)") !== -1,
+      "the result region is boxed while it holds content, so it cannot collapse"
+    );
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+  }
+});
+
+check("every preview outcome renders a distinct result below the button", function () {
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realConfirm = globalThis.confirm;
+  global.setTimeout = function () { return 0; };
+  globalThis.confirm = function () { return true; };
+  const jsonResponse = (payload) => syncResolve({
+    ok: true,
+    headers: { get: () => "application/json" },
+    json: () => syncResolve(payload),
+    text: () => syncResolve(JSON.stringify(payload)),
+  });
+  const errorResponse = (payload) => syncResolve({
+    ok: false,
+    status: 400,
+    headers: { get: () => "application/json" },
+    json: () => syncResolve(payload),
+    text: () => syncResolve(JSON.stringify(payload)),
+  });
+  function drive(fetchImpl) {
+    const panel = renderPreviewPanel(fetchImpl);
+    const parts = previewParts(panel);
+    selectFirstProbe(panel);
+    authorisePreviewPanel(panel);
+    parts.button.listeners.click();
+    assert(
+      panel.children.indexOf(parts.output) > panel.children.indexOf(parts.button),
+      "every outcome renders below the button"
+    );
+    return { parts, text: collectText(parts.output).join("\n"), children: parts.output.children };
+  }
+  try {
+    const available = drive(function (url) {
+      if (url.indexOf("/api/capabilities/preview") !== -1) return jsonResponse(AVAILABLE_PREVIEW);
+      return jsonResponse({ runs: [], proposals: [], approvals: [] });
+    });
+    assert(available.text.indexOf("Preview available") !== -1, "available is labelled: " + available.text);
+    assert(available.text.indexOf("Run selected probes") !== -1, "available offers the run button");
+    assert(available.text.indexOf("No provider request has been sent.") !== -1, "available still states that nothing was sent");
+
+    const unavailablePayload = Object.assign({}, AVAILABLE_PREVIEW, {
+      available: false,
+      reason: "No published bounds for this probe on this pair.",
+    });
+    const unavailable = drive(function (url) {
+      if (url.indexOf("/api/capabilities/preview") !== -1) return jsonResponse(unavailablePayload);
+      return jsonResponse({ runs: [], proposals: [], approvals: [] });
+    });
+    assert(unavailable.text.indexOf("Preview unavailable") !== -1, "unavailable is labelled: " + unavailable.text);
+    assert(unavailable.text.indexOf("Unknown is not false") !== -1, "unavailable keeps the Unknown rule");
+    assert(unavailable.text.indexOf("Run selected probes") === -1, "an unavailable preview never offers the run button");
+
+    const refused = drive(function (url) {
+      if (url.indexOf("/api/capabilities/preview") !== -1) {
+        return errorResponse({ error: { message: "invalid_request", type: "invalid_request" } });
+      }
+      return jsonResponse({ runs: [], proposals: [], approvals: [] });
+    });
+    assert(refused.text.indexOf("Preview refused") !== -1, "refused is labelled: " + refused.text);
+    assert(refused.text.indexOf("No provider request was sent.") !== -1, "refused states that nothing was sent");
+    assert(
+      refused.children.some((child) => child.className === "notice bad"),
+      "a refusal is rendered as an error, not as a warning"
+    );
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    globalThis.confirm = realConfirm;
+  }
+});
+
 check("the capability panel's authorisation is explicit, honest and never persisted", function () {
   const panel = source.slice(source.indexOf("function renderCapabilityPanel"), source.indexOf("function renderModels()"));
   assert(panel.includes('text: "Authorise a paid probe run"'));

@@ -14,6 +14,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -26,7 +27,7 @@ from gateway.adapters.base import (
 )
 from gateway.adapters.registry import AdapterRegistry
 from gateway.auth import ProfileAuth
-from gateway.buildinfo import MCP_CONTRACT_VERSION
+from gateway.buildinfo import release_identity
 from gateway.config import ConfigStore, ModelEntry, Profile, ProviderState, RouteRef
 from gateway.core.routing import Router
 from gateway.credentials import CredentialStore
@@ -42,6 +43,20 @@ from gateway.observability import LimitStore, RequestEvent, RequestLedger, utc_n
 from gateway.owner_auth import COOKIE_NAME
 
 FAKE_PROVIDER = "chatgpt_codex"
+
+#: The release record the harness boots the gateway with. The identity is
+#: **built by** ``gateway.buildinfo.release_identity()`` over this record and
+#: a synthetic mount table below - never by a hand-written copy of its keys -
+#: so the ``version``/``state`` release payload the MCP contract guard
+#: captures is the product's own shape and moves whenever the product does
+#: (``tests/test_mcp_contract_guard.py`` pins the equality). The revisions are
+#: hex-shaped because that is all ``buildinfo``'s revision sanitizer accepts;
+#: ``image_revision`` is a digest whose container binding the synthetic
+#: mount table proves, so it is reported rather than ``unknown``.
+FIXTURE_SOURCE_REVISION = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+FIXTURE_SOURCE_TREE = "0123456789abcdef0123456789abcdef01234567"
+FIXTURE_IMAGE_REVISION = "sha256:" + "a" * 64
+FIXTURE_CONTAINER_ID = "b" * 64
 
 
 class FakeAdapter:
@@ -157,6 +172,35 @@ class GatewayHarness:
     def __init__(self, adapter: FakeAdapter | None = None, host: str = "127.0.0.1") -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmp.name)
+        #: The controlled release record and mount table the identity is
+        #: built from - kept outside ``data_dir`` so no store or backup path
+        #: can mistake them for gateway state.
+        self._identity_tmp = tempfile.TemporaryDirectory()
+        identity_dir = Path(self._identity_tmp.name)
+        self.release_path = identity_dir / "release.json"
+        self.release_path.write_text(
+            json.dumps(
+                {
+                    "source_revision": FIXTURE_SOURCE_REVISION,
+                    "source_tree": FIXTURE_SOURCE_TREE,
+                    "image_revision": FIXTURE_IMAGE_REVISION,
+                    "container_id": FIXTURE_CONTAINER_ID,
+                }
+            ),
+            encoding="utf-8",
+        )
+        # ``buildinfo`` proves the recorded digest belongs to the running
+        # container by finding exactly one ``docker/containers/<id>/`` mount;
+        # this synthetic mount table supplies that one mount for the fixture's
+        # own container id, so ``image_revision`` is reported, not ``unknown``.
+        self.mountinfo_path = identity_dir / "mountinfo"
+        self.mountinfo_path.write_text(
+            "2065 1653 0:135 / / rw,relatime - overlay overlay rw,"
+            f"lowerdir=/var/lib/docker/containers/{FIXTURE_CONTAINER_ID}/lower,"
+            f"upperdir=/var/lib/docker/containers/{FIXTURE_CONTAINER_ID}/diff,"
+            f"workdir=/var/lib/docker/containers/{FIXTURE_CONTAINER_ID}/work\n",
+            encoding="utf-8",
+        )
         self.host = host
         self.authority = f"[{host}]" if ":" in host else host
         self.port = free_port(host)
@@ -213,13 +257,17 @@ class GatewayHarness:
             policy=policy,
             ledger=self.router._ledger,
             limits=self.limits,
-            release_identity=lambda: {
-                "service": "personal-llm-gateway",
-                "source_revision": "testcommit",
-                "source_tree": "testtree",
-                "image_revision": "sha256:" + "a" * 64,
-                "mcp_contract_version": MCP_CONTRACT_VERSION,
-            },
+            # The product's own identity builder over the controlled record
+            # and mount table above: the version/state release payload the
+            # contract guard captures is derived from
+            # ``gateway.buildinfo.release_identity()``, not from a copy of
+            # its keys, so a key added/dropped/renamed in buildinfo moves the
+            # capture and turns the guard red (tests/test_mcp_contract_guard.py).
+            release_identity=partial(
+                release_identity,
+                release_path=self.release_path,
+                mountinfo_path=self.mountinfo_path,
+            ),
             base_url=f"http://{self.authority}:{self.port}",
             mounts=("/owner",),
             logger=RequestLogger(enabled=False),
@@ -256,6 +304,7 @@ class GatewayHarness:
     def close(self) -> None:
         self.server.stop()
         self._tmp.cleanup()
+        self._identity_tmp.cleanup()
 
     # --- requests --------------------------------------------------------
 
