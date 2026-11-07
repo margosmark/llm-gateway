@@ -14,6 +14,16 @@ This module is the shared machinery for that rule:
 * ``capture(harness)`` reads the four payloads and flattens each to a
   ``key-path -> type`` map, so a nested addition (the class of change a
   required-key presence check cannot see) is visible;
+* **calendar-dated path segments are normalised at capture time**: a key
+  that carries a date (``analytics.usage.2026-11-07``), a month
+  (``usage.2026-11``) or an ISO timestamp is recorded as its *shape*
+  (``analytics.usage.<date>``), never as the day it happened to be
+  captured on. The snapshot answers "does this family have the same
+  structure?" and can never answer "is it the same day?" - a guard that
+  goes red at every UTC rollover is a guard that gets waived, and a
+  waived guard is a dead guard. Snapshots loaded from git history pass
+  through the same normalisation, so a baseline committed before this
+  rule existed still compares like-for-like;
 * ``evaluate(current, snapshot, constant)`` decides pass/fail;
 * ``ancestor_snapshots()`` walks the committed baseline back to the root
   of history, so regenerating the snapshot file - or burying the last
@@ -28,6 +38,7 @@ write gate.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -43,9 +54,78 @@ GATED_FAMILIES: dict[str, str] = {
     "capabilities": "/owner/api/capabilities",
 }
 
+# --- volatile (calendar-bearing) path segments ---------------------------
+#
+# Found by scanning the flattened keys of **all four** families, not by
+# naming one offender: the only path segments that carry a calendar are
+# ``analytics.usage.<YYYY-MM-DD>`` (the 7-day rollup window, which advances
+# every UTC midnight and *replaces* its oldest key at every 7-day edge).
+# The window edges themselves - ``analytics.window.from``/``to``,
+# ``leaderboard.window.from``, ``first_row_ts``, ``series[*].day``,
+# ``cells[*].day``, ``generated_at`` - are **values**, not path segments, so
+# a key-path -> type map already records them as a stable ``str`` and they
+# cannot roll; the rules below are written against the segment, not against
+# the ``analytics.usage`` name, so a sibling date-keyed family (a monthly
+# bucket, a per-day rollup keyed by ISO timestamp) is covered without
+# anyone having to know its name.
+#
+# Granularity is preserved: a day, a month and a timestamp key become three
+# *different* placeholders, so a family that changes which granularity it is
+# keyed by still registers as a change.
+
+_TIMESTAMP_SEGMENT = re.compile(
+    r"\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_DATE_SEGMENT = re.compile(r"\d{4}-\d{2}-\d{2}")
+_MONTH_SEGMENT = re.compile(r"\d{4}-\d{2}(?![\d-])")
+
+
+def normalize_key(path: str) -> str:
+    """Rewrite the calendar-bearing segments of a flattened key to shape.
+
+    ``analytics.usage.2026-11-07`` -> ``analytics.usage.<date>``; a month
+    bucket becomes ``<month>``, an ISO timestamp key ``<timestamp>``.
+    Anything else - field names, ids, ``[*]`` list markers, digits inside
+    non-calendar names - is returned untouched, and normalising an already
+    normalised key is a no-op (the placeholders match no rule), so the
+    same function safely runs over snapshots recorded before it existed.
+    """
+    path = _TIMESTAMP_SEGMENT.sub("<timestamp>", path)
+    path = _DATE_SEGMENT.sub("<date>", path)
+    return _MONTH_SEGMENT.sub("<month>", path)
+
+
+def normalize_map(mapping: dict[str, str]) -> dict[str, str]:
+    """Normalise every key of one flattened ``key-path -> type`` map.
+
+    Two keys that normalise onto the same path (the calendar itself moving
+    under a fixed shape) collapse to one entry, keeping the later window
+    order - a date-dependent difference is exactly what this map is not
+    supposed to record.
+    """
+    return {normalize_key(key): value for key, value in mapping.items()}
+
+
+def normalize_families(families: dict[str, Any]) -> dict[str, Any]:
+    """Normalise the ``families`` block of a snapshot: family -> flat map.
+
+    This is the shape both snapshot loaders hold, so a baseline committed
+    with concrete calendar keys comes back identical to a capture taken on
+    any other day.
+    """
+    return {
+        name: normalize_map(mapping) if isinstance(mapping, dict) else mapping
+        for name, mapping in families.items()
+    }
+
 
 def flat(obj: Any, prefix: str = "") -> dict[str, str]:
-    """Flatten a payload to ``dotted.key[path] -> type name``."""
+    """Flatten a payload to ``dotted.key[path] -> type name``.
+
+    Keys go through :func:`normalize_key` on the way out, so what lands in
+    the map (and therefore in the snapshot) is the family's *shape*.
+    """
     out: dict[str, str] = {}
     if isinstance(obj, dict):
         for key, value in obj.items():
@@ -54,7 +134,7 @@ def flat(obj: Any, prefix: str = "") -> dict[str, str]:
         for value in obj:
             out.update(flat(value, f"{prefix}[*]"))
     else:
-        out[prefix] = type(obj).__name__
+        out[normalize_key(prefix)] = type(obj).__name__
     return out
 
 
@@ -70,7 +150,12 @@ def capture(harness: Any) -> dict[str, dict[str, str]]:
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> dict[str, Any]:
-    """The committed snapshot; a missing file is a hard failure."""
+    """The committed snapshot; a missing file is a hard failure.
+
+    Its families are normalised on the way out: a snapshot written before
+    the calendar rule existed (or by an older checkout) still compares
+    like-for-like with a capture taken today.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -79,6 +164,8 @@ def load_baseline(path: Path = BASELINE_PATH) -> dict[str, Any]:
         ) from exc
     if not isinstance(data, dict) or "families" not in data:
         raise AssertionError(f"baseline snapshot is malformed: {path}")
+    if isinstance(data.get("families"), dict):
+        data["families"] = normalize_families(data["families"])
     return data
 
 
@@ -189,6 +276,13 @@ def ancestor_snapshots(
             continue
         if not (isinstance(data, dict) and "families" in data):
             continue
+        if isinstance(data["families"], dict):
+            # Same normalisation as a capture, so a snapshot committed with
+            # concrete calendar keys (every baseline written before this
+            # rule) is judged on its shape instead of on the day it was
+            # recorded - without this, the walk would stop at the first
+            # date-only difference and fail the guard on the calendar.
+            data["families"] = normalize_families(data["families"])
         out.append((f"snapshot at {sha[:12]}", data))
         if current is not None and data["families"] != current:
             break
