@@ -50,6 +50,7 @@ class RequestLogger:
         action: str | None = None,
         machine_key_id: str | None = None,
         machine_key_target: str | None = None,
+        exception: str | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -82,7 +83,18 @@ class RequestLogger:
             record["error_class"] = error_class
         if streamed:
             record["streamed"] = True
+        # The class of an unhandled failure, so a gateway_error line names
+        # its cause. A class name only - never the exception's text, which
+        # could carry client-controlled content.
+        if exception:
+            record["exception"] = exception
         line = redact(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+        # backslashreplace: a lone surrogate in any field must drop nothing.
+        # Encoding strictly raised UnicodeEncodeError - a ValueError - which
+        # the handler below swallowed, silently discarding the whole access
+        # line (and a plain print of a lone surrogate to a pipe hard-crashes
+        # Python). Clean lines are byte-identical (F9).
+        line = line.encode("utf-8", "backslashreplace").decode("utf-8")
         try:
             self._stream.write(line + "\n")
             self._stream.flush()

@@ -161,6 +161,11 @@ class RoutingError(Exception):
         retry_after_seconds: int | None = None,
         capability: str | None = None,
     ) -> None:
+        # Client text (model names, aliases) is interpolated into routing
+        # messages. Rewrite any lone surrogate to escape text at capture so
+        # it can never reach an UTF-8 encode boundary; clean messages are
+        # byte-identical (F9).
+        message = message.encode("utf-8", "backslashreplace").decode("utf-8")
         super().__init__(message)
         self.message = message
         self.code = code
