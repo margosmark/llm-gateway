@@ -1688,7 +1688,7 @@ renumbered on integration because main's register already uses R32–R44)*
 
 **Evidence:** `tests/test_alias_groups.py` exercises published-state changes, preservation of each alias's route and policy, invalid/empty tags, incomplete group refusal, and legacy/tag round-trips. `AliasGroupHttpTests` in `tests/test_end_to_end.py` drives the HTTP action and asserts only members are affected and that refusal is atomic.
 
-### R40 — A console alias save silently drops a file-configured request policy — **closed**
+### R79 — A console alias save silently drops a file-configured request policy — **closed**
 
 **Found:** 2026-10-24, during T21 (a request policy per alias).
 

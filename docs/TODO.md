@@ -779,10 +779,12 @@ route that actually served the request, in the same form as a dropped
 reasoning effort; the `system` instruction is recorded as its length in
 characters, never its text. Regression tests: `tests/test_alias_policy.py`
 (34 tests, both dialects, allowed and refused cases, ledger assertions).
-**Not in this landing:** console editing of the policy, and preservation
-of a file-configured policy across a console alias save - the console
-save path rebuilds the alias and drops the block; tracked as
-`docs/REVIEW.md` R40.
+**Console surface, same landing:** the owner console edits the policy
+block (defaults / caps / deny), and a console alias save never drops a
+file-configured policy - a payload that omits the block preserves it, an
+explicit block is validated by the same rule as the configuration file,
+and every save reports what happened to it; tracked as
+`docs/REVIEW.md` R79.
 
 **Why.** `Alias` (`config.py:243-312`) carries a primary route, fallbacks,
 a fallback policy and a cooldown. It carries **no parameters**: the client
@@ -1233,7 +1235,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T18 | Reuse upstream connections to the providers | perf | **done** |
 | T19 | Stop deep-copying the configuration on every read | perf | todo |
 | T20 | Separate the connect timeout from the read timeout | perf | todo |
-| T21 | A request policy per alias | 4 | todo |
+| T21 | A request policy per alias | 4 | **done** |
 | T22 | A budget per alias, enforced locally | 4 | **done** |
 | T23 | Statistics per alias | 4 | todo |
 | T24 | Export the ledger | 4 | todo |
@@ -1276,9 +1278,9 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 11. **T25** — the dry run. It is the cheapest of the new capabilities and
     the best tool against this project's actual bug class: it would have
     caught R9, R18, R21 and R25 on the day they were found.
-12. **T4, then T21** — the canonical thinking vocabulary first, then the
-    owner's per-alias thinking controls, so there is only ever one
-    vocabulary.
+12. **T4 and T21** — done: the canonical thinking vocabulary first,
+    then the owner's per-alias thinking controls, so there is only ever
+    one vocabulary.
 13. **T2, then T22 and T23** — the numbers first, then the budget and
     the per-alias statistics that act on them.
 14. **T13–T15** — breadth, once the core is complete.
