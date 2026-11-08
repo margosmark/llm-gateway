@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import unittest
 
-from gateway.http.request_id import MAX_CLIENT_REQUEST_ID_LENGTH, validate_client_request_id
+from gateway.config import Alias, RouteRef
+from gateway.http.request_id import (
+    MAX_CLIENT_REQUEST_ID_LENGTH,
+    validate_client_request_id,
+)
 from gateway.observability import RequestLedger
 from tests.test_end_to_end import FAKE_PROVIDER, GatewayHarness
-from gateway.config import Alias, RouteRef
 
 
 class ClientRequestIdValidationTests(unittest.TestCase):

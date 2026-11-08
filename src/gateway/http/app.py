@@ -3176,6 +3176,10 @@ class GatewayApp:
                     # An action that changed nothing also writes nothing: the
                     # entry's as-of time only moves when the entry does.
                     entry.observed_at = now
+                    # A hand-touched entry becomes manual (the spec: a manual
+                    # model action sets source to manual), and a no-op action
+                    # must not rewrite that marker.
+                    entry.source = "manual"
                 provider.models[model_id] = entry
                 result = {
                     "action": "manual",

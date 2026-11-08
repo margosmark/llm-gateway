@@ -38,7 +38,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from gateway.adapters.base import (
     AdapterError,
@@ -86,6 +86,7 @@ from gateway.http.security import (
 )
 from gateway.logging import RequestLogger
 from gateway.observability import LimitStore, RequestLedger
+from tests.owner_session import cookie_header
 
 #: Synthetic values only. This key exists to prove isolation, never to
 #: authenticate anywhere.
@@ -337,7 +338,7 @@ class InvocationTests(AdapterTestCase):
 class ErrorClassificationTests(AdapterTestCase):
     """Every failure the adapter can surface lands in the shared classes."""
 
-    CASES = [
+    CASES: ClassVar[list[tuple[int, dict, str]]] = [
         (401, {}, ERROR_AUTH),
         (403, {}, ERROR_AUTH),
         (429, {}, ERROR_RATE_LIMITED),
@@ -451,27 +452,33 @@ class OwnerSurfaceHarness:
             policy=policy,
             ledger=self.router._ledger,
             limits=LimitStore(),
-            release_identity=lambda: {},
+            release_identity=dict,
             base_url="http://127.0.0.1:8765",
             mounts=("/owner",),
             logger=RequestLogger(stream=self.log_stream, enabled=True),
         )
+        self._session_cookie: str | None = None
 
     def close(self) -> None:
         self._tmp.cleanup()
 
     def request(self, method: str, path: str, body: Any = None):
+        headers = [
+            ("Host", "127.0.0.1:8765"),
+            ("Origin", "http://127.0.0.1:8765"),
+            ("Content-Type", "application/json"),
+        ]
+        if path.startswith("/owner/"):
+            # Owner endpoints sit behind the sign-in gate; establish the
+            # session once and reuse it, the way main's harnesses do.
+            if self._session_cookie is None:
+                self._session_cookie = cookie_header(self.app)
+            headers.append(("Cookie", self._session_cookie))
         request = Request(
             method=method,
             path=path,
             raw_query="",
-            headers=Headers(
-                [
-                    ("Host", "127.0.0.1:8765"),
-                    ("Origin", "http://127.0.0.1:8765"),
-                    ("Content-Type", "application/json"),
-                ]
-            ),
+            headers=Headers(headers),
             body=json.dumps(body).encode("utf-8") if body is not None else b"",
             client_address=("127.0.0.1", 40000),
             server_port=8765,
@@ -533,7 +540,7 @@ class OwnerSurfaceTests(unittest.TestCase):
         self.assertEqual(described["fields"], ["api_key"])
         self.assertNotIn(SYNTHETIC_KEY, json.dumps(described))
         _, state = self.harness.request("GET", "/owner/api/state")
-        provider = [p for p in state["providers"] if p["provider_id"] == PROVIDER_ID][0]
+        provider = next(p for p in state["providers"] if p["provider_id"] == PROVIDER_ID)
         self.assertTrue(provider["credential_present"])
 
     def test_configuration_reads_and_saves_never_call_the_provider(self) -> None:
@@ -584,7 +591,7 @@ class OwnerSurfaceTests(unittest.TestCase):
         self.assertIn("observed_at", result)
 
         _, state = self.harness.request("GET", "/owner/api/state")
-        provider = [p for p in state["providers"] if p["provider_id"] == PROVIDER_ID][0]
+        provider = next(p for p in state["providers"] if p["provider_id"] == PROVIDER_ID)
         self.assertEqual(len(provider["models"]), 2)
         by_id = {m["model_id"]: m for m in provider["models"]}
         self.assertEqual(by_id["gpt-6-luna"]["source"], "discovered")
@@ -796,7 +803,7 @@ class CredentialIsolationTests(unittest.TestCase):
             {"api_key": "other-provider-key"},
         )
         _, state = self.harness.request("GET", "/owner/api/state")
-        provider = [p for p in state["providers"] if p["provider_id"] == PROVIDER_ID][0]
+        provider = next(p for p in state["providers"] if p["provider_id"] == PROVIDER_ID)
         self.assertFalse(provider["credential_present"])
         self.assertEqual(provider["state"], "not_configured")
 
@@ -862,7 +869,7 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.0"
 
-    def log_message(self, *args) -> None:  # noqa: D102 - silence the stdlib logger
+    def log_message(self, *args) -> None:
         pass
 
     @property
@@ -890,7 +897,7 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
         self.wfile.write(frames)
         self.wfile.flush()
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+    def do_GET(self) -> None:
         self.records.append(
             {
                 "method": "GET",
@@ -921,7 +928,7 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def do_POST(self) -> None:  # noqa: N802 - stdlib naming
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
         record = {
@@ -1043,7 +1050,7 @@ class EndToEndHarness:
             policy=policy,
             ledger=self.router._ledger,
             limits=LimitStore(),
-            release_identity=lambda: {},
+            release_identity=dict,
             base_url=f"http://127.0.0.1:{self.port}",
             mounts=("/owner",),
             logger=RequestLogger(enabled=False),

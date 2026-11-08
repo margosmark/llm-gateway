@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-
 MAX_CLIENT_REQUEST_ID_LENGTH = 128
 _CLIENT_REQUEST_ID_PATTERN = re.compile(r"\A[A-Za-z0-9._:-]+\Z", re.ASCII)
 
