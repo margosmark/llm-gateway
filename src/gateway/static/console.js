@@ -490,6 +490,89 @@
   }
 
 
+  // --- account quota (provider-health row) ------------------------------
+  // The backend publishes `account_quota` on a provider-health row: a
+  // plan/usage snapshot of windows ({label, used_percent, reset_at}) with
+  // observed_at, an optional unavailable_reason and an optional
+  // resets_banked count. This is metadata only — labels, percentages,
+  // reset times and counts. No credential, email, account id or
+  // token value is read here or anywhere else in the console; state is never
+  // supposed to carry one.
+  var QUOTA_STALE_AFTER_MS = 15 * 60 * 1000;
+  var QUOTA_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  function quotaPercentText(usedPercent) {
+    // % left = clamp(100 − used_percent, 0, 100). A window without a real
+    // number has no percentage to show — null means "do not render a
+    // percentage", because a missing number must never become "0% left".
+    var used = Number(usedPercent);
+    if (usedPercent === null || usedPercent === undefined || !isFinite(used)) return null;
+    var left = Math.min(100, Math.max(0, 100 - used));
+    var rounded = Math.round(left * 10) / 10;
+    return rounded === Math.round(rounded) ? String(Math.round(rounded)) : rounded.toFixed(1);
+  }
+
+  function quotaResetText(resetAt) {
+    // Reset times in the owner's local timezone (the console runs in the
+    // owner's browser): "15:57" when the reset is today, "10 Nov 06:27"
+    // once it falls on another day. Unparsable → null, never "Invalid Date".
+    if (!resetAt) return null;
+    var stamp = new Date(resetAt);
+    if (isNaN(stamp.getTime())) return null;
+    var now = new Date();
+    var hhmm = ("0" + stamp.getHours()).slice(-2) + ":" + ("0" + stamp.getMinutes()).slice(-2);
+    var sameDay = stamp.getFullYear() === now.getFullYear() &&
+      stamp.getMonth() === now.getMonth() &&
+      stamp.getDate() === now.getDate();
+    return sameDay ? hhmm : stamp.getDate() + " " + QUOTA_MONTHS[stamp.getMonth()] + " " + hhmm;
+  }
+
+  function quotaLineFor(quota) {
+    // The single line to render under a provider-health row, or null when
+    // the block is absent entirely (older state): no line at all — never an
+    // exception, never "undefined" text in the DOM.
+    if (!quota || typeof quota !== "object") return null;
+    if (quota.unavailable_reason) {
+      return "quota unavailable: " +
+        (typeof quota.unavailable_reason === "string" ? quota.unavailable_reason : "unknown reason");
+    }
+    var lines = [];
+    if (Object.prototype.toString.call(quota.windows) === "[object Array]") {
+      quota.windows.forEach(function (entry) {
+        if (!entry || typeof entry !== "object") return;
+        var percent = quotaPercentText(entry.used_percent);
+        if (percent === null) return;
+        var reset = quotaResetText(entry.reset_at);
+        lines.push(String(entry.label || "Quota") + " " + percent + "% left · " +
+          (reset ? "resets " + reset : "resets unknown"));
+      });
+    }
+    // windows null/empty or without a single usable percentage: honest
+    // absence wording, never a blank cell, never a zeroed percentage.
+    if (!lines.length) return "quota unavailable: no window data";
+    // Freshness: past 15 minutes the windows are not painted as current —
+    // the age of the observation stands in for the reset times.
+    var observed = new Date(quota.observed_at);
+    var age = isNaN(observed.getTime()) ? Infinity : Date.now() - observed.getTime();
+    if (age > QUOTA_STALE_AFTER_MS) {
+      return "quota data stale · observed " +
+        (age === Infinity ? "unknown" : ageText(age) + " ago");
+    }
+    return lines.join(" · ");
+  }
+
+  function quotaBankedLineFor(quota) {
+    // Addendum line under the quota line: how many resets the owner has
+    // banked. Present-block only (absent block → null, no line at all).
+    // null/absent/non-numeric → "—" — a missing count is never painted as
+    // the live baseline "0"; an actual 0 is a real number and renders.
+    if (!quota || typeof quota !== "object") return null;
+    var value = quota.resets_banked;
+    if (typeof value === "number" && isFinite(value)) return "resets banked: " + value;
+    return "resets banked: \u2014";
+  }
+
   // --- status -----------------------------------------------------------
 
   function renderStatus() {
@@ -583,6 +666,8 @@
 
     var healthCard = el("div", { class: "card" }, [el("h2", { text: "Provider health" })]);
     (state.provider_health || []).forEach(function (health) {
+      var quotaText = quotaLineFor(health.account_quota);
+      var bankedText = quotaBankedLineFor(health.account_quota);
       healthCard.appendChild(el("div", { class: "route" }, [
         el("div", { class: "head" }, [
           el("strong", { text: providerLabel(health.provider_id) }),
@@ -595,6 +680,11 @@
         el("div", { class: "small muted", text: "Recent outcomes: " + (health.recent_success_rate === null || health.recent_success_rate === undefined ? "Unknown" : Math.round(health.recent_success_rate * 100) + "% success") +
           " / " + (health.recent_failure_rate === null || health.recent_failure_rate === undefined ? "Unknown" : Math.round(health.recent_failure_rate * 100) + "% failure") +
           " (" + (health.recent_requests || 0) + " requests)" }),
+        // Account quota (Session/Weekly "% left · resets …") plus the banked
+        // reset count. Absent block → both null → no nodes: older state
+        // renders exactly as it did before, with no "undefined" text.
+        quotaText === null ? null : el("div", { class: "small quota", text: quotaText }),
+        bankedText === null ? null : el("div", { class: "small quota-banked", text: bankedText }),
         health.last_error ? el("div", { class: "small muted", text: "Last error: " + health.last_error }) : null
       ]));
     });
@@ -4100,6 +4190,11 @@
       emptyState: emptyState,
       savePreviewLines: savePreviewLines,
       STALE_AFTER_MS: STALE_AFTER_MS,
+      // The quota lines are pure text-in/text-out, so a test can drive the
+      // whole contract (fresh / stale / unavailable / absent / banked)
+      // without a DOM.
+      quotaLineFor: quotaLineFor,
+      quotaBankedLineFor: quotaBankedLineFor,
       renderStatusForTest: function (view, day, fetchedAt) {
         var previous = state;
         var previousDay = usageDay;
