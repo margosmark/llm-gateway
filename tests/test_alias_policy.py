@@ -423,7 +423,7 @@ class RoutingTests(unittest.TestCase):
 
 
 class ConsoleSaveTests(unittest.TestCase):
-    """A console alias save must never silently drop or change a policy (R40)."""
+    """A console alias save must never silently drop or change a policy (R79)."""
 
     def _harness(self, **policy: object) -> GatewayHarness:
         harness = GatewayHarness()

@@ -3145,7 +3145,7 @@ class GatewayApp:
                     {"error": {"message": exc.message, "type": "invalid_alias", "field": exc.field}}, 400
                 )
             # A save may carry a `policy` block, parsed by the same rule
-            # as the configuration file (R40). The console form sends
+            # as the configuration file (R79). The console form sends
             # none, so a file-configured policy survives an unrelated
             # edit instead of being dropped silently.
             policy_supplied = "policy" in payload
@@ -3210,7 +3210,7 @@ class GatewayApp:
                 config.aliases[alias_name] = alias
                 config.aliases[alias_name].budget = budget
             # What the save did to the request policy is reported on
-            # every response: a change is never silent (R40).
+            # every response: a change is never silent (R79).
             return json_response(
                 _with_warning({"ok": True, "policy": _policy_save_outcome(policy_before, policy)}, alias)
             )
@@ -3577,7 +3577,7 @@ def _policy_save_outcome(before, after) -> dict:
 
     ``preserved`` means an existing policy was carried across an edit the
     owner made to other fields (the console form never submits one, so
-    this is the common case and the R40 guarantee); ``unchanged`` means
+    this is the common case and the R79 guarantee); ``unchanged`` means
     an explicitly resubmitted block matched the one already stored.
     """
     if before is None:
