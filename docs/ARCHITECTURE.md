@@ -289,7 +289,11 @@ the rest of the state.
    never serialised into responses, logs, exports or `/version`.
 6. The owner console may mutate configuration and enroll credentials on this
    listener. Provider tests and catalogue refreshes are explicit actions; no
-   page load or ordinary configuration save calls a provider.
+   page load or ordinary configuration save calls a provider except the one
+   named exception under *State boundaries* — the ChatGPT account-usage read:
+   one bounded, read-only GET issued inside state assembly behind a 60s TTL,
+   never triggered by a `/v1` inference request, with no on-demand endpoint
+   and never refreshing a credential (`CHATGPT_CODEX_CONTRACT.md` §4).
 7. `GET /version`, `GET /health` and `GET /metrics` remain unauthenticated;
    `/v1/*` stays keyless until an owner sets a client API key
    (`POST /owner/api/auth/client-key`, owner session required unless the
