@@ -1,11 +1,11 @@
-"""R42 regressions: an upstream that dies mid-answer is recorded, counted and signalled.
+"""R77 regressions: an upstream that dies mid-answer is recorded, counted and signalled.
 
-docs/REVIEW.md **R42** (opened by QA card t_1b61e593, fixed here): the
+docs/REVIEW.md **R77** (opened by QA card t_1b61e593, fixed here): the
 ledger record is written at route time, so a provider that failed *after*
 the route answered - while the stream was being consumed - left a record
 that read success and a client that was silently truncated.
 
-Rows (1:1 with the R42 acceptance criteria), synthetic adapters and
+Rows (1:1 with the R77 acceptance criteria), synthetic adapters and
 loopback sockets only - no network, no credentials, no containers:
 
 1. ``stream:true`` + dying upstream -> the ledger record carries
@@ -53,7 +53,7 @@ from tests.test_end_to_end import FAKE_PROVIDER, FakeAdapter, GatewayHarness
 
 UPSTREAM_MODEL = "gpt-6-luna"
 DELTA = b'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
-#: The in-band failure signal R42 requires, byte-exact up to the payload.
+#: The in-band failure signal R77 requires, byte-exact up to the payload.
 ERROR_FRAME_NEEDLE = b'data: {"error": {"message"'
 TRANSIENT = "transient"
 AUTH = "auth"
@@ -161,7 +161,7 @@ def _raw_stream_request(harness: GatewayHarness, body: dict[str, Any]) -> tuple[
     """POST *body* over a real socket; read to EOF.
 
     Returns ``(raw_bytes, stderr, timed_out)``. A stream that never ends
-    (no chunked terminator, the R42 symptom) shows up as ``timed_out``.
+    (no chunked terminator, the R77 symptom) shows up as ``timed_out``.
     """
     captured = io.StringIO()
     original_stderr = sys.stderr
@@ -257,7 +257,7 @@ class StreamingMidStreamFailureTests(unittest.TestCase):
         evidence = self.evidence
         self.assertFalse(
             evidence["timed_out"],
-            "the stream never ended: no chunked terminator was written (R42 symptom)",
+            "the stream never ended: no chunked terminator was written (R77 symptom)",
         )
         head, body = evidence["head"], evidence["body"]
         self.assertTrue(head.startswith(b"HTTP/1.1 200"), head)

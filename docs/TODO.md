@@ -493,15 +493,24 @@ the session derivation already uses (`core/routing.py:461`).
 **Note.** This is a *local* protection, and it must be described as such. It
 is not an access-control boundary, and the console must not imply it is.
 
-### T11 — Cancel the upstream when the client disconnects — `todo`
+### T11 — Cancel the upstream when the client disconnects — `done`
 
 **Why.** A broken pipe is caught at the HTTP layer (`http/core.py:289`),
 but the upstream request is not cancelled. An abandoned stream keeps
 running upstream and keeps consuming the provider's allowance.
 
-**Scope.** Propagate the client disconnect to the adapter, abort the
-upstream request, and record the outcome as a client abort rather than a
-provider failure.
+**Landed.** The HTTP layer notices the hangup and the routing core
+aborts the upstream request behind it through the provider-neutral seam
+(`gateway.core.abort`, `T11-ANCHOR: client-abort propagation`); the
+ledger classifies the outcome `client_abort` - distinct from success and
+from every provider failure - and the owner console's request table
+shows it. An upstream that dies *after* the route answered is amended
+with the adapter's own class and signalled in band instead of truncated
+(R77 in [`REVIEW.md`](REVIEW.md)). Evidence: `tests/test_abort.py`,
+`tests/test_client_abort.py`,
+`tests/test_http_client_disconnect_abort.py`,
+`tests/test_t11_client_disconnect_acceptance.py`,
+`tests/test_r42_upstream_midstream_ledger.py`.
 
 ### T12 — Present cooldowns and skipped routes properly — `done`
 
@@ -1186,7 +1195,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T8 | Console backup, export and import | 2 | todo |
 | T9 | A `/metrics` endpoint | 2 | todo |
 | T10 | Concurrency cap and per-client rate limit | 2 | todo |
-| T11 | Cancel the upstream on client disconnect | 2 | todo |
+| T11 | Cancel the upstream on client disconnect | 2 | **done** |
 | T12 | Present cooldowns and skipped routes properly | 2 | **done** |
 | T13 | A plain OpenAI API-key provider | 3 | todo |
 | T14 | A native Anthropic API-key provider | 3 | todo |
@@ -1230,7 +1239,9 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
    `POST /v1/messages` is public on the LAN trust model.
 7. **T17** — done. 41ms is off every small response.
 8. **T7, T8, T9** — operational durability, then observability.
-9. **T10, T11, T12** — robustness and presentation.
+9. **T10, T12** — robustness and presentation; **T11** is done: a
+   client disconnect now aborts the upstream request instead of letting
+   it run to completion.
 10. **T18, T19, T20** — network and CPU efficiency, once the latency
     defect is gone. T18 is done: upstream connections are reused, so a
     short request no longer pays a fresh TLS handshake.

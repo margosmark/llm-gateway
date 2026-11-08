@@ -670,7 +670,7 @@ class GatewayApp:
             result = json_response({"error": {"message": exc.message, "type": exc.error_class}}, 502)
             # The client is told the truth; the record written at route
             # time said "success", so amend it to agree with this answer
-            # (docs/REVIEW.md R42).
+            # (docs/REVIEW.md R77).
             self._amend_late_failure(request, exc, status=502)
             self._log_request(request, result, started)
             return result
@@ -1712,7 +1712,7 @@ class GatewayApp:
         # *after* routing succeeded - while the stream is being consumed,
         # or while a streaming-only answer is aggregated - can still be
         # classified when it surfaces out in handle(). See docs/REVIEW.md
-        # R42.
+        # R77.
         request.context["route_context"] = routed.route_context
         request.context["serving_model"] = routed.attribution.serving_model
 
