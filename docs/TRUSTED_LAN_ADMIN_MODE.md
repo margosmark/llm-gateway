@@ -115,7 +115,10 @@ public exposure.
 - Keep `/version` metadata-only and preserve its fixed schema.
 - Keep explicit provider actions: saving a credential, testing it, device
   authorization, and model-catalogue refresh are distinct user actions. Page
-  loads never call a provider.
+  loads never call a provider except the ChatGPT account-usage read — one
+  bounded, read-only GET issued inside state assembly behind a 60s TTL,
+  never triggered by a `/v1` inference request, with no on-demand endpoint
+  and never refreshing a credential (`docs/CHATGPT_CODEX_CONTRACT.md` §4).
 - Keep fallback opt-in and fail-closed after streams, possible tool side
   effects, ambiguous delivery, or an ineligible failure class.
 - Continue to reject forwarded headers until a separately designed and tested
