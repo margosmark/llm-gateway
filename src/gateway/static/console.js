@@ -3280,6 +3280,46 @@
       var confirmed = Array.prototype.slice.call(confirmProviders.querySelectorAll("input:checked"))
         .map(function (box) { return box.value; });
       var phaseRouting = null;
+      var policy = editing && editing.policy ? editing.policy : null;
+      // Removal is an explicit owner action and takes precedence over
+      // any populated policy controls: it submits an explicit null so
+      // the server clears the block (resubmitting the old policy
+      // instead would report "unchanged" and leave it in force).
+      // Otherwise send the editor's full intended policy explicitly
+      // rather than relying on preservation.
+      if (removeRequestPolicy.checked) {
+        policy = null;
+      } else {
+        var defaults = {};
+        var caps = {};
+        var deny = {};
+        if (defaultTemperature.value !== "") defaults.temperature = Number(defaultTemperature.value);
+        // policyInt() keeps an unsafe token value digit for digit: a
+        // plain Number() would round it here, and the server would
+        // store the rounded replacement for an edit the owner never
+        // made (review finding, Low).
+        if (defaultTokens.value !== "") defaults.max_output_tokens = policyInt(defaultTokens.value);
+        if (defaultThinking.value) defaults.thinking_level = defaultThinking.value;
+        if (defaultSystem.value.trim()) defaults.system = defaultSystem.value;
+        if (capTokens.value !== "") caps.max_output_tokens = policyInt(capTokens.value);
+        if (capThinking.value) caps.thinking_level = capThinking.value;
+        if (denyTools.checked) deny.tools = true;
+        if (denyStore.value !== "") deny.store = denyStore.value === "true";
+        if (Object.keys(defaults).length || Object.keys(caps).length || Object.keys(deny).length) {
+          policy = { defaults: defaults, caps: caps, deny: deny };
+        } else {
+          // Every policy field is blank: the editor shows no rules,
+          // so the empty rebuild must never fall through to the
+          // stored policy - that would resubmit the old block
+          // verbatim, the server would report "unchanged", and
+          // every rule the owner had just cleared would stay in
+          // force while the editor showed nothing (review finding,
+          // Low). An explicit null is the deliberate clear the
+          // endpoint understands, the same wire form the Remove
+          // control submits.
+          policy = null;
+        }
+      }
       // Removal is an explicit owner action and takes precedence over
       // the enabled toggle. Otherwise retain an existing disabled policy
       // so it can be re-enabled without rebuilding its configuration.
@@ -3308,46 +3348,6 @@
             on_uncertain: onUncertain.value
           }
         };
-      }
-      var policy = editing && editing.policy ? editing.policy : null;
-      // Removal is an explicit owner action and takes precedence over
-      // any populated policy controls: it submits an explicit null so
-      // the server clears the block (resubmitting the old policy
-      // instead would report "unchanged" and leave it in force).
-      // Otherwise send the editor's full intended policy explicitly
-      // rather than relying on preservation.
-      if (removeRequestPolicy.checked) {
-        policy = null;
-      } else {
-        var policyDefaultsOut = {};
-        var policyCapsOut = {};
-        var policyDenyOut = {};
-        if (defaultTemperature.value !== "") policyDefaultsOut.temperature = Number(defaultTemperature.value);
-        // policyInt() keeps an unsafe token value digit for digit: a
-        // plain Number() would round it here, and the server would
-        // store the rounded replacement for an edit the owner never
-        // made (review finding, Low).
-        if (defaultTokens.value !== "") policyDefaultsOut.max_output_tokens = policyInt(defaultTokens.value);
-        if (defaultThinking.value) policyDefaultsOut.thinking_level = defaultThinking.value;
-        if (defaultSystem.value.trim()) policyDefaultsOut.system = defaultSystem.value;
-        if (capTokens.value !== "") policyCapsOut.max_output_tokens = policyInt(capTokens.value);
-        if (capThinking.value) policyCapsOut.thinking_level = capThinking.value;
-        if (denyTools.checked) policyDenyOut.tools = true;
-        if (denyStore.value !== "") policyDenyOut.store = denyStore.value === "true";
-        if (Object.keys(policyDefaultsOut).length || Object.keys(policyCapsOut).length || Object.keys(policyDenyOut).length) {
-          policy = { defaults: policyDefaultsOut, caps: policyCapsOut, deny: policyDenyOut };
-        } else {
-          // Every policy field is blank: the editor shows no rules,
-          // so the empty rebuild must never fall through to the
-          // stored policy - that would resubmit the old block
-          // verbatim, the server would report "unchanged", and
-          // every rule the owner had just cleared would stay in
-          // force while the editor showed nothing (review finding,
-          // Low). An explicit null is the deliberate clear the
-          // endpoint understands, the same wire form the Remove
-          // control submits.
-          policy = null;
-        }
       }
       var payload = {
         action: "save",
@@ -3698,15 +3698,19 @@
           // POSTed, and never shown as a raw engine SyntaxError. The parse
           // is lossless so a token value a JSON.parse would round keeps
           // its digits through the round trip.
-          var payload;
           try {
-            payload = parseJsonLossless(text);
+            return parseJsonLossless(text);
           } catch (parseError) {
             toast("That file is not valid JSON (" +
               (parseError && parseError.message ? parseError.message : "parse failed") +
               "). Nothing was imported.", "bad");
-            return null;
+            // No JSON document parses to undefined, so this sentinel can
+            // only be the refused parse - a genuine null file still falls
+            // through to the object check below.
+            return undefined;
           }
+        }).then(function (payload) {
+          if (payload === undefined) return null;
           if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
             toast("That file is not a gateway configuration object. Nothing was imported.", "bad");
             return null;
