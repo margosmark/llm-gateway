@@ -29,12 +29,11 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from gateway.http.keepalive import with_sse_keepalives
-
 # The one deliberate dependency: the client-abort seam. This layer
 # notices that the client has gone; the routing core owns cancelling the
 # upstream request behind it (``T11-ANCHOR: client-abort propagation``).
 from gateway.core.abort import abort_request
+from gateway.http.keepalive import with_sse_keepalives
 
 MAX_BODY_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_WORKERS = 32
@@ -513,7 +512,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if callable(closer):
             try:
                 closer()
-            except Exception:  # noqa: BLE001 - cleanup after a hang-up must not raise.
+            except Exception:  # noqa: BLE001, S110 - cleanup after a hang-up must not raise.
                 pass
         request_id = ""
         if request is not None:

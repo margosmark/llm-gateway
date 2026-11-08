@@ -23,12 +23,13 @@ is gone, and assert the whole disconnect path:
 
 from __future__ import annotations
 
-import itertools
 import io
+import itertools
 import socket
 import sys
 import unittest
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from gateway.core.abort import (
     RouteContext,

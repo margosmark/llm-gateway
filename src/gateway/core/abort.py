@@ -36,8 +36,9 @@ from __future__ import annotations
 
 import inspect
 import threading
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator
+from typing import Any
 
 #: The error class of a request the client abandoned. It is deliberately
 #: not one of the provider failure classes: the upstream did not fail.
@@ -64,7 +65,7 @@ CONTEXT_REGISTRY_LIMIT = 1024
 #: Observers of every abort, whoever caused it. A listener that has to
 #: correct the recorded outcome of an aborted request registers here
 #: instead of editing the routing core.
-_ABORT_OBSERVERS: list[Callable[["RouteContext", "AbortOutcome"], None]] = []
+_ABORT_OBSERVERS: list[Callable[[RouteContext, AbortOutcome], None]] = []
 _ABORT_OBSERVERS_LOCK = threading.Lock()
 
 
@@ -147,9 +148,9 @@ class RouteContext:
     #: Why the request was aborted.
     abort_reason: str | None = None
     #: Observers of this request, notified once, when it is aborted.
-    observers: list[Callable[["RouteContext", "AbortOutcome"], None]] = field(default_factory=list)
+    observers: list[Callable[[RouteContext, AbortOutcome], None]] = field(default_factory=list)
     #: The outcome of the abort, once it has happened.
-    _outcome: "AbortOutcome | None" = field(default=None, repr=False, compare=False)
+    _outcome: AbortOutcome | None = field(default=None, repr=False, compare=False)
     #: The lock that makes the abort idempotent under concurrency.
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     #: Set once the first abort has finished signalling the adapter. A
@@ -157,7 +158,7 @@ class RouteContext:
     #: same outcome.
     _signalled: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
-    def add_observer(self, observer: Callable[["RouteContext", "AbortOutcome"], None]) -> None:
+    def add_observer(self, observer: Callable[[RouteContext, AbortOutcome], None]) -> None:
         """Register a callback notified once, when the request is aborted.
 
         An observer registered after the abort has already happened is
@@ -192,7 +193,7 @@ class RouteContext:
         adapter's cancellation path. Later calls change nothing and report
         that the request was already aborted.
         """
-        observers: list[Callable[["RouteContext", "AbortOutcome"], None]] = []
+        observers: list[Callable[[RouteContext, AbortOutcome], None]] = []
         with self._lock:
             if self.aborted:
                 already = True
@@ -297,7 +298,7 @@ class RouteContext:
 
 
 def _notify(
-    observer: Callable[["RouteContext", "AbortOutcome"], None],
+    observer: Callable[[RouteContext, AbortOutcome], None],
     context: RouteContext,
     outcome: AbortOutcome,
 ) -> None:
@@ -463,7 +464,7 @@ def abort_request(request_id: str, reason: str = CLIENT_ABORT_REASON) -> AbortOu
     return abort_upstream(find_route_context(request_id), reason)
 
 
-def register_abort_observer(observer: Callable[["RouteContext", "AbortOutcome"], None]) -> None:
+def register_abort_observer(observer: Callable[[RouteContext, AbortOutcome], None]) -> None:
     """Register an observer of every abort.
 
     A listener that has to correct the recorded outcome of an aborted
@@ -475,7 +476,7 @@ def register_abort_observer(observer: Callable[["RouteContext", "AbortOutcome"],
             _ABORT_OBSERVERS.append(observer)
 
 
-def unregister_abort_observer(observer: Callable[["RouteContext", "AbortOutcome"], None]) -> None:
+def unregister_abort_observer(observer: Callable[[RouteContext, AbortOutcome], None]) -> None:
     """Remove an observer registered with :func:`register_abort_observer`."""
     with _ABORT_OBSERVERS_LOCK:
         if observer in _ABORT_OBSERVERS:

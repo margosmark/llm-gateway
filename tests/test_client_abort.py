@@ -26,7 +26,6 @@ from gateway.core.client_abort import (
     is_installed,
     is_provider_error_class,
     provider_error_count,
-    uninstall_client_abort_correction,
 )
 from gateway.observability import RequestEvent, RequestLedger, utc_now_iso
 

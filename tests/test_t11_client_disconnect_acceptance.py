@@ -49,7 +49,8 @@ import struct
 import sys
 import time
 import unittest
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 from gateway.adapters.base import AdapterError, ProviderResponse
 from gateway.config import ERROR_CLASSES, Alias, RouteRef
@@ -299,7 +300,7 @@ def _release_context(request_id: str | None) -> None:
 class ClientDisconnectEndToEndTests(unittest.TestCase):
     """One real mid-stream disconnect; each matrix row asserted separately."""
 
-    evidence: dict[str, Any] = {}
+    evidence: ClassVar[dict[str, Any]] = {}
     harness: GatewayHarness | None = None
 
     @classmethod
@@ -538,7 +539,7 @@ class UpstreamAbortDistinctnessTests(unittest.TestCase):
             body={"model": "coding", "messages": [{"role": "user", "content": "hi"}]},
         )
         self.assertEqual(status, 502)
-        refusal_event = list(refusing.router._ledger.recent(limit=10))[0]
+        refusal_event = next(iter(refusing.router._ledger.recent(limit=10)))
 
         # ...and (b) the client walks away mid-answer.
         disconnecting = _make_harness(CancelRecordingAdapter())

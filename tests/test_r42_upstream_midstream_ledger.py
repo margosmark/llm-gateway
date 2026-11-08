@@ -44,7 +44,8 @@ import socket
 import sys
 import time
 import unittest
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 from gateway.adapters.base import AdapterError, ProviderResponse
 from gateway.config import ERROR_CLASSES, Alias, RouteRef
@@ -186,7 +187,7 @@ def _raw_stream_request(harness: GatewayHarness, body: dict[str, Any]) -> tuple[
         while True:
             try:
                 chunk = sock.recv(65536)
-            except socket.timeout:
+            except TimeoutError:
                 timed_out = True
                 break
             if not chunk:
@@ -219,7 +220,7 @@ def _error_frame(body: bytes) -> dict[str, Any] | None:
 class StreamingMidStreamFailureTests(unittest.TestCase):
     """One real mid-stream death; each acceptance row asserted separately."""
 
-    evidence: dict[str, Any] = {}
+    evidence: ClassVar[dict[str, Any]] = {}
     harness: GatewayHarness | None = None
 
     @classmethod
@@ -308,7 +309,7 @@ class StreamingMidStreamFailureTests(unittest.TestCase):
 # row 2: the class is no longer dropped (auth)
 # --------------------------------------------------------------------------
 class MidStreamAuthClassTests(unittest.TestCase):
-    evidence: dict[str, Any] = {}
+    evidence: ClassVar[dict[str, Any]] = {}
     harness: GatewayHarness | None = None
 
     @classmethod
@@ -420,7 +421,7 @@ class UnhandledMidStreamErrorTests(unittest.TestCase):
         self.addCleanup(harness.close)
         ledger = harness.router._ledger
         assert ledger is not None
-        raw, stderr, timed_out = _raw_stream_request(
+        _raw, stderr, timed_out = _raw_stream_request(
             harness,
             {"model": "coding", "messages": [{"role": "user", "content": "hi"}], "stream": True},
         )
