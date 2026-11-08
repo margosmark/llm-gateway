@@ -30,7 +30,7 @@ Matrix (this file maps 1:1 onto the card):
 5. **Refusal vs abort distinctness** - an upstream refusal is recorded as a
    provider class and counted; a client abort is recorded as
    ``client_abort`` and never counted; an upstream mid-stream failure is
-   never relabeled ``client_abort`` (R42, `docs/REVIEW.md`, now also
+   never relabeled ``client_abort`` (R77, `docs/REVIEW.md`, now also
    records the provider's own class there - this file pins the
    distinctness).
 
@@ -570,7 +570,7 @@ class UpstreamAbortDistinctnessTests(unittest.TestCase):
     def test_upstream_midstream_failure_is_never_classified_as_client_abort(self) -> None:
         """The upstream dying mid-answer must never read as a client abort.
 
-        R42 (`docs/REVIEW.md`) closed the gap this test was written
+        R77 (`docs/REVIEW.md`) closed the gap this test was written
         against: that record now carries the adapter's own class (or
         ``client_abort`` only when the caller had left). What this test
         pins is the distinctness T11 requires - a provider failure is
