@@ -14,9 +14,9 @@ import json
 import unittest
 
 from gateway.config import (
+    MAX_SYSTEM_DEFAULT_LENGTH,
     Alias,
     AliasPolicy,
-    MAX_SYSTEM_DEFAULT_LENGTH,
     RouteRef,
 )
 from gateway.core.capabilities import DIALECT_OPENAI_CHAT, DIALECT_OPENAI_RESPONSES
@@ -148,7 +148,7 @@ class DefaultTests(unittest.TestCase):
         self.assertNotIn("system", [change.field for change in changes])
 
     def test_the_responses_dialect_places_the_default_in_instructions(self) -> None:
-        out, changes = apply_alias_policy(self.alias, {"model": "coding", "input": "hi"}, RESPONSES)
+        out, _changes = apply_alias_policy(self.alias, {"model": "coding", "input": "hi"}, RESPONSES)
         self.assertEqual(out["instructions"], "You are a careful senior engineer.")
         self.assertEqual(out["max_output_tokens"], 8000)
         self.assertEqual(out["reasoning"], {"effort": "high"})
