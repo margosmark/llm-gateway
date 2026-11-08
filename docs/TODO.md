@@ -716,7 +716,7 @@ Each item below also needs: a `list_models()` returning `list[ModelInfo]`,
 tested through the **generic** refresh handler; safe error classification
 into the shared classes; and no implicit provider calls.
 
-### T13 — A plain OpenAI API-key provider — `todo`
+### T13 — A plain OpenAI API-key provider — `done`
 
 The most requested provider, and the least novel: a standard
 `/v1/chat/completions` and `/v1/responses` upstream with a bearer token.
@@ -923,7 +923,7 @@ normal gateway errors. Provider-error fallbacks are explicitly unevaluated.
 Regression evidence: `ApiSurfaceTests.test_preview_converts_request_without_provider_call_or_ledger_entry`
 and `ApiSurfaceTests.test_preview_refuses_unpublished_alias`.
 
-### T26 — Weighted routes within an alias — `todo`
+### T26 — Weighted routes within an alias — `done`
 
 **Why.** An alias is one primary plus ordered fallbacks. Sometimes the
 right shape is to *split* traffic across two models at the same provider -
@@ -946,7 +946,7 @@ reasoning continuity).
 **Care.** This is the feature most likely to be over-engineered for a
 single owner. It should land only if the simpler shapes have been used.
 
-### T27 — Honour a client-supplied request id — `todo`
+### T27 — Honour a client-supplied request id — `done`
 
 **Why.** The gateway invents its own request id
 (`observability.new_request_id`). A client that already correlates its own
@@ -1227,7 +1227,7 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T10 | Concurrency cap and per-client rate limit | 2 | todo |
 | T11 | Cancel the upstream on client disconnect | 2 | **done** |
 | T12 | Present cooldowns and skipped routes properly | 2 | **done** |
-| T13 | A plain OpenAI API-key provider | 3 | todo |
+| T13 | A plain OpenAI API-key provider | 3 | **done** |
 | T14 | A native Anthropic API-key provider | 3 | todo |
 | T15 | A local provider | 3 | todo |
 | T16 | A manual model entry must merge, not replace | 1 | **done** |
@@ -1240,8 +1240,8 @@ RUNBOOK §8 (recovery procedure) and §9 (retired legacy systemd unit).
 | T23 | Statistics per alias | 4 | todo |
 | T24 | Export the ledger | 4 | todo |
 | T25 | A dry run: show the upstream payload without sending it | 4 | **done** |
-| T26 | Weighted routes within an alias | 4 | todo |
-| T27 | Honour a client-supplied request id | 4 | todo |
+| T26 | Weighted routes within an alias | 4 | **done** |
+| T27 | Honour a client-supplied request id | 4 | **done** |
 | T28 | Keepalive comments on a long stream | 4 | todo |
 | T29 | A concurrency cap per provider | 4 | todo |
 | T30 | Groups of aliases | 4 | **done** |
