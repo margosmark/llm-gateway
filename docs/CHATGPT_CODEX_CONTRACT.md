@@ -292,14 +292,56 @@ dialect.
 
 ---
 
-## 4. What the adapter never does
+## 4. Account usage (read-only)
+
+```text
+GET https://chatgpt.com/backend-api/wham/usage
+```
+
+The account's own quota windows, read with the same stored credential the
+inference path uses. Probed from inside the production container (HTTP 200,
+~0.3s): a primary window of 18,000s, a secondary of 604,800s, `plan_type`
+and `credits`.
+
+* **Read-only, and it never refreshes.** One bounded GET per observation. A
+  `401` is published as `http_401` and the credential is left to §1.5, the
+  adapter's own refresh lifecycle; a stall is `timeout`. This path never
+  writes the credential store.
+* **Allowlisted by construction.** Only `rate_limit` (its two windows),
+  `credits.balance`, `plan_type` and `rate_limit_reset_credits`
+  (`available_count`, `applicable_available_count`,
+  `immediate_reset_purchase_eligible`) are read. `email`, `user_id`,
+  `account_id`, `promo`, `spend_control` and `model_usage` are present in
+  the response and are never looked at, so they cannot reach state, a log
+  line or an error. A counter the response omits publishes `null`; `0` means
+  the account has none.
+* **Windows are labelled by their published duration**:
+  `limit_window_seconds` 18000 → `Session`, 604800 → `Weekly`. A missing or
+  unknown duration falls back to position (primary → Session, secondary →
+  Weekly), so a duration-less secondary window is never mislabelled Session.
+* **Cadence.** The read runs inside `/owner/api/state` assembly behind a
+  60s TTL, on the chatgpt_codex provider-health row's `account_quota`
+  block. No `/v1` inference request triggers it, and there is no on-demand
+  endpoint for it: the Origin/CSRF surface is unchanged.
+* **Failure is absence, not zeros.** A missing credential, `http_<code>`,
+  `timeout` or an unparseable body publishes `unavailable_reason` with
+  `windows: null` and every measured field null — never a zeroed percentage
+  and never an invented reset time.
+
+`tests/test_account_quota_state.py` holds every one of these rules, including
+a grep of the serialized state for identity and credential material.
+
+---
+
+## 5. What the adapter never does
 
 * It never re-displays the device code, the access token, the refresh token
   or the id token after they are stored.
-* It never calls an undocumented endpoint. In particular it does **not**
-  probe for usage or quota: there is no official machine-readable allowance
-  API for a personal ChatGPT plan, so the console reports those limits as
-  **Unknown** and links the official dashboard.
+* It never calls an undocumented endpoint from the inference or credential
+  path. The single exception is the usage read above (§4): one read-only GET
+  of the account's own endpoint, issued only from state assembly and never
+  to refresh a credential. Model-level allowance that read does not publish
+  stays **Unknown** and links the official dashboard.
 * It never guesses. A model with no documented dialect, and a request with a
   capability the target cannot express, are refused with an actionable
   message.
@@ -308,7 +350,7 @@ dialect.
 
 ---
 
-## 5. Conformance checklist
+## 6. Conformance checklist
 
 Each line is a test in `tests/`.
 
@@ -327,17 +369,25 @@ Each line is a test in `tests/`.
 | 11 | A non-streaming client gets one object | `test_streaming_only_upstream.py` |
 | 12 | A failed authorisation is reported, not guessed | `test_device_flow.py` |
 | 13 | The upstream body is never echoed | `test_adapters.py` |
+| 14 | The state block matches a direct usage read at the same minute | `test_account_quota_state.py` |
+| 15 | A missing credential or a `401` publishes `unavailable_reason` with `windows: null`, and a `401` rewrites nothing | `test_account_quota_state.py` |
+| 16 | No inference request triggers the usage read; the TTL bounds a poll to one read | `test_account_quota_state.py` |
+| 17 | No identity or credential field reaches the serialized state | `test_account_quota_state.py` |
 
 ---
 
-## 6. What is not documented by OpenAI
+## 7. What is not documented by OpenAI
 
 * No supported third-party proxying path for a consumer ChatGPT
   subscription. The device-code path is documented as a **beta**; this
   gateway's use of it is not endorsed by OpenAI, and the console says so.
-* No machine-readable usage, quota or reset API for a personal plan.
-  Published per-plan estimates exist; actual remaining allowance is
-  **Unknown** to the gateway.
+* No **documented** machine-readable usage or quota API for a personal plan.
+  The gateway reads the account's own usage endpoint (§4) because a probe
+  from inside the container answers it with real windows; being
+  undocumented, it can change without notice, which is why every failure
+  publishes `unavailable_reason` rather than a guessed allowance.
+  Model-level allowance that read does not cover stays **Unknown**, with
+  published per-plan estimates as the only other source.
 * No published per-model context window for the public API that matches the
   Codex backend's own profile. The gateway reports the backend's numbers,
   which are what that upstream will actually accept.

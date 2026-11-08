@@ -800,8 +800,9 @@ why.
 **Landed.** Optional monthly USD alias cap; known spend uses successful ledger token counters and the published catalogue prices. Unknown/incomplete totals are explicitly uncapped. The API checks before routing and returns actionable HTTP 429; the console shows spend, soft-cap caveat and UTC reset boundary. See `gateway/budget.py`, `tests/test_costs.py`, and `tests/test_end_to_end.py`.
 
 **Why.** The provider's allowance is **Unknown** for every provider that
-does not publish one, and the gateway calls no undocumented endpoint to
-find out. That is the honest answer - but it is not the *only* answer.
+does not publish one (the ChatGPT account's own quota windows are now read
+read-only per state poll — `CHATGPT_CODEX_CONTRACT.md` §4 — but model-level
+allowance still is not). That is the honest answer - but it is not the *only* answer.
 The gateway can count what it spends, and a local cap does not need the
 provider's permission.
 

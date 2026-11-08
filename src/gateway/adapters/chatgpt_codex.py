@@ -38,6 +38,7 @@ import os
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from gateway.adapters.base import (
@@ -76,6 +77,46 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 #: The documented ChatGPT-authenticated inference base.
 CHATGPT_BASE = "https://chatgpt.com/backend-api/codex"
 MODELS_PATH = "/models"
+
+#: The read-only account-usage endpoint behind the owner console's quota
+#: line. Read from inside the production container on 2026-11-08: HTTP 200
+#: in ~0.3s, ``primary_window`` 0% used / ``secondary_window`` 100% used,
+#: plan ``plus``. It is fetched only from state assembly (see
+#: ``gateway.observability.AccountQuotaStore``), never from an inference
+#: request, and it is parsed by :func:`parse_account_usage` - allowlist,
+#: never denylist: the response also carries ``email``, ``user_id``,
+#: ``account_id``, ``promo`` and ``spend_control``, and none of those is
+#: read into state, a log line, or an error message.
+USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+
+#: One observation's hard budget. The state render that triggers it shares
+#: the console poll's sub-2s bar (R56), so a stalled endpoint is abandoned
+#: and reported as ``timeout`` instead of holding an owner poll open. The
+#: live endpoint answers in ~0.3s from this LAN, so the budget is an
+#: outage bound, not a normal wait.
+USAGE_BUDGET_SECONDS = 3.0
+
+#: Window labels keyed by the duration the payload itself publishes.
+USAGE_WINDOW_LABELS: dict[int, str] = {18000: "Session", 604800: "Weekly"}
+
+#: Positional fallback for a window whose duration is missing or
+#: unrecognized: the primary window is the session, the secondary the
+#: rolling week. Position is consulted *after* the duration lookup, so a
+#: duration-less weekly-only payload still reads "Weekly" and never
+#: "Session" (the mislabelled-window bug class).
+USAGE_POSITIONAL_LABELS: dict[str, str] = {
+    "primary_window": "Session",
+    "secondary_window": "Weekly",
+}
+
+#: Published reasons for an unavailable ``account_quota`` block. An HTTP
+#: answer is published as ``http_<code>``; ``timeout`` means no HTTP
+#: status was obtained at all (stall, deadline, refused or unreachable);
+#: ``empty_usage_payload`` means a 200 whose payload carried no publishable
+#: window. None of them is ever a zeroed percentage or an invented reset.
+REASON_CREDENTIAL_MISSING = "credential_missing"
+REASON_TIMEOUT = "timeout"
+REASON_EMPTY_USAGE = "empty_usage_payload"
 
 #: Image-input support, per exact model slug, from OpenAI's own model page.
 #:
@@ -295,6 +336,157 @@ def _jwt_claims(token: str) -> dict[str, Any]:
     except (ValueError, UnicodeDecodeError):
         return {}
     return claims if isinstance(claims, dict) else {}
+
+
+# --- read-only account usage --------------------------------------------
+# The state snapshot's quota line. Everything here is metadata: labels,
+# percentages, reset instants, plan name and the raw credit balance. The
+# identity fields the same payload carries are never read.
+
+
+@dataclass(frozen=True)
+class UsageWindow:
+    """One published quota window."""
+
+    label: str
+    #: The provider's own number, passed through untouched - the console
+    #: computes "% left" from it, so a coerced or re-derived value would
+    #: silently disagree with the account.
+    used_percent: float | int
+    #: ISO-8601 **with** the process's UTC offset.
+    reset_at: str
+
+
+@dataclass(frozen=True)
+class AccountUsage:
+    """An allowlisted view of one account-usage read.
+
+    ``reason`` is ``None`` only after a successful read; whenever it is
+    set the rest is empty, so an unavailable block can never carry a
+    zeroed percentage or an invented reset time.
+    """
+
+    reason: str | None = None
+    plan_type: str | None = None
+    credits_balance: Any = None
+    #: Reset-credit counters (``rate_limit_reset_credits``). ``None`` is
+    #: "the payload did not report it" and ``0`` is "the account has
+    #: none": the two must never collapse into each other, so a missing
+    #: key stays ``None`` rather than defaulting to zero.
+    resets_banked: int | None = None
+    resets_banked_applicable: int | None = None
+    resets_purchase_eligible: bool | None = None
+    windows: tuple[UsageWindow, ...] = ()
+
+
+def _usage_reset_iso(value: Any) -> str | None:
+    """A payload reset instant as ISO-8601 with an offset, or ``None``.
+
+    The endpoint publishes epoch seconds; an ISO string is accepted too.
+    Anything else drops the window instead of inventing a reset time.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            # Process-local zone (the console re-renders in the browser's
+            # zone anyway); the offset is always present, never a naive
+            # timestamp.
+            return datetime.fromtimestamp(value).astimezone().replace(microsecond=0).isoformat()
+        if isinstance(value, str):
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return None
+            return parsed.astimezone().replace(microsecond=0).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+    return None
+
+
+def _usage_window_label(duration: Any, window_key: str) -> str:
+    """Label one window: by the published duration, else by position."""
+    positional = USAGE_POSITIONAL_LABELS[window_key]
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+        return positional
+    for seconds, label in USAGE_WINDOW_LABELS.items():
+        if duration == seconds:
+            return label
+    return positional
+
+
+def _usage_count(value: Any) -> int | None:
+    """A reported counter as an ``int``, else ``None`` (not reported).
+
+    ``None`` and ``0`` mean different things to the console - "unknown"
+    and "confirmed none" - so a value of the wrong type (or absent) is
+    never coerced to zero.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def parse_account_usage(payload: Any) -> AccountUsage:
+    """Allowlist-parse a ``/wham/usage`` body into publishable metadata.
+
+    Reads exactly ``rate_limit`` (its two windows), ``credits.balance``,
+    ``plan_type`` and the three named counters under
+    ``rate_limit_reset_credits``. Every other key in the body - ``email``,
+    ``user_id``, ``account_id``, ``promo``, ``spend_control``,
+    ``model_usage`` - is ignored by construction: this function never
+    looks at it, so it cannot reach state, a log line, or an error.
+
+    A window is published only with a numeric ``used_percent`` and a
+    resolvable ``reset_at``; a payload with no publishable window at all
+    is unavailable (``empty_usage_payload``), never an empty list of
+    confident-looking zeroes.
+    """
+    if not isinstance(payload, dict):
+        return AccountUsage(reason=REASON_EMPTY_USAGE)
+    rate_limit = payload.get("rate_limit")
+    windows: list[UsageWindow] = []
+    if isinstance(rate_limit, dict):
+        for window_key in ("primary_window", "secondary_window"):
+            entry = rate_limit.get(window_key)
+            if not isinstance(entry, dict):
+                continue
+            used = entry.get("used_percent")
+            if isinstance(used, bool) or not isinstance(used, (int, float)):
+                continue
+            reset_at = _usage_reset_iso(entry.get("reset_at"))
+            if reset_at is None:
+                continue
+            windows.append(
+                UsageWindow(
+                    label=_usage_window_label(entry.get("limit_window_seconds"), window_key),
+                    used_percent=used,
+                    reset_at=reset_at,
+                )
+            )
+    if not windows:
+        return AccountUsage(reason=REASON_EMPTY_USAGE)
+
+    plan_type = payload.get("plan_type")
+    credits = payload.get("credits")
+    balance = credits.get("balance") if isinstance(credits, dict) else None
+    if balance is not None and not isinstance(balance, (str, int, float, bool)):
+        # Raw, but still a scalar: the balance is published as-is (a
+        # string "0" stays "0"), never a nested structure the console
+        # would have to interpret.
+        balance = None
+
+    reset_credits = payload.get("rate_limit_reset_credits")
+    if not isinstance(reset_credits, dict):
+        reset_credits = {}
+    eligible = reset_credits.get("immediate_reset_purchase_eligible")
+    return AccountUsage(
+        plan_type=plan_type if isinstance(plan_type, str) else None,
+        credits_balance=balance,
+        resets_banked=_usage_count(reset_credits.get("available_count")),
+        resets_banked_applicable=_usage_count(reset_credits.get("applicable_available_count")),
+        resets_purchase_eligible=eligible if isinstance(eligible, bool) else None,
+        windows=tuple(windows),
+    )
 
 
 class ChatGPTCodexAdapter:
@@ -580,6 +772,60 @@ class ChatGPTCodexAdapter:
         if isinstance(account_id, str) and account_id:
             headers["ChatGPT-Account-ID"] = account_id
         return headers
+
+    def fetch_account_usage(
+        self, budget_seconds: float = USAGE_BUDGET_SECONDS
+    ) -> AccountUsage:
+        """Read the account's quota windows. **Read-only, never raises.**
+
+        One bounded ``GET`` of the account-usage endpoint with the same
+        stored credential the inference path uses. Three properties this
+        path must keep, because the owner-state snapshot runs it on the
+        console poll rather than as an explicit owner action:
+
+        * **no refresh, no rotation** - a 401 is reported as ``http_401``
+          and the credential is left exactly as the adapter's own
+          credential lifecycle (``refresh()`` on the inference path)
+          manages it; this read never writes the credential store;
+        * **bounded** - the deadline is armed for the whole request, so a
+          stalled endpoint costs at most ``budget_seconds`` of a state
+          render and is reported as ``timeout``;
+        * **metadata only** - failures are converted to a reason string;
+          no message, header, body fragment or token material is carried
+          into the returned object, which is what reaches state.
+        """
+        try:
+            headers = self._auth_headers()
+        except AdapterError:
+            # The only errors _auth_headers raises are "no credential" and
+            # "incomplete credential". Reported, never retried here.
+            return AccountUsage(reason=REASON_CREDENTIAL_MISSING)
+        try:
+            response = self._client.request(
+                "GET",
+                USAGE_URL,
+                headers=headers,
+                provider_id=PROVIDER_ID,
+                # A read may be repeated freely, but one attempt per
+                # observation window is the point of the TTL: a failing
+                # endpoint must not be hammered by a console poll.
+                retry_safe=False,
+                deadline=time.monotonic() + budget_seconds,
+            )
+        except AdapterError as exc:
+            # A status the endpoint actually answered with, if the failure
+            # carried one; otherwise no HTTP status was obtained at all
+            # (stall, deadline, refused, unreachable) - which is what
+            # ``timeout`` means here.
+            reason = f"http_{exc.status}" if exc.status is not None else REASON_TIMEOUT
+            return AccountUsage(reason=reason)
+        except (TimeoutError, OSError):
+            return AccountUsage(reason=REASON_TIMEOUT)
+        if response.status != 200:
+            # Reported, never acted on: no refresh attempt follows a 401
+            # from this path.
+            return AccountUsage(reason=f"http_{response.status}")
+        return parse_account_usage(parse_json_body(response.body))
 
     def image_input_evidence(self) -> dict[str, ImageEvidence]:
         """The transcribed image verdicts for this provider, per exact slug.
