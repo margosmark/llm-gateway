@@ -25,6 +25,14 @@ def with_sse_keepalives(
 
     pending: queue.Queue[bytes | object] = queue.Queue(maxsize=1)
     stopped = threading.Event()
+    # A source that dies must not die *here*: an exception swallowed in the
+    # producer thread would end the stream as if it had completed (the
+    # client would read a clean terminator over a truncated answer) and the
+    # traceback would surface only from the daemon thread's excepthook.
+    # It is remembered and re-raised on the consumer - the response writer,
+    # i.e. the request thread, where socketserver.handle_error still prints
+    # it (t_7198bfa3: the log is not blinded).
+    source_error: list[BaseException] = []
 
     def publish(item: bytes | object) -> bool:
         while not stopped.is_set():
@@ -40,6 +48,8 @@ def with_sse_keepalives(
             for chunk in chunks:
                 if not publish(chunk):
                     return
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the writer thread.
+            source_error.append(exc)
         finally:
             publish(_END)
 
@@ -52,6 +62,8 @@ def with_sse_keepalives(
                 yield _SSE_PING
                 continue
             if item is _END:
+                if source_error:
+                    raise source_error[0]
                 return
             yield item  # type: ignore[misc]
     finally:
