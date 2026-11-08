@@ -14,7 +14,10 @@ loopback sockets only - no network, no credentials, no containers:
    SSE error frame and then a clean chunked EOF, and there is **no**
    ``data: [DONE]`` (``[DONE]`` stays reserved for a complete answer).
    The failure is *handled*: its traceback is logged at ERROR, and
-   ``socketserver.handle_error`` never runs (no banner).
+   ``socketserver.handle_error`` never runs (no banner). The log record
+   is asserted through an explicit handler, so the assertion is
+   capture-agnostic: it holds whether or not the runner installs its
+   own logging handlers (pytest does, unittest does not).
 2. Mid-stream ``AdapterError("auth")`` -> the record says ``auth``; the
    class is no longer dropped, and it counts as a provider failure.
 3. Buffered client + streaming-only dying upstream -> the client still
@@ -40,16 +43,18 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import socket
 import sys
 import time
 import unittest
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 from gateway.adapters.base import AdapterError, ProviderResponse
 from gateway.config import ERROR_CLASSES, Alias, RouteRef
 from gateway.core.client_abort import provider_error_count
+from gateway.logging import operations_logger
 from tests.test_end_to_end import FAKE_PROVIDER, FakeAdapter, GatewayHarness
 
 UPSTREAM_MODEL = "gpt-6-luna"
@@ -158,46 +163,80 @@ class ExplodingUpstreamAdapter(FakeAdapter):
         return super().invoke(request)
 
 
-def _raw_stream_request(harness: GatewayHarness, body: dict[str, Any]) -> tuple[bytes, str, bool]:
+class _GatewayLogCapture:
+    """Capture the gateway operations logger through an explicit handler.
+
+    ``operations_logger`` is deliberately handler-less: with none
+    installed, ``logging.lastResort`` writes each record to ``sys.stderr``
+    *at emit time*. pytest's logging plugin installs its own handlers, so
+    ``lastResort`` never fires there and ambient stderr stays empty — an
+    assertion on stderr then tests the runner's capture state, not the
+    behaviour (it passes under unittest, fails under pytest). This handler
+    is attached explicitly for the duration of the request, so the same
+    record (message plus traceback) is captured under either runner.
+    """
+
+    def __init__(self) -> None:
+        self.text = ""
+        self._stream = io.StringIO()
+        self._handler = logging.StreamHandler(self._stream)
+        self._handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+
+    def __enter__(self) -> Self:
+        operations_logger.addHandler(self._handler)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        operations_logger.removeHandler(self._handler)
+        self.text = self._stream.getvalue()
+
+
+def _raw_stream_request(harness: GatewayHarness, body: dict[str, Any]) -> tuple[bytes, str, str, bool]:
     """POST *body* over a real socket; read to EOF.
 
-    Returns ``(raw_bytes, stderr, timed_out)``. A stream that never ends
-    (no chunked terminator, the R77 symptom) shows up as ``timed_out``.
+    Returns ``(raw_bytes, stderr, gateway_log, timed_out)``. ``stderr`` is
+    whatever was written to ``sys.stderr`` during the request (the
+    socketserver banner, if one fires); ``gateway_log`` is what the
+    gateway operations logger emitted, captured by an explicit handler so
+    it does not depend on the runner's logging plugin. A stream that never
+    ends (no chunked terminator, the R77 symptom) shows up as ``timed_out``.
     """
     captured = io.StringIO()
+    logs = _GatewayLogCapture()
     original_stderr = sys.stderr
     sys.stderr = captured
     sock: socket.socket | None = None
     timed_out = False
     raw = b""
     try:
-        sock = socket.create_connection((harness.host, harness.port))
-        payload = json.dumps(body).encode("utf-8")
-        sock.sendall(
-            (
-                "POST /v1/chat/completions HTTP/1.1\r\n"
-                f"Host: {harness.authority}:{harness.port}\r\n"
-                "Content-Type: application/json\r\n"
-                f"Content-Length: {len(payload)}\r\n"
-                "Connection: close\r\n\r\n"
-            ).encode("ascii")
-            + payload
-        )
-        sock.settimeout(8.0)
-        while True:
-            try:
-                chunk = sock.recv(65536)
-            except TimeoutError:
-                timed_out = True
-                break
-            if not chunk:
-                break
-            raw += chunk
+        with logs:
+            sock = socket.create_connection((harness.host, harness.port))
+            payload = json.dumps(body).encode("utf-8")
+            sock.sendall(
+                (
+                    "POST /v1/chat/completions HTTP/1.1\r\n"
+                    f"Host: {harness.authority}:{harness.port}\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Content-Length: {len(payload)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                + payload
+            )
+            sock.settimeout(8.0)
+            while True:
+                try:
+                    chunk = sock.recv(65536)
+                except TimeoutError:
+                    timed_out = True
+                    break
+                if not chunk:
+                    break
+                raw += chunk
     finally:
         sys.stderr = original_stderr
         if sock is not None:
             sock.close()
-    return raw, captured.getvalue(), timed_out
+    return raw, captured.getvalue(), logs.text, timed_out
 
 
 def _split(raw: bytes) -> tuple[bytes, bytes]:
@@ -230,7 +269,7 @@ class StreamingMidStreamFailureTests(unittest.TestCase):
         assert ledger is not None
         totals_before = dict(ledger.totals())
         count_before = provider_error_count(ledger)
-        raw, stderr, timed_out = _raw_stream_request(
+        raw, stderr, log, timed_out = _raw_stream_request(
             harness,
             {"model": "coding", "messages": [{"role": "user", "content": "hi"}], "stream": True},
         )
@@ -241,6 +280,7 @@ class StreamingMidStreamFailureTests(unittest.TestCase):
             "head": head,
             "body": body,
             "stderr": stderr,
+            "log": log,
             "timed_out": timed_out,
             "record": event,
             "totals_before": totals_before,
@@ -294,13 +334,18 @@ class StreamingMidStreamFailureTests(unittest.TestCase):
         )
 
     def test_the_failure_is_handled_not_escaped(self) -> None:
-        stderr = self.evidence["stderr"]
-        self.assertIn("upstream failed mid-stream", stderr, "the failure must be logged")
-        self.assertIn("Traceback", stderr, "the traceback must stay visible (t_7198bfa3)")
-        self.assertIn("AdapterError", stderr)
+        # The log record is asserted on the explicitly captured handler
+        # output, never on ambient stderr: with no handlers installed
+        # ``lastResort`` writes to stderr, but pytest's logging plugin
+        # installs its own handler and stderr stays empty — so a stderr
+        # assertion would test the runner, not this behaviour.
+        log = self.evidence["log"]
+        self.assertIn("upstream failed mid-stream", log, "the failure must be logged")
+        self.assertIn("Traceback", log, "the traceback must stay visible (t_7198bfa3)")
+        self.assertIn("AdapterError", log)
         self.assertNotIn(
             "Exception occurred during processing",
-            stderr,
+            self.evidence["stderr"],
             "an AdapterError must not escape to socketserver.handle_error",
         )
 
@@ -318,7 +363,7 @@ class MidStreamAuthClassTests(unittest.TestCase):
         ledger = harness.router._ledger
         assert ledger is not None
         count_before = provider_error_count(ledger)
-        raw, stderr, timed_out = _raw_stream_request(
+        raw, stderr, log, timed_out = _raw_stream_request(
             harness,
             {"model": "coding", "messages": [{"role": "user", "content": "hi"}], "stream": True},
         )
@@ -326,6 +371,7 @@ class MidStreamAuthClassTests(unittest.TestCase):
         cls.evidence = {
             "body": _split(raw)[1],
             "stderr": stderr,
+            "log": log,
             "timed_out": timed_out,
             "record": _record_for(ledger),
             "count_before": count_before,
@@ -421,7 +467,7 @@ class UnhandledMidStreamErrorTests(unittest.TestCase):
         self.addCleanup(harness.close)
         ledger = harness.router._ledger
         assert ledger is not None
-        _raw, stderr, timed_out = _raw_stream_request(
+        _raw, stderr, _log, timed_out = _raw_stream_request(
             harness,
             {"model": "coding", "messages": [{"role": "user", "content": "hi"}], "stream": True},
         )
