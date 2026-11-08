@@ -705,7 +705,7 @@ class WeightedRoute:
         return {"route": self.route.to_dict(), "weight": self.weight}
 
     @classmethod
-    def from_dict(cls, data: Any) -> "WeightedRoute | None":
+    def from_dict(cls, data: Any) -> WeightedRoute | None:
         if not isinstance(data, dict):
             return None
         route = RouteRef.from_dict(data.get("route"))

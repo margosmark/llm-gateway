@@ -51,7 +51,6 @@ Safety rules this module follows:
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from gateway.adapters.base import (
     AdapterError,
@@ -278,4 +277,4 @@ class OpenAIApiAdapter:
         )
 
 
-__all__ = ["OpenAIApiAdapter", "PROVIDER_ID", "KIND", "SERVABLE_DIALECTS"]
+__all__ = ["KIND", "PROVIDER_ID", "SERVABLE_DIALECTS", "OpenAIApiAdapter"]

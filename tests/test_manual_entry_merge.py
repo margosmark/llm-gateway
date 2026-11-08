@@ -305,8 +305,8 @@ class ManualEntryMergeTests(unittest.TestCase):
         self._manual({"dialect": "openai_chat"})
         status, payload, _ = self.harness.request("GET", "/owner/api/state")
         self.assertEqual(status, 200)
-        provider = [p for p in payload["providers"] if p["provider_id"] == FAKE_PROVIDER][0]
-        model = [m for m in provider["models"] if m["model_id"] == "gpt-6-luna"][0]
+        provider = next(p for p in payload["providers"] if p["provider_id"] == FAKE_PROVIDER)
+        model = next(m for m in provider["models"] if m["model_id"] == "gpt-6-luna")
         self.assertEqual(model["dialect"], "openai_chat")
         self.assertEqual(model["monthly_limit_usd"], 15.0)
         self.assertEqual(model["limits_source"], "published_estimate")
