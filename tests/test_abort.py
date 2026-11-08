@@ -70,7 +70,7 @@ class AbortTests(unittest.TestCase):
             try:
                 barrier.wait()
                 outcomes.append(abort_upstream(ctx))
-            except BaseException as exc:  # surfaced on the main test thread.
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the main test thread.
                 failures.append(exc)
 
         threads = [threading.Thread(target=abort) for _ in range(8)]

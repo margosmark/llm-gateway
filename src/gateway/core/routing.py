@@ -57,8 +57,11 @@ from gateway.config import (
     TRIGGER_ROUTE_INELIGIBLE,
     TRIGGER_UPSTREAM_UNAVAILABLE,
 )
-from gateway.core.abort import RouteContext, abort_upstream, register_route_context
-from gateway.core import client_abort as _client_abort  # noqa: F401  T11-ANCHOR: client-abort ledger correction
+from gateway.core.abort import RouteContext, register_route_context
+
+# T11-ANCHOR: client-abort ledger correction - importing the module is
+# what installs the observer that corrects a disconnect's ledger row.
+from gateway.core import client_abort as _client_abort  # noqa: F401
 from gateway.core.capabilities import (
     DIALECT_OPENAI_CHAT,
     DIALECT_OPENAI_RESPONSES,
