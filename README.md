@@ -216,8 +216,12 @@ described below.
 
 Paste the API key into the write-only form and choose **Save and test**. The
 explicit action stores the key and then validates it against
-`https://opencode.ai/inference/go/v1/models`; ordinary page loads still never
-call a provider. The key is stored in a private credential store,
+`https://opencode.ai/inference/go/v1/models`; ordinary page loads never
+call a provider except the ChatGPT account-usage read — one bounded,
+read-only GET issued inside state assembly behind a 60s TTL, never
+triggered by a `/v1` inference request, with no on-demand endpoint and
+never refreshing a credential (`docs/CHATGPT_CODEX_CONTRACT.md` §4). The
+key is stored in a private credential store,
 separately from any other provider, and is **never displayed again**.
 
 ### Local model servers (Ollama, llama.cpp, LM Studio)
