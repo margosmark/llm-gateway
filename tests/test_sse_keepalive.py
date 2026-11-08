@@ -35,6 +35,28 @@ class KeepaliveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             next(with_sse_keepalives(iter(()), interval=0))
 
+    def test_a_source_failure_is_raised_on_the_consumer_thread(self) -> None:
+        """A dead source must not be swallowed by the producer thread.
+
+        The consumer is the response writer - the request thread - so the
+        exception reaches ``socketserver.handle_error`` and the traceback
+        still lands on stderr (t_7198bfa3), instead of surfacing only from
+        the daemon thread's excepthook after the stream ended cleanly over
+        a truncated answer.
+        """
+
+        def source():
+            yield b"data: first\\n\\n"
+            raise RuntimeError("source exploded")
+
+        stream = with_sse_keepalives(source(), interval=1)
+        try:
+            self.assertEqual(next(stream), b"data: first\\n\\n")
+            with self.assertRaisesRegex(RuntimeError, "source exploded"):
+                next(stream)
+        finally:
+            stream.close()
+
 
 if __name__ == "__main__":
     unittest.main()

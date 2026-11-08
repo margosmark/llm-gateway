@@ -581,6 +581,47 @@ The deployed gateway still serves the previous no-login boundary, where any
 reachable peer administers `/owner/*`; the session boundary above ships only
 with this candidate (see `docs/OWNER_AUTH.md`).
 
+### 3.2 Verify the client-disconnect abort (T11)
+
+A caller that hangs up mid-answer must stop the upstream request, not leave
+it running at the provider. Reproduce it with a streaming request whose
+client dies after the first bytes (this spends a small real provider
+request):
+
+```sh
+# `timeout` kills curl two seconds in; the gateway sees the peer leave.
+timeout 2 curl -sN http://10.10.11.109:8765/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<published alias>","stream":true,"messages":[{"role":"user","content":"count from 1 to 500, one number per line"}]}'
+```
+
+Then read the newest ledger row and the counters:
+
+```sh
+curl -s http://10.10.11.109:8765/owner/api/state \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ledger"][0]); print(d["totals"])'
+```
+
+Expected:
+
+* the newest row has `"error_class": "client_abort"` — the owner console's
+  request table shows `client_abort` in the status column;
+* `totals.rate_limited` and `totals.exhausted` are exactly where they were
+  before the test: a client abort is never a provider failure and never
+  moves a provider counter;
+* `totals.errors` is one higher — that tally means "ended with some error
+  class", not "provider failed";
+* the upstream request was cancelled at the disconnect rather than running
+  to completion (the adapter's cancel hook fires exactly once).
+
+No live provider is needed to prove the mechanism itself: the abort,
+classification and acceptance regressions run in-process on loopback
+sockets with a synthetic adapter —
+`PYTHONPATH=src python3 -m unittest tests.test_abort tests.test_client_abort tests.test_http_client_disconnect_abort tests.test_t11_client_disconnect_acceptance -v`.
+If the live row still reads as a success or the counters moved, suspect the
+build before the network: re-run those tests, then redeploy with
+`scripts/release.py --build`.
+
 ---
 
 ## 4. Cutover
@@ -693,6 +734,7 @@ without editing this file by hand.
 | A request was refused with *fallback not used* | The owner's gate declined the switch away from a skipped or failed primary | Expected and safe: the message names what was missing (authorization, confirmation, or the disabled trigger). The ledger records the request as served by nobody with its skips, and no fallback is claimed. Enable what the alias needs on Owner console → Aliases, or accept the refusal |
 | A request was served by a phase route, not the primary | The alias has an enabled phase-routing policy and a phase applied (from the caller's `metadata.personal_gateway.phase` hint or from Jev inference) | Expected. The ledger records `phase` and `phase_source` (`caller`/`jev`/`default`) as metadata only. A phase route is the primary for that phase, **not** a fallback |
 | Jev did not pick a phase | Inference is off for the alias, the request carried tools, Jev was uncertain, or Jev failed | Expected and safe: the ordinary route is used and the ledger records why. Raise `minimum_confidence` only if you accept more guessing, never to force a route |
+| A ledger row says `client_abort` | The caller disconnected mid-answer, so the gateway aborted the upstream request | Expected, and **not** a provider failure: the `rate_limited`/`exhausted` counters stay put and the upstream call was cancelled instead of running to completion. Verify per §3.2 |
 
 ### Hermes profile vision routing (where an inbound image goes)
 
