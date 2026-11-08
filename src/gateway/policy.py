@@ -296,12 +296,17 @@ def _apply_defaults_and_caps(
         changes.append(
             PolicyChange(KIND_DEFAULTED, "thinking_level", level, None, "defaults.thinking_level")
         )
-    if level is not None and spelling is not None and caps is not None and caps.thinking_level is not None:
-        if _exceeds_cap(level, caps.thinking_level):
-            _write_level(payload, caps.thinking_level, spelling)
-            changes.append(
-                PolicyChange(KIND_CLAMPED, "thinking_level", caps.thinking_level, level, "caps.thinking_level")
-            )
+    if (
+        level is not None
+        and spelling is not None
+        and caps is not None
+        and caps.thinking_level is not None
+        and _exceeds_cap(level, caps.thinking_level)
+    ):
+        _write_level(payload, caps.thinking_level, spelling)
+        changes.append(
+            PolicyChange(KIND_CLAMPED, "thinking_level", caps.thinking_level, level, "caps.thinking_level")
+        )
 
     # system: added only when the client specified none, in the source
     # dialect's own place for it.

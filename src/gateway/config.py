@@ -541,7 +541,7 @@ class PolicyDefaults:
         return payload
 
     @classmethod
-    def from_dict(cls, data: Any) -> "PolicyDefaults | None":
+    def from_dict(cls, data: Any) -> PolicyDefaults | None:
         if not isinstance(data, dict):
             return None
         temperature = _policy_temperature(data.get("temperature"))
@@ -580,7 +580,7 @@ class PolicyCaps:
         return payload
 
     @classmethod
-    def from_dict(cls, data: Any) -> "PolicyCaps | None":
+    def from_dict(cls, data: Any) -> PolicyCaps | None:
         if not isinstance(data, dict):
             return None
         tokens = _policy_tokens(data.get("max_output_tokens"))
@@ -613,7 +613,7 @@ class PolicyDeny:
         return payload
 
     @classmethod
-    def from_dict(cls, data: Any) -> "PolicyDeny | None":
+    def from_dict(cls, data: Any) -> PolicyDeny | None:
         if not isinstance(data, dict):
             return None
         tools = bool(data.get("tools", False))
@@ -648,7 +648,7 @@ class AliasPolicy:
         }
 
     @classmethod
-    def from_dict(cls, data: Any) -> "AliasPolicy | None":
+    def from_dict(cls, data: Any) -> AliasPolicy | None:
         if not isinstance(data, dict):
             return None
         defaults = PolicyDefaults.from_dict(data.get("defaults"))
