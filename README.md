@@ -662,8 +662,12 @@ recorded the same way, naming the route it failed on; when a provider
 refused a request's shape, the ledger and the error carry the **names** of
 the fields it refused and nothing else from its body. Provider health combines
 connection/test/catalogue metadata, model counts, local cooldowns and recent
-served-request success/failure rates; it performs no provider calls, and rates
-remain Unknown without observed requests. Token counters come from
+served-request success/failure rates; it performs no provider calls except
+the ChatGPT account-usage read — one bounded, read-only GET issued inside
+state assembly behind a 60s TTL, never triggered by a `/v1` inference
+request, with no on-demand endpoint and never refreshing a credential
+(`docs/CHATGPT_CODEX_CONTRACT.md` §4) — and rates remain Unknown without
+observed requests. Token counters come from
 reported provider usage; local cost estimates use published prices only and
 are not provider bills. The Status page aggregates usage for the last 24 hours
 and displays the price source and observation date, and it can show any

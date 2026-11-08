@@ -475,7 +475,11 @@ ledger persistence is off — enable it (§ rollup) and reload; the endpoint
 itself can be checked directly with `curl http://127.0.0.1:8765/owner/api/leaderboard`.
 
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
-page load or configuration save never calls a provider. Anthropic uses the
+page load or configuration save never calls a provider except the ChatGPT
+account-usage read (`docs/CHATGPT_CODEX_CONTRACT.md` §4): one bounded,
+read-only GET issued inside state assembly behind a 60s TTL, never triggered
+by a `/v1` inference request, with no on-demand endpoint and never refreshing
+a credential. Anthropic uses the
 native Messages API with a separately stored API key; its catalogue is loaded
 only when **Refresh model catalog** is selected. Anthropic-dialect models are
 bridged to Chat Completions and Responses; Anthropic-compatible clients can use

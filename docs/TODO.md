@@ -56,8 +56,13 @@ adding one of them.
   configured address is a caller, by decision.**
 * No TLS terminator, proxy trust model, forwarded-header acceptance,
   wildcard/public bind, firewall or router rule, or public exposure.
-* No implicit provider calls. Saving configuration, loading a page or
-  reading status never calls a provider.
+* No implicit provider calls — one named exception: the ChatGPT
+  account-usage read (`docs/CHATGPT_CODEX_CONTRACT.md` §4), one bounded,
+  read-only GET issued inside state assembly behind a 60s TTL when a
+  credential is present. Saving configuration, loading a page or reading
+  status performs no other provider call: the usage read is never triggered
+  by a `/v1` inference request, has no on-demand endpoint, and never
+  refreshes a credential.
 * No new runtime dependency, external database, or background probe.
 * Profiles stay configuration and attribution objects. They are **not**
   access control, and they must not be presented as if they were.
