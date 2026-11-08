@@ -746,6 +746,18 @@ latency or prices remain Unknown.
 
 Aliases may also have a local monthly USD budget. It is a **soft cap** checked before each request; requests already in flight may overshoot. Spend is computed from recorded successful-request token counters and published per-token prices. If any monthly spend cannot be priced or the ledger history is incomplete, spend is **Unknown** and the alias is reported uncapped rather than free. The console shows the UTC month boundary when the budget resets.
 
+A provider that fails **after** the route answered — while the answer is
+being delivered — is recorded the same way: the route-time ledger record
+is amended in place with the provider's own error class (or
+`client_abort` when the caller had already disconnected), so the error
+totals, circuits and cooldowns all see it. A streaming client is told in
+band: exactly one SSE error event
+`data: {"error": {"message": ..., "type": ...}}` after the last
+delivered frame, then a clean end of the chunked stream — and never
+`data: [DONE]`, which stays reserved for a complete answer. The HTTP
+status stays 200 because the headers were already sent; a buffered
+client keeps its 502, and its record now says the same thing.
+
 Usage and limits carry a **source** and an **as-of time**. A limit the
 gateway cannot observe stays **Unknown**; it is never rendered as zero and
 never as unlimited. The **Usage and limits** card shows only enforceable
@@ -753,6 +765,17 @@ spend caps observed from providers — with `limits: []` it says plainly that
 no cost limit is configured. Catalogue fields such as `monthly_limit_usd`
 are reference metadata, are never loaded as budget policy, and are labelled
 "reference only, not enforced" wherever they appear.
+
+**Client disconnects are not provider failures.** If a caller hangs up
+mid-answer, the gateway aborts the upstream request instead of letting it
+run to completion for a body nobody will read. The ledger records the
+outcome as `client_abort` — the caller left, the provider did nothing
+wrong — so it never moves the `rate_limited` or `exhausted`
+provider-failure counters (the generic `errors` tally does rise by one:
+it means "ended with an error class", not "provider failed"). The owner
+console's request table shows `client_abort` in the status column. See
+[runbook §3.2](docs/RUNBOOK.md#32-verify-the-client-disconnect-abort-t11)
+for the reproduction and verification steps.
 
 See [the architecture map](docs/ARCHITECTURE.md),
 [development guide](docs/DEVELOPMENT.md), and
