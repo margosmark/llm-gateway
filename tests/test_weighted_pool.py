@@ -19,6 +19,33 @@ class WeightedPoolTests(unittest.TestCase):
             self.assertEqual(selected, select_weighted(routes, weights, conversation, "alias")[0])
         self.assertEqual(weighted_index([1], "x", "y"), 0)
 
+    def test_selection_follows_the_weights_across_many_conversations(self) -> None:
+        """QA (pack-d): a selection that ignores the weights must fail here.
+
+        ``weighted_index`` is a deterministic sha256 split, so the counts are
+        exact, not statistical: with ``[1, 3]`` the second slot must win about
+        three quarters of 4000 conversations, and swapping the weights must
+        mirror the split. A mutation that reduces the slot to
+        ``... % len(weights)`` - weights read, never applied - lands near
+        2000/2000 on both vectors and fails both assertions.
+        """
+        routes = [RouteRef("p", "a"), RouteRef("p", "b")]
+        conversations = [f"conversation-{index}" for index in range(4000)]
+
+        def counts(weights: list[int]) -> list[int]:
+            tally = [0, 0]
+            for conversation in conversations:
+                selected, _ = select_weighted(routes, weights, conversation, "distribution")
+                tally[routes.index(selected)] += 1
+            return tally
+
+        # Exact, because sha256 over the same inputs always splits the same way.
+        self.assertEqual(counts([1, 3]), [986, 3014])
+        self.assertEqual(counts([3, 1]), [2985, 1015])
+        # The intent behind the numbers: slot 0 takes its weight share.
+        weighted = counts([1, 3])
+        self.assertAlmostEqual(weighted[0] / len(conversations), 0.25, delta=0.05)
+
     def test_refuses_invalid_weight_vectors(self) -> None:
         for weights in ([], [0, 1], [-1, 2], [True, 1]):
             with self.subTest(weights=weights), self.assertRaises(ValueError):

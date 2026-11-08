@@ -138,6 +138,19 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 SURFACE_OWNER = "owner"
 
+#: Every inference surface, i.e. every path that sends caller content to a
+#: provider. A caller-supplied ``X-Request-Id`` is validated and recorded on
+#: exactly this set (T27), which is what ``docs/RUNBOOK.md`` means by "for
+#: inference requests": chat completions, responses, the Anthropic Messages
+#: surface and the native System One endpoint. Any other path sends no caller
+#: content to a provider, so it carries no client id.
+CLIENT_REQUEST_ID_PATHS = (
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/messages",
+    "/v1/systemone",
+)
+
 # --- analytics: the durable daily rollup, surfaced ----------------------
 
 #: The analytics window the console asks for by default, and the hard cap.
@@ -620,7 +633,7 @@ class GatewayApp:
 
         request.params = params
         request.context["surface"] = SURFACE_OWNER
-        if request.path in ("/v1/chat/completions", "/v1/responses"):
+        if request.path in CLIENT_REQUEST_ID_PATHS:
             client_request_ids = request.headers.get_all("X-Request-Id")
             if len(client_request_ids) > 1:
                 result = json_response({"error": {"message": "invalid X-Request-Id", "type": "malformed_request"}}, 400)
@@ -633,8 +646,6 @@ class GatewayApp:
                     result = json_response({"error": {"message": "invalid X-Request-Id", "type": "malformed_request"}}, 400)
                     self._log_request(request, result, started)
                     return result
-
-        
 
         # Access control runs after routing and before any handler: a
         # refused request never reaches the code it would have exercised,
@@ -785,6 +796,44 @@ class GatewayApp:
                         "reason": reason[:400],
                     }
                 ],
+            )
+        )
+
+    def _record_systemone(
+        self,
+        request: Request,
+        *,
+        model: str,
+        profile_id: str | None,
+        received: float,
+    ) -> None:
+        """Record a served ``POST /v1/systemone`` outcome in the status ledger.
+
+        This surface never enters the router - it passes a native payload
+        straight to OpenCode Console - so ``Router._record`` cannot write its
+        row. Without one the owner sees no gateway ``request_id`` for the call
+        and a validated client ``X-Request-Id`` has nothing to sit beside
+        (T27; ``docs/RUNBOOK.md`` states the rule as "for inference
+        requests"). Metadata only: the model, the profile, the outcome and the
+        duration - never the state, the questions or the answers.
+        """
+        if self.ledger is None:
+            return
+        request_id = new_request_id()
+        request.context["request_id"] = request_id
+        self.ledger.record(
+            RequestEvent(
+                request_id=request_id,
+                timestamp=utc_now_iso(),
+                requested_alias="",
+                requested_model=model,
+                client_request_id=request.context.get("client_request_id"),
+                serving_provider="opencode_console",
+                serving_model=model,
+                status=200,
+                latency_ms=max(0, int((time.monotonic() - received) * 1000)),
+                profile_id=profile_id,
+                attempts=[{"provider": "opencode_console", "model": model, "outcome": "success"}],
             )
         )
 
@@ -1556,7 +1605,8 @@ class GatewayApp:
         knowingly supply the state and questions to OpenCode Console, and no completion
         request is inspected or forwarded here.
         """
-        self._resolve_profile(request)
+        received = time.monotonic()
+        profile = self._resolve_profile(request)
         try:
             payload = request.json()
         except ValueError:
@@ -1577,7 +1627,9 @@ class GatewayApp:
         request.context["attribution"] = {
             "requested_alias": None, "serving_provider": "opencode_console", "serving_model": model,
         }
-        return Response(200, [("Content-Type", "application/json")], adapter.invoke_systemone(payload))
+        body = adapter.invoke_systemone(payload)
+        self._record_systemone(request, model=model, profile_id=profile.profile_id, received=received)
+        return Response(200, [("Content-Type", "application/json")], body)
 
     def handle_preview(self, request: Request) -> Response:
         """Show the primary upstream request without invoking a provider."""
