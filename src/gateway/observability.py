@@ -22,7 +22,7 @@ import secrets
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -389,6 +389,91 @@ class LimitStore:
     def clear(self) -> None:
         with self._lock:
             self._snapshots.clear()
+
+
+# --- account-quota publish path -----------------------------------------
+
+#: How long one account-quota observation is served before state assembly
+#: runs the read again. The fetch lives inside ``/owner/api/state``
+#: assembly behind this TTL - never on an inference request, never on a
+#: caller-controlled trigger - so a console poll costs one upstream read
+#: per minute at most, and a failing endpoint is retried at that same
+#: cadence instead of once per poll.
+ACCOUNT_QUOTA_TTL_SECONDS = 60.0
+
+
+class AccountQuotaStore:
+    """The TTL memo in front of the account-quota read.
+
+    ``snapshot`` is called from state assembly only:
+
+    * ``build`` runs at most once per TTL - **failures memoised too**, so
+      a 401 does not become one upstream call per console poll;
+    * ``invalidate`` is compared with the previous value and forces a
+      fresh read when it changes. The caller passes the credential
+      store's ``describe()`` result, which is presence and field names
+      only, so enrolling or disconnecting the account shows on the very
+      next read rather than behind a stale minute - and it keeps a
+      credential change from being masked by the TTL;
+    * the lock is held across ``build`` so two concurrent renders cannot
+      both spend the upstream budget; the second waits for the first
+      result instead of issuing a second call.
+
+    The returned block is the publish payload: a fresh copy, safe to
+    embed in a response, and to be treated as read-only.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = ACCOUNT_QUOTA_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl = float(ttl_seconds)
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._block: dict[str, Any] | None = None
+        self._key: Any = None
+        self._read_at: float | None = None
+
+    def snapshot(
+        self,
+        build: Callable[[], dict[str, Any] | None],
+        *,
+        invalidate: Any = None,
+    ) -> dict[str, Any] | None:
+        """The current block, running ``build`` at most once per TTL.
+
+        ``build`` returning ``None`` means this process has no observation
+        path at all (no credential-backed adapter to read with); that is
+        memoised like any other result and published as an absent block,
+        never as a confident one.
+        """
+        with self._lock:
+            now = self._clock()
+            if (
+                self._read_at is not None
+                and invalidate == self._key
+                and now - self._read_at < self._ttl
+            ):
+                return _copy_quota_block(self._block)
+            block = build()
+            self._block = block
+            self._key = invalidate
+            self._read_at = self._clock()
+            return _copy_quota_block(block)
+
+
+def _copy_quota_block(block: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A shallow copy of a published block: cached state is never handed
+    out for a consumer to mutate."""
+    if block is None:
+        return None
+    copied = dict(block)
+    windows = copied.get("windows")
+    if isinstance(windows, list):
+        copied["windows"] = list(windows)
+    return copied
 
 
 # --- redaction ---------------------------------------------------------

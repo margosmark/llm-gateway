@@ -1,5 +1,5 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "families": {
     "capabilities": {
       "probe_registry.registered_count": "int",
@@ -93,6 +93,16 @@
       "ledger_durability.enabled": "bool",
       "ledger_durability.retention_days": "int",
       "owner.username": "str",
+      "provider_health[*].account_quota.confidence": "str",
+      "provider_health[*].account_quota.credits": "NoneType",
+      "provider_health[*].account_quota.observed_at": "str",
+      "provider_health[*].account_quota.plan_type": "NoneType",
+      "provider_health[*].account_quota.resets_banked": "NoneType",
+      "provider_health[*].account_quota.resets_banked_applicable": "NoneType",
+      "provider_health[*].account_quota.resets_purchase_eligible": "NoneType",
+      "provider_health[*].account_quota.source": "str",
+      "provider_health[*].account_quota.unavailable_reason": "str",
+      "provider_health[*].account_quota.windows": "NoneType",
       "provider_health[*].catalog_observed_at": "NoneType",
       "provider_health[*].connection_state": "str",
       "provider_health[*].cooldown_remaining_seconds": "int",

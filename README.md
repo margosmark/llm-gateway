@@ -946,11 +946,14 @@ them.
   adapter contract. Google v1beta is not translated — the owner declined
   that work (T6, `docs/TODO.md`) — and a route the gateway cannot
   translate is refused with a clear reason rather than guessed.
-* **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
-  a web dashboard, but no machine-readable allowance API for a personal
-  plan. The gateway calls no undocumented endpoint, so actual remaining
-  allowance and reset times are Unknown. Published estimates are shown with
-  their source and date.
+* **ChatGPT model limits are Unknown; account windows are read.** OpenAI
+  publishes per-plan *estimates* and a web dashboard, but no documented
+  machine-readable allowance API. The gateway reads the account's own
+  usage endpoint read-only (once per 60s state poll, never from an
+  inference request) and shows its Session/Weekly windows as
+  `account_quota` on the ChatGPT provider row; if that read fails the
+  block reports why rather than guessing. Model-level limits stay Unknown,
+  and published estimates are shown with their source and date.
 * **The device-code flow is a beta path.** It is implemented from provider
   integration behaviour, and OpenAI documents the flow but does not endorse
   this gateway's use of it. Device-code sign-in must also be enabled for
