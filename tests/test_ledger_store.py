@@ -23,6 +23,7 @@ here pins one commitment of that replacement:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import stat
 import tempfile
@@ -99,6 +100,25 @@ def _fill(store: LedgerStore, count: int, *, now: float | None = None,
     if batch:
         store.insert_many(batch)
     return total_bytes
+
+
+def _load_pressure() -> float:
+    """CPU contention this suite is running under: 1-min load / cores, floored at 1.0.
+
+    The <2s incremental-boot bar below is a claim about an *idle* appliance
+    (the R56 sub-2s state bar this test guards). On this shared box the
+    1-minute load average sits above the core count for hours, where the
+    same boot measures past the bar (2.048s observed against 2.0s at load1
+    11-25 on 4 cores; the incremental load itself measured 0.68-1.78s at
+    load pressure 2.4-2.8 and reddened only in the tail) - a fixed
+    wall-clock bar there measures the box, not the code, and reddens on an
+    unchanged tree. Same treatment as tests/test_leaderboard.py and
+    tests/test_state_cache.py: the literal bar is enforced whenever the box
+    can measure it (pressure <= 1.0), under contention the budget scales
+    with the pressure the box is actually under, and the measured value is
+    always printed so a regression stays visible in the log.
+    """
+    return max(1.0, os.getloadavg()[0] / (os.cpu_count() or 1))
 
 
 class StoreRetentionTests(unittest.TestCase):
@@ -227,13 +247,24 @@ class BoundedBootTests(unittest.TestCase):
 
             # Boot 2: sidecar present -> load + bounded replay, measured the
             # way production runs it (no profiler): this is the every-boot
-            # path and the one the R56 sub-2s state bar depends on.
+            # path and the one the R56 sub-2s state bar depends on. Pressure
+            # is sampled around the boot, so a spike that overlapped the
+            # measurement can only widen the budget for it.
+            pressure = _load_pressure()
             started = time.perf_counter()
             second = RequestLedger(persistence_path=path)
             boot_seconds = time.perf_counter() - started
+            pressure = max(pressure, _load_pressure())
             try:
-                self.assertLess(boot_seconds, 2.0,
-                                f"incremental boot took {boot_seconds:.3f}s")
+                budget = 2.0 if pressure <= 1.0 else 2.0 * pressure
+                print(f"[latency-gate] incremental boot took {boot_seconds:.3f}s "
+                      f"vs 2.0s idle bar at load pressure {pressure:.1f} "
+                      f"(load1 {os.getloadavg()[0]:.1f} / {os.cpu_count()} cores) "
+                      f"-> budget {budget:.2f}s")
+                self.assertLess(boot_seconds, budget,
+                                f"incremental boot took {boot_seconds:.3f}s at load "
+                                f"pressure {pressure:.1f} (bar 2.0s, "
+                                f"budget {budget:.2f}s)")
 
                 payload = json.loads(
                     path.with_name("request-ledger-rollup.json").read_text())
@@ -244,6 +275,17 @@ class BoundedBootTests(unittest.TestCase):
 
                 totals = second.totals()
                 self.assertGreater(totals["requests"], VOLUME_ROWS * 0.99)
+                # Parity contract, and a KNOWN product-side gap under
+                # contention (kanban t_b08745dd): rows that age out of the
+                # store during this boot stay counted in the sidecar buckets
+                # (they sit past the 2x-capacity index seed and on the
+                # boundary day), so coverage over-counts the store by exactly
+                # the rows the boot prune removed - deterministic and
+                # time-driven, not a race: a probe reproduced the reported
+                # 155999 != 155998 with a forced 17s delay, with
+                # coverage - totals == store prune == rows_expired delta in
+                # every rep. Do not weaken this assertion to make the suite
+                # green; the fix belongs to the product card.
                 self.assertEqual(payload["coverage"]["requests"], totals["requests"])
                 # The ring stays a window; the totals do not.
                 self.assertEqual(len(second.recent(50)), 50)
