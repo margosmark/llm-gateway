@@ -240,9 +240,13 @@ client API key (`/v1` refuses a valid machine key with
     machine_key_forbidden`; a read-scoped key on a write path answers
     `403 scope_required`.
 - **`MACHINE_KEY_BLOCKED_PROVIDER_ACTIONS`** - `enroll_key`,
-  `device_start`, `device_poll` - are refused (`403
+  `device_start`, `device_poll`, `redeem_reset` - are refused (`403
   machine_key_forbidden`) even to a write-scoped key: credential
-  enrolment and device flows stay human-session-only.
+  enrolment and device flows stay human-session-only, and
+  `redeem_reset` spends a real pooled one-shot credit (the same bank
+  Hermes' `/usage reset` draws on), so spending is owner-click-only
+  for the same reason credential minting is - an automation must not
+  be able to drain banked resets.
 - **`cookie_rejected`.** A machine key presented together with an
   owner session cookie is refused with `403 cookie_rejected` rather
   than resolved either way: the two credentials never combine.
@@ -283,6 +287,7 @@ unchanged. Measured on this SHA with a real harness
 | non-string `scope` (e.g. a number) | `400 invalid_request` |
 | `clear_cooldowns` with no `scope` and no provider | `404 unknown_provider` |
 | write key on `enroll_key` / `device_start` | `403 machine_key_forbidden` |
+| write key on `redeem_reset` | `403 machine_key_forbidden` |
 | write key on the machine-key or client-key endpoints | `403 machine_key_forbidden` |
 | read key, `GET /owner/api/state` | `200` |
 | valid machine key on `/v1` | `401 invalid_api_key` |
