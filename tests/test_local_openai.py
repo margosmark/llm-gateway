@@ -108,6 +108,7 @@ class LocalAdapterHarness:
                     ("Host", f"{HOST}:{PORT}"),
                     ("Origin", f"http://{HOST}:{PORT}"),
                     ("Cookie", cookie_header(self.app)),
+                    ("Content-Type", "application/json"),
                 ]
             ),
             body=json.dumps(body).encode("utf-8"),

@@ -667,6 +667,22 @@ class GatewayApp:
             self._log_request(request, denied, started)
             return denied
 
+        # The owner surface speaks JSON and nothing else (QA L1): a body
+        # that does not declare ``application/json`` used to be decoded and
+        # dispatched anyway, whatever media type it named. Checked *after*
+        # access control, so an unauthenticated caller still gets its 401
+        # before the media type is looked at, and skipped when there is no
+        # body at all - there is then nothing to decode and no media type
+        # to validate. This covers every mounted owner route, including the
+        # ones that never read the body.
+        if request.body and any(
+            request.path == mount or request.path.startswith(mount + "/") for mount in self.mounts
+        ):
+            refusal = self._owner_json_media_type(request)
+            if refusal is not None:
+                self._log_request(request, refusal, started)
+                return refusal
+
         # CSRF applies to the cookie-authenticated browser surfaces only.
         # The API authenticates with bearer tokens, which a browser never
         # sends ambiently, so it is not CSRF-relevant there.
@@ -989,6 +1005,73 @@ class GatewayApp:
         """
         return bool(request.context.get("owner_authenticated"))
 
+    #: The only media type the owner mutation surface accepts. The body is
+    #: JSON and nothing else: a ``text/plain`` or form-encoded body used to
+    #: be decoded and dispatched exactly like ``application/json`` (QA L1).
+    _OWNER_JSON_MEDIA_TYPE = "application/json"
+
+    def _owner_json_media_type(self, request: Request) -> Response | None:
+        """Refuse a body that is not declared ``application/json``.
+
+        Checked *after* the session/Origin gates, so an unauthenticated
+        caller still gets its 401 before the media type is looked at. An
+        empty body carries no media type to validate and nothing to
+        decode, so it is left alone: the handler sees the empty payload
+        it has always seen.
+        """
+        if not request.body:
+            return None
+        media_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if media_type != self._OWNER_JSON_MEDIA_TYPE:
+            return json_response(
+                {
+                    "error": {
+                        "message": "request Content-Type must be application/json",
+                        "type": "invalid_request",
+                    }
+                },
+                400,
+            )
+        return None
+
+    def _owner_json_object(self, request: Request) -> tuple[dict[str, Any] | None, Response | None]:
+        """The single JSON ingress for the owner mutation handlers.
+
+        Returns ``(payload, None)`` when the body may be handed to a
+        handler, otherwise ``(None, refusal)``:
+
+        * not declared ``application/json`` → 400 ``invalid_request`` (L1);
+        * not valid JSON → 400 ``invalid_request``;
+        * valid JSON that is not an object → 400 ``invalid_request`` (L2:
+          a *truthy* non-object used to survive ``request.json() or {}``
+          and die in the handler at ``payload.get(...)``, which the
+          dispatch boundary answered with the canned 500
+          ``internal error``).
+
+        An empty body keeps its historical meaning - the empty payload
+        ``{}``. ``InvalidBodyText`` is deliberately **not** caught: the
+        lone-surrogate refusal belongs to the dispatch boundary, which
+        records it and answers 400 with the field.
+        """
+        refusal = self._owner_json_media_type(request)
+        if refusal is not None:
+            return None, refusal
+        if not request.body:
+            return {}, None
+        try:
+            payload = request.json()
+        except ValueError:
+            return None, json_response(
+                {"error": {"message": "request body is not valid JSON", "type": "invalid_request"}},
+                400,
+            )
+        if not isinstance(payload, dict):
+            return None, json_response(
+                {"error": {"message": "request body must be a JSON object", "type": "invalid_request"}},
+                400,
+            )
+        return payload, None
+
     def _require_mutation(self, request: Request) -> Any:
         if not self._can_mutate(request):
             return json_response(
@@ -1262,12 +1345,9 @@ class GatewayApp:
 
     def handle_auth_setup(self, request: Request) -> Response:
         """First-run account creation, gated by the one-time setup code."""
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         token = self.owner_auth.complete_setup(
             payload.get("username"),
             payload.get("password"),
@@ -1284,12 +1364,9 @@ class GatewayApp:
         )
 
     def handle_auth_login(self, request: Request) -> Response:
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         token = self.owner_auth.login(
             payload.get("username"),
             payload.get("password"),
@@ -1319,12 +1396,9 @@ class GatewayApp:
         )
 
     def handle_auth_password(self, request: Request) -> Response:
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         result = self.owner_auth.change_password(
             request.context.get("owner_session"),
             payload.get("current_password"),
@@ -1340,12 +1414,9 @@ class GatewayApp:
         because a key change silently breaking agents is exactly the
         failure this endpoint exists to make loud.
         """
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         action = str(payload.get("action") or "")
         if action == "set":
             status = self.owner_auth.set_client_key(payload.get("key"))
@@ -1426,12 +1497,9 @@ class GatewayApp:
         denied = self._require_signed_in_owner(request)
         if denied is not None:
             return denied
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         action = str(payload.get("action") or "")
         # The access log names which machine-key action ran, keyed by the
         # console operator's session - never by a key, which is not here.
@@ -2801,10 +2869,9 @@ class GatewayApp:
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         action = str(payload.get("action") or "")
         provider_id = str(payload.get("provider_id") or "")
         # The access log must say *which* owner action was performed: four
@@ -3226,10 +3293,9 @@ class GatewayApp:
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         action = str(payload.get("action") or "")
         if action not in ("enable", "disable", "manual"):
             return json_response(
@@ -3372,12 +3438,9 @@ class GatewayApp:
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            return json_response({"error": {"message": "request body must be an object", "type": "invalid_request"}}, 400)
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         from gateway.alias_groups import set_group_enabled
 
         action = payload.get("action")
@@ -3397,12 +3460,9 @@ class GatewayApp:
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            return json_response({"error": {"message": "request body must be an object", "type": "invalid_request"}}, 400)
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         action = str(payload.get("action") or "")
         name = str(payload.get("name") or "")
 
@@ -3628,10 +3688,9 @@ class GatewayApp:
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         action = str(payload.get("action") or "")
         profile_id = str(payload.get("profile_id") or "")
 
@@ -3701,10 +3760,9 @@ class GatewayApp:
         denied = self._require_mutation(request)
         if denied is not None:
             return denied
-        try:
-            payload = request.json() or {}
-        except ValueError:
-            payload = {}
+        payload, refusal = self._owner_json_object(request)
+        if refusal is not None:
+            return refusal
         action = str(payload.get("action") or "")
         if action == "snapshot_interval":
             interval = payload.get("seconds")

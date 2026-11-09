@@ -111,17 +111,20 @@ class DeviceFlowHarness:
         self.owner_cookie = cookie_header(self.app)
 
     def call(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+        headers = [
+            ("Host", "127.0.0.1:8765"),
+            ("Origin", "http://127.0.0.1:8765"),
+            ("Cookie", self.owner_cookie),
+        ]
+        if body is not None:
+            # What a real JSON client sends: the owner surface refuses a
+            # body that does not declare application/json.
+            headers.append(("Content-Type", "application/json"))
         request = Request(
             method=method,
             path=path,
             raw_query="",
-            headers=Headers(
-                [
-                    ("Host", "127.0.0.1:8765"),
-                    ("Origin", "http://127.0.0.1:8765"),
-                    ("Cookie", self.owner_cookie),
-                ]
-            ),
+            headers=Headers(headers),
             body=json.dumps(body).encode("utf-8") if body is not None else b"",
             client_address=("127.0.0.1", 40000),
             server_port=8765,

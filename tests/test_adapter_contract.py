@@ -252,6 +252,7 @@ class AdapterContractTests(unittest.TestCase):
                     ("Host", "127.0.0.1:8765"),
                     ("Origin", "http://127.0.0.1:8765"),
                     ("Cookie", cookie_header(app)),
+                    ("Content-Type", "application/json"),
                 ]
             ),
             body=json.dumps({"action": "refresh", "provider_id": provider_id}).encode("utf-8"),

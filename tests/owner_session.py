@@ -29,6 +29,10 @@ def _handle(app, method: str, path: str, body: dict | None = None, cookie: str |
     headers = [("Host", authority), ("Origin", f"http://{authority}")]
     if cookie:
         headers.append(("Cookie", f"{COOKIE_NAME}={cookie}"))
+    if body is not None:
+        # What a real JSON client sends: the owner surface refuses a body
+        # that does not declare application/json.
+        headers.append(("Content-Type", "application/json"))
     request = Request(
         method=method,
         path=path,
