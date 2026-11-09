@@ -2822,3 +2822,80 @@ conditional.
 *(Authored as R42 on its origin card; R41 and then R42-R76 were taken by
 the live register while it was in flight, so it is renumbered to the
 PM-reserved R77 on integration.)*
+
+## Owner JSON ingress — the two pre-existing QA Lows on `main 5db94dc7` (card `t_43f339ee`) — closed by fix-forward
+
+Both were raised by QA's informational note on `e0cb9b1` (re-gate
+`t_467c85f5`, 2026-11-04), reproduced against canonical `main` (`2f32436`
+then `5db94dc7`, tree `f499ff7f`) and carried four times in the release
+roll-call with no fix and no register entry. They are pre-existing — not
+introduced by any candidate — and are fixed together here. No R number is
+minted for them: they are QA Lows, labelled `QA-L1` / `QA-L2` until the
+next review round allocates one.
+
+### QA-L2 — a truthy non-object JSON body answered 500 on four owner POST routes — closed
+
+**Severity: low.** *(closed)*
+
+`payload = request.json() or {}` in the owner handlers only catches
+`ValueError` and only replaces *falsy* values, so a JSON **string**,
+**array**, **number** or **`true`** body survived into the handler and
+died at `payload.get(...)` — `AttributeError: 'str' object has no
+attribute 'get'` in `handle_provider_action`, converted by the dispatch
+boundary to the canned `500 internal error` with
+`unhandled AttributeError at the dispatch boundary` in the operator log.
+Reachable on `/owner/api/provider`, `/owner/api/model`,
+`/owner/api/profile` and `/owner/api/settings` with a valid owner
+session + Origin. `null`, `false`, `[]` and a non-JSON body fell through
+the `or {}` fallback to the handler instead (404/400), which is how QA
+showed the guard was only that fallback. Access control and Origin/Host
+checks ran first and no mutation code was reached, so the impact is the
+wrong status class plus log noise — severity stays **low**.
+
+**Fix.** One ingress choke, `GatewayApp._owner_json_object`, replaces the
+`or {}` pattern in all eleven owner handlers that used it (provider,
+model, profile, settings, alias, alias-group, machine-keys, auth
+setup/login/password/client-key): decode → `isinstance(payload, dict)`
+else `400 invalid_request` (`request body must be a JSON object`); a body
+that is not valid JSON is refused the same way instead of being
+rewritten to `{}`. An **empty** body keeps its historical meaning (the
+empty payload — no body, nothing to decode), and `InvalidBodyText` still
+propagates to the dispatch boundary's F9 choke.
+
+**Evidence.** `tests/test_owner_json_ingress.py` — 13 tests: every
+truthy non-object on the four routes answers 400 `invalid_request` with
+`config.json` byte-identical and the config revision unchanged; object
+bodies keep their previous 404/400; falsy and malformed bodies are 400;
+the empty body keeps the pinned legacy 404; an unauthenticated caller
+still gets 401 before the body is read.
+
+### QA-L1 — the request `Content-Type` was never validated on the owner surface — closed
+
+**Severity: low.** *(closed)*
+
+The same probe showed the owner surface decoding and dispatching whatever
+media type it was given: an object body under `text/plain`, under
+`application/x-www-form-urlencoded`, or with **no** `Content-Type` at all
+was processed exactly like `application/json`, and a non-object body
+under `text/plain` still answered 500. CSRF/Origin and session checks
+were unaffected — defence in depth only, hence **low**.
+
+**Fix.** `GatewayApp._owner_json_media_type` refuses a body that does not
+declare `application/json` with `400 invalid_request`, naming the header.
+It runs in the dispatch path **after** access control (an unauthenticated
+caller still gets 401 first) for every mounted owner route that can carry
+a body — including `logout`, which never reads one — and inside the JSON
+ingress choke. A `; charset=...` parameter is accepted; an empty body
+carries no media type to validate and is left alone.
+
+**Evidence.** `tests/test_owner_json_ingress.py`: `text/plain`,
+form-encoded, multipart and a missing `Content-Type` each answer 400
+`invalid_request` on all 18 owner routes that can carry a body;
+`application/json; charset=utf-8` and `application/json` still flow (404
+`unknown_provider` control); no session + wrong media type → 401;
+`text/plain` + non-object body → 400 (was 500). The in-process test
+fixtures that drove `app.handle` with a JSON body but no media type
+(`tests/owner_session.py`, `test_owner_auth`, `test_local_openai`,
+`test_machine_keys`, `test_device_flow`, `test_adapter_contract`,
+`test_session_header`) now send `Content-Type: application/json`, which
+is what a real JSON client sends; `test_openai_api_adapter` already did.

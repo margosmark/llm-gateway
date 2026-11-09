@@ -144,6 +144,10 @@ class MachineKeyHarness:
         if cookie is not None:
             items.append(("Cookie", f"{COOKIE_NAME}={cookie}"))
         items.extend(extras)
+        if body is not None and not any(name.lower() == "content-type" for name, _ in items):
+            # What a real JSON client sends: the owner surface refuses a
+            # body that does not declare application/json.
+            items.append(("Content-Type", "application/json"))
         request = Request(
             method=method,
             path=path,
