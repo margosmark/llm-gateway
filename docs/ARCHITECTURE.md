@@ -336,13 +336,14 @@ request path, in order:
    An unknown key → `401 authentication_required`.
 4. The handler sees a machine principal (`machine_key_authenticated`,
    `machine_key_scope`), never an owner session: provider actions
-   `enroll_key`, `device_start` and `device_poll` answer `403
-   machine_key_forbidden` (credential enrolment stays
-   human-session-only), and the machine-key endpoints sit behind
-   `_require_signed_in_owner` as a second, handler-level gate (the
-   client-key endpoint is gated at the route level instead: without a
-   bearer it needs the owner session, and a machine key on it is
-   refused `403 machine_key_forbidden`).
+   `enroll_key`, `device_start`, `device_poll` and `redeem_reset`
+   answer `403 machine_key_forbidden` (credential enrolment stays
+   human-session-only; `redeem_reset` spends a pooled one-shot credit,
+   so it stays owner-click-only too), and the machine-key endpoints
+   sit behind `_require_signed_in_owner` as a second, handler-level
+   gate (the client-key endpoint is gated at the route level instead:
+   without a bearer it needs the owner session, and a machine key on
+   it is refused `403 machine_key_forbidden`).
 5. `/v1/*` is a different surface: `_authorize` routes it to the
    client-key check first, where a *valid* machine key is refused
    with `401 invalid_api_key` — an owner credential and a model
