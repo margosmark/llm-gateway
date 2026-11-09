@@ -23,6 +23,7 @@ here pins one commitment of that replacement:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import stat
 import tempfile
@@ -49,6 +50,28 @@ VOLUME_ROWS = 156_000
 #: The old design's hard ceiling: 5 MiB x (MAX_ROTATIONS + 1). Retained
 #: data must exceed it, or this file is not testing the bug it says it is.
 OLD_JSONL_CAP_BYTES = 15 * 1024 * 1024
+
+
+def _load_pressure() -> float:
+    """CPU contention this suite is running under: 1-min load / cores, floored at 1.0.
+
+    The latency bars in this file are claims about an *idle* appliance (R56's
+    sub-2 s state bar: ~0.3 s for the load path, ~6 s for the full replay it
+    replaces). On the shared CI box the 1-minute load average sits above the
+    core count for hours at a time, where the very same code measures 3-11 s -
+    so a fixed wall-clock bar there measures the box, not the code, and
+    reddens 1-3 runs per 4 on an unchanged tree (16 of 16 isolated runs at
+    load 25-56). The boot bar is therefore gated on this number: the literal
+    sub-2 s bar is enforced whenever the box can measure it (pressure <= 1.0),
+    and under contention the gate becomes the load-independent invariant the
+    bar exists for - the load path must stay at least twice as cheap as the
+    full replay timed in this same process under this same load - with the
+    measured values printed either way. The 1.0 s state bar is left strict on
+    purpose: measured 0.017-0.117 s at load pressure 5.4 (9-60x headroom),
+    so it is not the flake and weakening it would trade a real gate for a
+    number nobody is watching.
+    """
+    return max(1.0, os.getloadavg()[0] / (os.cpu_count() or 1))
 
 
 def _stamp(epoch: float) -> str:
@@ -203,6 +226,10 @@ class BoundedBootTests(unittest.TestCase):
     """AC3: boot over a full history is a bounded load, not a history read."""
 
     def test_boot_over_full_history_is_bounded_fast_and_truthful(self) -> None:
+        # Sampled before the (minutes-long) fill and refreshed after each
+        # boot: the gate uses the worst pressure seen across the run, so a
+        # load spike during the fill can never tighten a bar retroactively.
+        pressure = _load_pressure()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "request-ledger.jsonl"
             store = LedgerStore(store_path_for(path))
@@ -214,8 +241,12 @@ class BoundedBootTests(unittest.TestCase):
 
             # Boot 1: no sidecar yet -> full store replay (the migration /
             # recovery path). Correctness only; the speed claim below is
-            # about the path every subsequent boot takes.
+            # about the path every subsequent boot takes. It is timed as
+            # well, because it is the same-load reference for that claim:
+            # both boots run in this one process under this one load.
+            started = time.perf_counter()
             first = RequestLedger(persistence_path=path)
+            full_boot_seconds = time.perf_counter() - started
             try:
                 first_payload = json.loads(
                     path.with_name("request-ledger-rollup.json").read_text())
@@ -231,9 +262,29 @@ class BoundedBootTests(unittest.TestCase):
             started = time.perf_counter()
             second = RequestLedger(persistence_path=path)
             boot_seconds = time.perf_counter() - started
+            pressure = max(pressure, _load_pressure())
             try:
-                self.assertLess(boot_seconds, 2.0,
-                                f"incremental boot took {boot_seconds:.3f}s")
+                if pressure <= 1.0:
+                    self.assertLess(boot_seconds, 2.0,
+                                    f"incremental boot took {boot_seconds:.3f}s")
+                else:
+                    # Load-gated: this box cannot measure the sub-2 s bar, so
+                    # the gate becomes the invariant the bar exists for - the
+                    # load path must stay clearly cheaper than the full replay
+                    # it replaces, both timed in this one process under this
+                    # one load (idle ratio ~0.3 s vs ~6 s, observed >= 10x on
+                    # this box at load 27-36).
+                    print(f"[bounded-boot] load pressure {pressure:.1f} "
+                          f"(load1 {os.getloadavg()[0]:.1f} / {os.cpu_count()} cores): "
+                          f"incremental {boot_seconds:.3f}s vs full replay "
+                          f"{full_boot_seconds:.3f}s - sub-2s bar not measurable, "
+                          f"ratio gate applied")
+                    self.assertLess(
+                        boot_seconds, full_boot_seconds / 2,
+                        f"incremental boot took {boot_seconds:.3f}s against a "
+                        f"{full_boot_seconds:.3f}s full replay at load pressure "
+                        f"{pressure:.1f} - the load path is no longer clearly "
+                        f"cheaper than reading history")
 
                 payload = json.loads(
                     path.with_name("request-ledger-rollup.json").read_text())
@@ -260,13 +311,21 @@ class BoundedBootTests(unittest.TestCase):
                 # The state-read path (rollup digest + store figures +
                 # totals) is the R56 sub-2s bar's actual work; it must stay
                 # far below it with the full history on disk.
+                pressure = max(pressure, _load_pressure())
                 started = time.perf_counter()
                 second.rollup()
                 second.durability()
                 second.totals()
                 state_seconds = time.perf_counter() - started
+                # Left strict deliberately (see _load_pressure): measured
+                # 0.017-0.117 s at load pressure 5.4, i.e. 9-60x of headroom
+                # even on the loaded box, so this bar is not the flake and
+                # softening it would trade a real gate for a slack one. The
+                # pressure rides along in the message so a future red on a
+                # loaded box is self-describing.
                 self.assertLess(state_seconds, 1.0,
-                                f"state components took {state_seconds:.3f}s")
+                                f"state components took {state_seconds:.3f}s "
+                                f"(load pressure {pressure:.1f})")
             finally:
                 second.close()
 
