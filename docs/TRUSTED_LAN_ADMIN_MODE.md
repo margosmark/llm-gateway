@@ -115,7 +115,10 @@ public exposure.
 - Keep `/version` metadata-only and preserve its fixed schema.
 - Keep explicit provider actions: saving a credential, testing it, device
   authorization, and model-catalogue refresh are distinct user actions. Page
-  loads never call a provider.
+  loads never call a provider except the ChatGPT account-usage read — one
+  bounded, read-only GET issued inside state assembly behind a 60s TTL,
+  never triggered by a `/v1` inference request, with no on-demand endpoint
+  and never refreshing a credential (`docs/CHATGPT_CODEX_CONTRACT.md` §4).
 - Keep fallback opt-in and fail-closed after streams, possible tool side
   effects, ambiguous delivery, or an ineligible failure class.
 - Continue to reject forwarded headers until a separately designed and tested
@@ -172,7 +175,10 @@ provider.
    there the machine key and client key boundaries above still refuse
    exactly as they do with the flag on.
 3. Provider save/test/catalogue buttons remain explicit. Tests use mocked
-   transport only and prove page load/config save does not invoke a provider.
+   transport only and prove page load/config save invokes no provider call
+   except the ChatGPT account-usage read — one bounded, read-only GET inside
+   state assembly behind a 60s TTL, covered by
+   `tests/test_account_quota_state.py` (`docs/CHATGPT_CODEX_CONTRACT.md` §4).
 4. Stored synthetic secret material is never returned by read endpoints,
    rendered HTML, errors, request ledger, `/version`, or logs - and the
    client-key value, the setup code and the password are never in any

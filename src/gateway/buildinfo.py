@@ -78,7 +78,7 @@ UNKNOWN = "unknown"
 #: only thing ``gateway-owner-mcp`` pins on (``TESTED_CONTRACT_VERSION``);
 #: see the module docstring for the four gated payload families and the
 #: bump rule. Hand-edited only - never derived, never auto-incremented.
-MCP_CONTRACT_VERSION = 1
+MCP_CONTRACT_VERSION = 2
 
 #: Build-time values. Overridden by the Dockerfile via ARG.
 _BUILD_SOURCE_REVISION = os.environ.get("GATEWAY_SOURCE_REVISION", UNKNOWN)
