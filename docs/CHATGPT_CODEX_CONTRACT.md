@@ -333,13 +333,73 @@ a grep of the serialized state for identity and credential material.
 
 ---
 
+## 4a. Rate-limit reset redemption (owner-triggered)
+
+```text
+POST https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume
+Content-Type: application/json
+
+{"redeem_request_id": "<fresh uuid4>"}
+```
+
+Spends ONE banked rate-limit reset credit so the account's exhausted
+windows start over. The credits list (`GET
+.../rate-limit-reset-credits`) and this consume endpoint mirror Hermes'
+`/usage reset`; both surfaces draw on the same single credit pool, so
+`no_credit` and `already_redeemed` are expected cross-surface outcomes,
+answered calmly rather than as errors.
+
+* **Owner click only — never automatic.** No background job, no
+  redeem-on-cooldown, no router hook: the console's **Redeem** control on
+  the provider health card is the sole caller (`redeem_reset` on
+  `POST /owner/api/provider`, refused for machine keys, unreachable from
+  `/v1`). A source scan in `tests/test_reset_redemption.py` pins the
+  consume call to the adapter's method and its one caller.
+* **Guard first, spend second.** The action re-reads §4 usage and refuses
+  below full exhaustion — `max(window.used_percent) >= 100.0` — with the
+  reason ("a reset restores your FULL 5h + weekly limits — redeeming at
+  40% would waste it"). No `--force` in v1. Only then one POST:
+  `redeem_request_id` is a fresh uuid4, `retry_safe: false`, sharing the
+  read's 3s budget; the console's disabled state re-checks the same pure
+  decision inside the click, so a stale render or a forced dispatch sends
+  nothing.
+* **The server's outcome is the contract**, never the raw body:
+  `reset` (+`windows_reset`, the remaining count, and a usage re-read
+  that primes the state cache so the next state render shows restored
+  windows), `nothing_to_reset` ("credit NOT spent"), `no_credit`,
+  `already_redeemed` — and anything else is `unavailable`, never
+  retried, never echoed. The response body never leaves the adapter: the
+  frozen `ResetConsumeResult` carries status, code, windows_reset and
+  reason only.
+* **401 reports** ("re-sign-in is the owner's action"); this path never
+  refreshes or rewrites the credential.
+* **Audit.** Every attempt — refusals included — appends
+  `{ts, actor, provider, outcome}` to `redemption_audit.jsonl` beside
+  `config.json` (mode 0600, 200-entry ring, allowlisted fields): no
+  `email`/`user_id`/`account_id`/token material, which the tests grep
+  for with a positive control.
+* **No purchase flow.** `immediate_reset_purchase_eligible` is read into
+  state, never acted on; if it ever flips, that is a separate card.
+* **No circuit side effects.** A held `exhausted` cooldown is reported
+  with the outcome and pointed at the existing manual clear
+  (`clear_cooldowns`); redeeming never clears or shortens a cooldown,
+  and the cooldown policy itself is untouched.
+
+`tests/test_reset_redemption.py` (backend, loopback fixtures only) and
+the Redeem checks in `tests/console_dom_test.js` hold these rules; no
+test dials a live endpoint or carries a production credential.
+
+---
+
 ## 5. What the adapter never does
 
 * It never re-displays the device code, the access token, the refresh token
   or the id token after they are stored.
 * It never calls an undocumented endpoint from the inference or credential
-  path. The single exception is the usage read above (§4): one read-only GET
-  of the account's own endpoint, issued only from state assembly and never
+  path. The two exceptions are the usage read above (§4) and the
+  owner-triggered redemption POST (§4a): one read-only GET issued only from
+  state assembly, and one spend POST reached only from the console's
+  Redeem click — never automatic, never from `/v1`, and neither ever used
   to refresh a credential. Model-level allowance that read does not publish
   stays **Unknown** and links the official dashboard.
 * It never guesses. A model with no documented dialect, and a request with a
@@ -373,6 +433,10 @@ Each line is a test in `tests/`.
 | 15 | A missing credential or a `401` publishes `unavailable_reason` with `windows: null`, and a `401` rewrites nothing | `test_account_quota_state.py` |
 | 16 | No inference request triggers the usage read; the TTL bounds a poll to one read | `test_account_quota_state.py` |
 | 17 | No identity or credential field reaches the serialized state | `test_account_quota_state.py` |
+| 18 | Below full exhaustion the guard ends the request before any POST, with the reason | `test_reset_redemption.py` |
+| 19 | Each consume outcome maps to its own message; only `reset` re-fetches usage | `test_reset_redemption.py`, `console_dom_test.js` |
+| 20 | The spend is reachable only from the adapter and the owner action (never automatic); machine keys are refused | `test_reset_redemption.py` |
+| 21 | The audit records who/when/outcome without identity or token material, on disk, across a restart | `test_reset_redemption.py` |
 
 ---
 

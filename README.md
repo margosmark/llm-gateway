@@ -1053,7 +1053,13 @@ them.
   usage endpoint read-only (once per 60s state poll, never from an
   inference request) and shows its Session/Weekly windows as
   `account_quota` on the ChatGPT provider row; if that read fails the
-  block reports why rather than guessing. Model-level limits stay Unknown,
+  block reports why rather than guessing. Banked rate-limit resets show
+  as `resets banked` on the same row, next to an owner-only **Redeem**
+  control that spends one — enabled only when a credit is banked AND a
+  window sits at 100%, refused below that with the reason inline
+  ("redeeming at 40% would waste it"), machine keys blocked, never
+  automatic and with no purchase flow (`CHATGPT_CODEX_CONTRACT.md` §4a).
+  Model-level limits stay Unknown,
   and published estimates are shown with their source and date.
 * **The device-code flow is a beta path.** It is implemented from provider
   integration behaviour, and OpenAI documents the flow but does not endorse

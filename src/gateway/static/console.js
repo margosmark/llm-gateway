@@ -750,6 +750,104 @@
     return "resets banked: \u2014";
   }
 
+  // --- reset redemption (owner-triggered, guarded) ----------------------
+  // "Redeem" spends a REAL banked rate-limit reset credit, so this button
+  // is the console's only trigger for it: no auto-redeem, no
+  // redeem-on-cooldown, no keyboard shortcut, no force flag. The server
+  // holds the actual guard — it re-reads usage and refuses below full
+  // exhaustion — so a stale render or a faked click cannot spend a
+  // credit; the disabled state below exists to explain, not to protect.
+  function redeemDisabledReason(quota) {
+    // Why the control cannot fire right now, or null when it may fire.
+    // Order matters for honesty: what is banked first (so today's live
+    // "0 banked" is never hidden behind a percentage lecture), then the
+    // windows' exhaustion — and an unknown count must never render as 0.
+    if (!quota || typeof quota !== "object") return null; // absent block → no control at all
+    if (quota.unavailable_reason) {
+      return "quota unavailable: " +
+        (typeof quota.unavailable_reason === "string" ? quota.unavailable_reason : "unknown reason") +
+        " — a window's exhaustion cannot be confirmed";
+    }
+    var banked = quota.resets_banked;
+    if (typeof banked !== "number" || !isFinite(banked)) {
+      return "resets banked: unknown — a banked credit cannot be confirmed";
+    }
+    if (banked <= 0) return "0 banked — nothing to redeem";
+    var worst = null;
+    if (Object.prototype.toString.call(quota.windows) === "[object Array]") {
+      quota.windows.forEach(function (entry) {
+        if (!entry || typeof entry !== "object") return;
+        var used = Number(entry.used_percent);
+        if (entry.used_percent === null || entry.used_percent === undefined || !isFinite(used)) return;
+        if (worst === null || used > worst) worst = used;
+      });
+    }
+    if (worst === null) return "no window data — a window's exhaustion cannot be confirmed";
+    if (worst < 100) {
+      return "a reset restores your FULL 5h + weekly limits — redeeming at " +
+        (worst === Math.round(worst) ? String(worst) : worst.toFixed(1)) +
+        "% would waste it";
+    }
+    return null; // credits banked and at least one window at 100% → enabled
+  }
+
+  function redeemResetControl(health) {
+    // The control on the provider-health card, or null when state carries
+    // no account_quota block (older state renders exactly as before).
+    var quota = health.account_quota;
+    if (!quota || typeof quota !== "object") return null;
+    var reason = redeemDisabledReason(quota);
+    var button = el("button", {
+      type: "button",
+      class: "redeem-reset",
+      text: "Redeem banked reset",
+      disabled: !!reason,
+      "aria-label": reason
+        ? "Redeem banked reset — disabled: " + reason
+        : "Redeem one banked rate-limit reset",
+      onclick: function () {
+        // Belt and braces: a disabled control is unclickable in a real
+        // browser, but a programmatic dispatch or a stale render must
+        // also send nothing — the same pure decision decides again here,
+        // so "never leaves the console" holds even under a forced click.
+        if (redeemDisabledReason(health.account_quota)) return;
+        run(api(BASE + "/api/provider", {
+          method: "POST",
+          body: { action: "redeem_reset", provider_id: health.provider_id }
+        }))
+          .then(function (result) {
+            // Server-composed text is shown verbatim — it already carries
+            // the outcome word and, on success, the refreshed remaining
+            // count. Three of the four outcomes mean no credit was spent,
+            // so they read as warnings rather than failures.
+            var outcome = result && result.outcome;
+            toast(result && result.message ? result.message : "Redemption reported.",
+              outcome === "reset" ? "ok" : "warn");
+            if (outcome === "reset") {
+              if (result.circuit_open) {
+                toast("A cooldown is still held for " + providerLabel(health.provider_id) +
+                  " — clear it from that provider card once you have confirmed the reset took effect. " +
+                  "Redeeming never clears cooldowns itself.", "warn");
+              }
+              // Re-fetch state (the backend cleared its cache and primed
+              // the fresh post-reset quota) so the restored windows
+              // re-render under this card.
+              return refresh();
+            }
+            return null;
+          })
+          .catch(function () {
+            // The refusal (guard reason, 409/502) was already toasted by
+            // run()'s handler — nothing to add, nothing to retry.
+          });
+      }
+    });
+    return el("div", { class: "small redeem-reset-row" }, [
+      button,
+      reason ? el("div", { class: "redeem-reset-reason muted", text: reason }) : null
+    ]);
+  }
+
   // --- status -----------------------------------------------------------
 
   function renderStatus() {
@@ -862,6 +960,11 @@
         // renders exactly as it did before, with no "undefined" text.
         quotaText === null ? null : el("div", { class: "small quota", text: quotaText }),
         bankedText === null ? null : el("div", { class: "small quota-banked", text: bankedText }),
+        // The owner-triggered Redeem control, beside the quota it spends
+        // from: enabled only when a credit is banked AND a window sits at
+        // 100%, otherwise disabled with the reason inline. Absent block →
+        // null → no node, exactly as before the action existed.
+        redeemResetControl(health),
         health.last_error ? el("div", { class: "small muted", text: "Last error: " + health.last_error }) : null
       ]));
     });
@@ -4522,6 +4625,11 @@
       // without a DOM.
       quotaLineFor: quotaLineFor,
       quotaBankedLineFor: quotaBankedLineFor,
+      // The Redeem control's pure decision: why it is disabled (a reason
+      // string) or null when a click may fire. Text-in/text-out so the
+      // enabled/disabled contract is testable without a click, and the
+      // reason strings are pinned by the same tests.
+      redeemDisabledReason: redeemDisabledReason,
       renderStatusForTest: function (view, day, fetchedAt) {
         var previous = state;
         var previousDay = usageDay;
@@ -4600,6 +4708,13 @@
         } finally {
           state = previous;
         }
+      },
+      liveStateForTest: function () {
+        // The module's live state after a driven action: a successful
+        // redemption's re-fetch writes it here, so a test can read back
+        // the restored windows the owner would then see — the same
+        // read-back seam machineKeysStateForTest gives its card.
+        return state;
       },
       withStateForTest: function (view, body) {
         // The capability row's click handler renders its panel at click time

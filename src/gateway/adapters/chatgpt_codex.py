@@ -89,12 +89,49 @@ MODELS_PATH = "/models"
 #: read into state, a log line, or an error message.
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
+#: The owner-triggered redemption endpoint: one ``POST`` spends exactly one
+#: banked rate-limit reset credit. It is reached from exactly one place in
+#: this gateway - the owner console's guarded Redeem action
+#: (``gateway.http.app`` ``_handle_redeem_reset``) - and from nowhere else:
+#: never state assembly, never an inference request, never a background job.
+#: Hermes' own ``/usage reset`` draws on the same single credit pool, which
+#: is why the outcome mapping treats ``no_credit`` / ``already_redeemed`` as
+#: calm answers rather than errors: another surface may have spent the
+#: credit first.
+RESET_CREDITS_CONSUME_PATH = "/rate-limit-reset-credits/consume"
+
 #: One observation's hard budget. The state render that triggers it shares
 #: the console poll's sub-2s bar (R56), so a stalled endpoint is abandoned
 #: and reported as ``timeout`` instead of holding an owner poll open. The
 #: live endpoint answers in ~0.3s from this LAN, so the budget is an
 #: outage bound, not a normal wait.
 USAGE_BUDGET_SECONDS = 3.0
+
+
+def codex_backend_prefix(base: str) -> str:
+    """The path prefix this gateway speaks to a configured Codex base under.
+
+    Mirrors the Codex CLI's own PathStyle split (``Hermes' AccountUsage``):
+    a stored ``backend-api`` origin talks under ``/wham``, anything else
+    under ``/api/codex``. The default base derives exactly ``USAGE_URL``,
+    so the shipped URL is unchanged - the helper only makes every
+    Codex-shaped call (usage read, reset redemption) follow ONE configured
+    origin instead of one endpoint being hardcoded and the rest drifting
+    from it.
+    """
+    normalized = (base or "").strip().rstrip("/") or CHATGPT_BASE
+    normalized = normalized.removesuffix("/codex")
+    return normalized + ("/wham" if "/backend-api" in normalized else "/api/codex")
+
+
+def usage_url_for(base: str) -> str:
+    """The account-usage URL for one configured Codex base.
+
+    ``codex_backend_prefix(CHATGPT_BASE) + "/usage" == USAGE_URL`` - the
+    named constant stays the default's name for tests and docs.
+    """
+    return codex_backend_prefix(base) + "/usage"
+
 
 #: Window labels keyed by the duration the payload itself publishes.
 USAGE_WINDOW_LABELS: dict[int, str] = {18000: "Session", 604800: "Weekly"}
@@ -489,6 +526,36 @@ def parse_account_usage(payload: Any) -> AccountUsage:
     )
 
 
+@dataclass(frozen=True)
+class ResetConsumeResult:
+    """What one ``.../consume`` POST answered. Metadata only.
+
+    Exactly four fields leave the HTTP layer: the status, the server's own
+    outcome ``code``, a numeric window counter, and (when no answer
+    arrived at all) one of the reason strings. The response body itself
+    never leaves this object - it is not stored, logged, echoed into a
+    message, or carried anywhere, so nothing upstream chose to include
+    (identity, offers, internals) can reach state, a log line or the
+    console.
+
+    ``code`` is the server's discriminator, passed through lowercased and
+    length-capped but never interpreted beyond the four known values the
+    caller maps; an unrecognised code is reported as unavailable rather
+    than guessed at.
+    """
+
+    #: HTTP status of the POST, or ``None`` when no answer arrived.
+    status: int | None = None
+    #: The server's own ``code`` (``reset`` / ``nothing_to_reset`` /
+    #: ``no_credit`` / ``already_redeemed`` / anything else), normalised.
+    code: str | None = None
+    #: ``windows_reset`` from the body when it published a number.
+    windows_reset: int | None = None
+    #: ``REASON_TIMEOUT`` / ``REASON_CREDENTIAL_MISSING`` when there was
+    #: no HTTP answer to report.
+    reason: str | None = None
+
+
 class ChatGPTCodexAdapter:
     """Adapter for the ChatGPT / Codex provider."""
 
@@ -803,7 +870,7 @@ class ChatGPTCodexAdapter:
         try:
             response = self._client.request(
                 "GET",
-                USAGE_URL,
+                usage_url_for(self._chatgpt_base),
                 headers=headers,
                 provider_id=PROVIDER_ID,
                 # A read may be repeated freely, but one attempt per
@@ -826,6 +893,69 @@ class ChatGPTCodexAdapter:
             # from this path.
             return AccountUsage(reason=f"http_{response.status}")
         return parse_account_usage(parse_json_body(response.body))
+
+    def consume_rate_limit_reset(
+        self, redeem_request_id: str, budget_seconds: float = USAGE_BUDGET_SECONDS
+    ) -> ResetConsumeResult:
+        """Spend one banked rate-limit reset credit. **Owner action only.**
+
+        The single mutating call this adapter owns. One ``POST`` spends
+        exactly one credit; the gateway itself never decides *whether*
+        that is appropriate - the caller reads a fresh usage first and
+        refuses below full exhaustion, and the owner console is the only
+        caller that exists (see ``RESET_CREDITS_CONSUME_PATH``).
+
+        Properties, matching the read path's:
+
+        * **never raises, never refreshes** - a missing credential comes
+          back as ``reason=credential_missing`` and a 401 as its bare
+          status; this path does not touch the credential store, so a
+          refused redemption leaves sign-in exactly as it found it;
+        * **never repeated** - ``retry_safe=False`` plus a request id the
+          caller mints fresh for this one attempt: the server can treat a
+          repeated id as ``already_redeemed``, but the gateway must not be
+          the side that repeats it;
+        * **metadata only** - the body is parsed here and discarded; only
+          the status, the outcome ``code`` and a numeric ``windows_reset``
+          are returned.
+        """
+        if not isinstance(redeem_request_id, str) or not redeem_request_id.strip():
+            raise ValueError("redeem_request_id must be a non-empty string")
+        try:
+            headers = self._auth_headers()
+        except AdapterError:
+            # "no credential" / "incomplete credential" - reported, never
+            # retried, never refreshed from here.
+            return ResetConsumeResult(reason=REASON_CREDENTIAL_MISSING)
+        try:
+            response = self._client.request(
+                "POST",
+                codex_backend_prefix(self._chatgpt_base) + RESET_CREDITS_CONSUME_PATH,
+                headers=headers,
+                body=json.dumps({"redeem_request_id": redeem_request_id}).encode("utf-8"),
+                provider_id=PROVIDER_ID,
+                # Spending is never safe to repeat on our side: no retry,
+                # one attempt per owner click, whatever the failure was.
+                retry_safe=False,
+                deadline=time.monotonic() + budget_seconds,
+            )
+        except AdapterError as exc:
+            if exc.status is not None:
+                return ResetConsumeResult(status=exc.status)
+            return ResetConsumeResult(reason=REASON_TIMEOUT)
+        except (TimeoutError, OSError):
+            return ResetConsumeResult(reason=REASON_TIMEOUT)
+        payload = parse_json_body(response.body)
+        code = payload.get("code") if isinstance(payload, dict) else None
+        windows_raw = payload.get("windows_reset") if isinstance(payload, dict) else None
+        windows = None
+        if isinstance(windows_raw, (int, float)) and not isinstance(windows_raw, bool):
+            windows = max(0, int(windows_raw))
+        return ResetConsumeResult(
+            status=response.status,
+            code=code.strip().lower()[:64] if isinstance(code, str) else None,
+            windows_reset=windows,
+        )
 
     def image_input_evidence(self) -> dict[str, ImageEvidence]:
         """The transcribed image verdicts for this provider, per exact slug.

@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +20,7 @@ from gateway.adapters.chatgpt_codex import (
     ANTI_PHISHING,
     PREREQUISITE,
     REASON_CREDENTIAL_MISSING,
+    REASON_TIMEOUT,
     AccountUsage,
     ChatGPTCodexAdapter,
 )
@@ -34,6 +36,8 @@ from gateway.budget import budget_status, over_budget
 from gateway.circuits import (
     EXHAUSTED_BASE_SECONDS,
     PROBE_TIMEOUT_SECONDS,
+    STATE_HALF_OPEN,
+    STATE_OPEN,
     TRANSIENT_FAILURE_THRESHOLD,
 )
 from gateway.costs import (
@@ -131,6 +135,8 @@ from gateway.observability import (
     AccountQuotaStore,
     LimitSnapshot,
     LimitStore,
+    REDEMPTION_AUDIT_FILE,
+    RedemptionAudit,
     RequestEvent,
     RequestLedger,
     SOURCE_PUBLISHED_ESTIMATE,
@@ -416,12 +422,38 @@ MACHINE_KEY_WRITE_PATHS: frozenset[str] = frozenset(
 )
 
 #: Provider actions a machine key may never invoke, even with a write
-#: scope: they enrol or acquire a *credential* (a provider API key, a
-#: device-authorisation flow). Credential minting stays human-session-
-#: only, exactly like the machine-key endpoints themselves.
-MACHINE_KEY_BLOCKED_PROVIDER_ACTIONS: frozenset[str] = frozenset(
-    {"enroll_key", "device_start", "device_poll"}
+#: scope. ``enroll_key`` / ``device_start`` / ``device_poll`` enrol or
+#: acquire a *credential* (a provider API key, a device-authorisation
+#: flow): credential minting stays human-session-only, exactly like the
+#: machine-key endpoints themselves. ``redeem_reset`` spends a real,
+#: pooled, one-shot credit (Hermes' ``/usage reset`` draws on the same
+#: pool), so spending is owner-click-only too: an automation must not be
+#: able to drain banked resets. One message per action, so a refusal
+#: names what was actually refused.
+MACHINE_KEY_BLOCKED_PROVIDER_MESSAGES: dict[str, str] = {
+    "enroll_key": "machine keys cannot enrol or acquire credentials; sign in to the owner console instead",
+    "device_start": "machine keys cannot enrol or acquire credentials; sign in to the owner console instead",
+    "device_poll": "machine keys cannot enrol or acquire credentials; sign in to the owner console instead",
+    "redeem_reset": "machine keys cannot redeem a reset credit; sign in to the owner console instead",
+}
+MACHINE_KEY_BLOCKED_PROVIDER_ACTIONS: frozenset[str] = frozenset(MACHINE_KEY_BLOCKED_PROVIDER_MESSAGES)
+
+#: The four answers the Codex reset-consume endpoint publishes, and the
+#: fixed text for the three that mean **no credit was spent** (``reset``'s
+#: message carries the refreshed remaining count, so the handler composes
+#: it). Single source on the server: the console renders ``message``
+#: verbatim, and both surfaces' tests pin these strings.
+_REDEEM_CONSUME_OUTCOMES: tuple[str, ...] = (
+    "reset",
+    "nothing_to_reset",
+    "no_credit",
+    "already_redeemed",
 )
+_REDEEM_OUTCOME_MESSAGES: dict[str, str] = {
+    "nothing_to_reset": "Limits not exhausted — credit NOT spent.",
+    "no_credit": "No credit available — nothing was redeemed.",
+    "already_redeemed": "Already redeemed — no second credit was spent.",
+}
 
 
 class GatewayApp:
@@ -499,6 +531,10 @@ class GatewayApp:
         #: chatgpt_codex health row. It is read from state assembly only,
         #: behind its own TTL - see ``gateway.observability``.
         self.account_quota = AccountQuotaStore()
+        #: Who/when/outcome for every attempt at the owner-triggered
+        #: reset redemption, appended to a metadata-only sidecar next to
+        #: ``config.json`` so backups and releases carry the trail.
+        self.redemption_audit = RedemptionAudit(config.path.parent / REDEMPTION_AUDIT_FILE)
         self._release_identity = release_identity
         self.base_url = base_url
         #: Which browser surfaces this listener serves. The LAN listener
@@ -2041,6 +2077,14 @@ class GatewayApp:
     def _account_quota_block(self) -> dict[str, Any] | None:
         """The ``account_quota`` block published on the chatgpt_codex row.
 
+        The read half: this process's own observation, formatted by
+        :meth:`_quota_block_from` (which documents the two shapes).
+        """
+        return self._quota_block_from(self._account_quota_observation())
+
+    def _quota_block_from(self, observation: AccountUsage | None) -> dict[str, Any] | None:
+        """The publish payload for one account-usage observation.
+
         Two shapes, both metadata-only:
 
         * a **confident** observation - windows, plan, credits and the
@@ -2055,8 +2099,12 @@ class GatewayApp:
         when the read happened, and is carried through the TTL untouched
         - the console shows its age rather than a window that looks
         current.
+
+        Split from the read so a caller that already holds a fresh
+        observation (the redemption path re-reads usage right after a
+        successful reset) can format and prime it without issuing a
+        second read through the memo.
         """
-        observation = self._account_quota_observation()
         if observation is None:
             return None
         block: dict[str, Any] = {
@@ -2822,12 +2870,15 @@ class GatewayApp:
         ):
             return self._machine_denied(
                 "machine_key_forbidden",
-                "machine keys cannot enrol or acquire credentials; sign in to the owner console instead",
+                MACHINE_KEY_BLOCKED_PROVIDER_MESSAGES.get(
+                    action,
+                    "machine keys cannot perform this provider action; sign in to the owner console instead",
+                ),
             )
         # The cooldown-clear action is dispatched before the provider
         # lookup: its explicit all scope is not addressed to one provider
         # at all. Every other scope still requires a known provider, so the
-        # unknown-provider refusal below is unchanged for the other three
+        # unknown-provider refusal below is unchanged for the remaining
         # actions and for the provider and route scopes.
         if action == "clear_cooldowns":
             return self._handle_clear_cooldowns(payload, provider_id)
@@ -2836,6 +2887,9 @@ class GatewayApp:
             return json_response(
                 {"error": {"message": f"unknown provider '{provider_id}'", "type": "unknown_provider"}}, 404
             )
+
+        if action == "redeem_reset":
+            return self._handle_redeem_reset(request, adapter, provider_id)
 
         if action == "test":
             result = adapter.test_connection()
@@ -3165,6 +3219,191 @@ class GatewayApp:
                 "probe": probe,
             }
         )
+
+    def _handle_redeem_reset(self, request: Request, adapter, provider_id: str) -> Response:
+        """Spend one banked rate-limit reset - owner click only, guard first.
+
+        The whole sequence this card exists for, and nothing else may run
+        it: **fresh usage read -> refuse below full exhaustion -> one
+        consume POST -> the server's own outcome, mapped**. There is no
+        background job, no redeem-on-cooldown and no router hook: the
+        owner console's button behind ``action == "redeem_reset"`` is the
+        only caller, so "never automatic" is structural (a reachability
+        test pins it to one caller) rather than a promise.
+
+        The guard ordering is the point. The usage read happens before
+        any POST, and no exhausted window ends the request with zero
+        outbound calls past that read: a reset restores the full 5h +
+        weekly limits, so redeeming at 40% would spend a one-shot credit
+        on a fraction of its value. There is deliberately no ``force``
+        flag - the guard cannot be talked past from any surface.
+
+        The consume is one attempt, never retried (the adapter arms
+        ``retry_safe=False``) with a request id minted fresh here. The
+        four server answers all report as themselves: ``reset`` spent the
+        credit, the other three mean **nothing was spent**, so a
+        cross-surface spend (Hermes' ``/usage reset`` draws on the same
+        single pool) is a calm 200 rather than an error. Anything
+        unrecognised - or no answer at all - is ``unavailable``: reported
+        as 502, never retried, and the response body upstream sent is
+        never echoed into any message, log or audit record.
+
+        On ``reset`` the usage is re-read once (the guard read predates
+        the reset), the fresh block is primed into the quota memo and the
+        state cache is cleared, so the console's next refresh renders the
+        restored windows without a third read. Circuits are never touched
+        here: the ``exhausted`` cooldown is bounded (900-1800s) and
+        self-recovers, and the response only *reports* whether one is
+        still held so the console can point at the existing manual
+        cooldown-reset action.
+
+        Every attempt that reaches this handler - refusals included -
+        lands in the redemption audit as who/when/outcome: four metadata
+        fields, no token, header, identity or body fragment, and the
+        access-log line carries ``action=redeem_reset`` plus the status.
+        """
+        if not isinstance(adapter, ChatGPTCodexAdapter):
+            return json_response(
+                {
+                    "error": {
+                        "message": "this provider publishes no reset credits to redeem",
+                        "type": "unsupported_action",
+                    }
+                },
+                400,
+            )
+        actor = self._redemption_actor(request)
+        # --- guard: one fresh read, before any POST -----------------------
+        usage = adapter.fetch_account_usage()
+        if usage.reason is not None:
+            # The guard could not confirm exhaustion, so nothing may be
+            # spent: no consume, no refresh, no retry of the read.
+            self._record_redemption(actor, provider_id, "unavailable")
+            return json_response(
+                {
+                    "error": {
+                        "message": f"the account usage could not be confirmed ({usage.reason}) — nothing was redeemed",
+                        "type": "redeem_unavailable",
+                    }
+                },
+                409,
+            )
+        worst = max((float(window.used_percent) for window in usage.windows), default=None)
+        if worst is None or worst < 100.0:
+            reason = (
+                "no usage window could be read — a window's exhaustion cannot be confirmed, "
+                "so nothing was redeemed"
+                if worst is None
+                else (
+                    "a reset restores your FULL 5h + weekly limits — redeeming at "
+                    f"{worst:g}% would waste it"
+                )
+            )
+            self._record_redemption(actor, provider_id, "not_exhausted")
+            return json_response(
+                {"error": {"message": reason, "type": "redeem_not_exhausted"}},
+                409,
+            )
+        # --- one POST, never repeated -------------------------------------
+        redeem_request_id = str(uuid.uuid4())
+        consumed = adapter.consume_rate_limit_reset(redeem_request_id)
+        outcome = consumed.code if consumed.code in _REDEEM_CONSUME_OUTCOMES else None
+        if consumed.reason is not None or outcome is None:
+            # Missing credential, timeout, an HTTP failure, or an outcome
+            # this gateway does not recognise: reported, never retried,
+            # and the upstream body is never echoed (it stayed with the
+            # adapter; only its status and code ever left it).
+            self._record_redemption(actor, provider_id, "unavailable")
+            if consumed.status is not None:
+                message = f"the Codex backend did not complete the redemption (HTTP {consumed.status}) — no further attempt was made"
+                if consumed.status == 401:
+                    message = "the Codex backend refused the redemption (HTTP 401) — the credential was not refreshed; re-sign-in is the owner's action"
+            elif consumed.reason == REASON_TIMEOUT:
+                message = "the Codex backend did not answer in time — no further attempt was made"
+            elif consumed.reason == REASON_CREDENTIAL_MISSING:
+                message = "the stored ChatGPT / Codex credential is not available — nothing was attempted"
+            else:
+                message = "the redemption could not reach the Codex backend — no further attempt was made"
+            if consumed.code is not None and outcome is None:
+                message = "the Codex backend returned an outcome this gateway does not recognise — no further attempt was made; check the account's resets before retrying"
+            return json_response({"error": {"message": message, "type": "redeem_unavailable"}}, 502)
+        if outcome != "reset":
+            # Nothing was spent by any of these three answers.
+            self._record_redemption(actor, provider_id, outcome)
+            return json_response(
+                {
+                    "ok": False,
+                    "outcome": outcome,
+                    "message": _REDEEM_OUTCOME_MESSAGES[outcome],
+                    "redeem_request_id": redeem_request_id,
+                }
+            )
+        # --- reset: one fresh read, primed, then report -------------------
+        fresh = adapter.fetch_account_usage()
+        block = self._quota_block_from(fresh)
+        if block is not None:
+            # The restored windows reach the next state render from this
+            # primed block instead of costing a third read within the
+            # same second; a credential change still invalidates it.
+            self.account_quota.prime(block, key=self.credentials.describe("chatgpt_codex"))
+            self._state_cache.clear()
+        remaining = (
+            max(0, usage.resets_banked - 1) if usage.resets_banked is not None else None
+        )
+        message = "Reset redeemed — your usage limits have been reset."
+        if remaining is not None:
+            message += f" {remaining} banked reset{'s' if remaining != 1 else ''} remaining."
+        self._record_redemption(actor, provider_id, "reset")
+        return json_response(
+            {
+                "ok": True,
+                "outcome": "reset",
+                "message": message,
+                "windows_reset": consumed.windows_reset,
+                "resets_remaining": remaining,
+                "redeem_request_id": redeem_request_id,
+                "account_quota": block,
+                # Reported only - this action never touches a circuit.
+                "circuit_open": self._provider_circuit_held(provider_id),
+            }
+        )
+
+    @staticmethod
+    def _redemption_actor(request: Request) -> str:
+        """Who asked for this redemption: an identifier, never a secret."""
+        username = request.context.get("owner_username")
+        if isinstance(username, str) and username:
+            return f"owner:{username}"
+        machine_key_id = request.context.get("machine_key_id")
+        if isinstance(machine_key_id, str) and machine_key_id:
+            # Unreachable today (machine keys are refused before dispatch),
+            # but a future policy change must not land as an anonymous
+            # spend in the trail.
+            return f"machine_key:{machine_key_id}"
+        return "owner_session"
+
+    def _record_redemption(self, actor: str, provider_id: str, outcome: str) -> None:
+        """One audit record: who, when, outcome (metadata only)."""
+        self.redemption_audit.record(actor=actor, provider=provider_id, outcome=outcome)
+
+    def _provider_circuit_held(self, provider_id: str) -> bool:
+        """Whether this provider's circuit is still held right now.
+
+        Report-only for the redemption path: it never opens, closes or
+        clears a circuit. The ``exhausted`` cooldown is bounded
+        (900-1800s) and self-recovers, and clearing it stays the separate
+        manual cooldown-reset action the console points at after a
+        successful redemption.
+        """
+        for detail in self.router.circuits.details().values():
+            if not isinstance(detail, dict):
+                continue
+            if detail.get("provider") == provider_id and detail.get("state") in (
+                STATE_OPEN,
+                STATE_HALF_OPEN,
+            ):
+                return True
+        return False
 
     def _publish_limits(self, provider_id: str, observed_at: str) -> None:
         """Record the published limits as limit snapshots.
