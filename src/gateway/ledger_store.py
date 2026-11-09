@@ -355,6 +355,25 @@ class LedgerStore:
             except sqlite3.Error as exc:
                 raise LedgerStoreError(f"ledger store unreadable: {exc}") from exc
 
+    def bodies_between(self, lo_ts: int, hi_ts: int) -> Iterator[str]:
+        """Stream row bodies with ``ts`` in ``[lo_ts, hi_ts)``, in write order.
+
+        The bounded read behind the boot-time sidecar reconcile: only the
+        retention window's boundary day is re-read (one day's rows at
+        most, indexed by ``ledger_by_ts``), never the whole history, so a
+        load stays a load.
+        """
+        with self._read_lock:
+            try:
+                cursor = self._reader().execute(
+                    "SELECT body FROM ledger WHERE ts >= ? AND ts < ? ORDER BY rowid",
+                    (int(lo_ts), int(hi_ts)),
+                )
+                for (body,) in cursor:
+                    yield body
+            except sqlite3.Error as exc:
+                raise LedgerStoreError(f"ledger store unreadable: {exc}") from exc
+
     def rows_after(self, lower_rowid: int, page: int = 5000) -> list[tuple[int, str]]:
         """One page of ``(rowid, body)`` for rows newer than ``lower_rowid``, oldest-first.
 

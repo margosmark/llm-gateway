@@ -194,6 +194,15 @@ class RollupStore:
         self._watermark = 0
         self._pending = 0
         self._last_save = time.monotonic()
+        #: The bound the store was last pruned to (set by boot and by the
+        #: runtime prune). ``_prune_expired`` ages against this, never
+        #: against its own clock: a clock ahead of the store's prune
+        #: subtracts contributions for rows the store still holds, and
+        #: coverage under-counts it - the mirrored direction of the
+        #: sidecar drift in kanban t_b08745dd. None (a journal-only
+        #: rollup, or a boot whose prune failed) falls back to the age
+        #: policy itself.
+        self._store_cutoff: int | None = None
 
     # --- building -------------------------------------------------------
 
@@ -288,7 +297,7 @@ class RollupStore:
             self._reset_locked()
             lines_read = 0
             status = "complete"
-            now = time.time()
+            cutoff_ts = int(time.time() - RETENTION_SECONDS)
             for file in files:
                 try:
                     with file.open(encoding="utf-8") as source:
@@ -299,7 +308,7 @@ class RollupStore:
                             except ValueError:
                                 self._rows_skipped += 1
                                 continue
-                            self._ingest_for_rebuild(row, now)
+                            self._ingest_for_rebuild(row, cutoff_ts)
                 except FileNotFoundError:
                     continue
                 except (OSError, ValueError):
@@ -320,6 +329,7 @@ class RollupStore:
         expired: int = 0,
         status: str = "complete",
         mode: str = "full",
+        cutoff_ts: int | None = None,
     ) -> dict[str, Any]:
         """Regenerate the rollup from the durable store's row bodies.
 
@@ -328,14 +338,23 @@ class RollupStore:
         scanned. ``skipped``/``expired`` carry what the boot migration and
         age-prune already established (those rows never became - or no
         longer are - store rows), so coverage reports them truthfully for
-        this rebuild instead of losing them between paths.
+        this rebuild instead of losing them between paths. ``cutoff_ts``
+        pins the age check to the store prune's own bound (defaults to
+        now - retention for callers with no store to match, e.g. the
+        CLI rebuild).
         """
         with self._lock:
             self._reset_locked()
             self._rows_skipped += int(skipped)
             self._rows_expired += int(expired)
             lines_read = 0
-            now = time.time()
+            if cutoff_ts is None:
+                cutoff_ts = int(time.time() - RETENTION_SECONDS)
+            # The fold's age bound is the bound this rollup ages against
+            # from now on (boot: the same value the store prune just
+            # used; CLI rebuild: the policy bound the bodies were read
+            # against), so save()'s age decisions cannot run ahead of it.
+            self._store_cutoff = int(cutoff_ts)
             for body in bodies:
                 lines_read += 1
                 try:
@@ -345,7 +364,7 @@ class RollupStore:
                     # is corruption, not a legacy row - and it must be said.
                     self._rows_skipped += 1
                     continue
-                self._ingest_for_rebuild(row, now)
+                self._ingest_for_rebuild(row, cutoff_ts)
             self._finish_rebuild_locked(status, trigger, lines_read, mode=mode)
             return self._snapshot_locked()
 
@@ -383,10 +402,19 @@ class RollupStore:
         # full rebuild instead of trusting a claim it cannot back.
         self._watermark = 0
 
-    def _ingest_for_rebuild(self, row: Any, now: float) -> None:
-        """One source row during a rebuild: age-check first, then fold."""
+    def _ingest_for_rebuild(self, row: Any, cutoff_ts: int) -> None:
+        """One source row during a rebuild: age-check first, then fold.
+
+        ``cutoff_ts`` is the exact bound the store's own prune used
+        (``ts < cutoff_ts``), so the fold can only keep rows the store
+        keeps. A clock of its own - evaluated at a different moment than
+        the prune - disagrees with the store whenever the two moments
+        stretch apart (under load that gap grows past the row stride),
+        and the sidecar and store counts split (the mirrored under-count
+        of kanban t_b08745dd).
+        """
         stamp = _parse_timestamp(row.get("timestamp")) if isinstance(row, dict) else None
-        if stamp is not None and now - stamp.timestamp() > RETENTION_SECONDS:
+        if stamp is not None and stamp.timestamp() < cutoff_ts:
             # Past the declared retention window: expected, and not a
             # coverage gap.
             self._rows_expired += 1
@@ -578,6 +606,64 @@ class RollupStore:
             self._rows_appended = rows_replayed
             self._finish_rebuild_locked("complete", "boot", rows_replayed, mode="incremental")
 
+    def reconcile_day(self, store: LedgerStore, *, cutoff_ts: int) -> int:
+        """Re-fold the retention window's boundary day from the store itself.
+
+        A loaded sidecar counts rows an earlier boot folded in; rows that
+        left the store since (the boot age-prune, or a runtime prune the
+        day bound has not reached) are still in their buckets, because a
+        bucket's *day* only leaves the rollup once the whole day is past
+        the window - so ``coverage.requests`` over-counts the store by
+        exactly the rows that aged out on the boundary day. Every other
+        day is exact already: older days leave through the day bound
+        (their rows are gone from the store too), and newer days cannot
+        have lost rows to age.
+
+        This replaces this one day's buckets and bounds with a fold of the
+        store's surviving rows for the same day, reading the store as it
+        *is* (not as the retention policy says it should be), so a failed
+        prune cannot make this drop a row the store still holds. It runs
+        at boot, before the save, bounded to one day's rows streamed one
+        body at a time. It never touches the expiry fact: rows that leave
+        the store are counted by the prune that removed them
+        (``note_source`` / ``carry["expired"]``), never by the re-fold.
+
+        Returns the store rows read - 0 whenever the day is already exact
+        or absent, which is the common boot.
+        """
+        boundary = datetime.fromtimestamp(cutoff_ts, UTC)
+        day = boundary.strftime("%Y-%m-%d")
+        day_start = int(boundary.replace(hour=0, minute=0, second=0,
+                                         microsecond=0).timestamp())
+        fresh = RollupStore(self.path, self.source, now=self._now)
+        rows_read = 0
+        for body in store.bodies_between(day_start, day_start + 86_400):
+            rows_read += 1
+            try:
+                row = json.loads(body)
+            except ValueError:
+                # Store bodies are sanitised JSON at write time, so this is
+                # corruption - counted exactly as the load path counts it.
+                self.note_source(skipped=1)
+                continue
+            if not isinstance(row, dict):
+                self.note_source(skipped=1)
+                continue
+            # Field-level refusals inside ingest() cannot occur for store
+            # rows (the store validated them at insert), so folding into
+            # the sandbox loses no coverage fact. The sandbox reuses
+            # ingest()'s own last-wins rule, so an amended request lands
+            # exactly once, on its surviving version - the same count the
+            # store's totals() reports.
+            fresh.ingest(row)
+        with self._lock:
+            for key in [key for key in self._rows if key[0] == day]:
+                del self._rows[key]
+            self._rows.update(fresh._rows)
+            self._day_bounds.pop(day, None)
+            self._day_bounds.update(fresh._day_bounds)
+        return rows_read
+
     # --- reading --------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
@@ -687,19 +773,34 @@ class RollupStore:
             "day_bounds": {day: list(bounds) for day, bounds in sorted(self._day_bounds.items())},
         }
 
+    def note_store_cutoff(self, cutoff_ts: int) -> None:
+        """Record the bound the store was just pruned to.
+
+        Boot and the runtime prune call this after a successful
+        ``store.prune``; every later ``_prune_expired`` ages against it,
+        so the sidecar only ever drops what the store actually dropped.
+        """
+        with self._lock:
+            self._store_cutoff = int(cutoff_ts)
+
     def _prune_expired(self) -> None:
         """Drop contributions the store itself would already have pruned.
 
-        Entries still in the index expire by age, exactly as before. A
-        bucket whose *day* is past the retention window can additionally
-        still hold requests the count cap evicted from the index - those
-        contributions have no entry left to age out - so the day itself is
-        the bound that keeps finished days from accumulating forever on a
-        long-running appliance.
+        Entries still in the index expire by age against the store's own
+        last prune bound (never this save's clock - a clock ahead of the
+        store subtracts rows the store still holds). A bucket whose *day*
+        is past the retention window can additionally still hold requests
+        the count cap evicted from the index - those contributions have no
+        entry left to age out - so the day itself is the bound that keeps
+        finished days from accumulating forever on a long-running
+        appliance. The day bound uses the same store bound for the same
+        reason.
         """
-        now = time.time()
-        expired = [request_id for request_id, (_key, _delta, epoch) in self._index.items() if now - epoch > RETENTION_SECONDS]
-        cutoff_day = datetime.fromtimestamp(now - RETENTION_SECONDS, UTC).strftime("%Y-%m-%d")
+        bound = (self._store_cutoff if self._store_cutoff is not None
+                 else int(time.time() - RETENTION_SECONDS))
+        expired = [request_id for request_id, (_key, _delta, epoch) in self._index.items()
+                   if epoch < bound]
+        cutoff_day = datetime.fromtimestamp(bound, UTC).strftime("%Y-%m-%d")
         stale_days = [key for key in self._rows if key[0] < cutoff_day]
         if not expired and not stale_days:
             return
@@ -848,6 +949,12 @@ class LedgerPersistence:
             return
         carry: dict[str, Any] = {"skipped": 0, "expired": 0, "status": "complete"}
         imported = False
+        # One clock for every age decision this boot makes: the store's
+        # prune, the full rebuild's age check and the load replay's all
+        # share this cutoff, so the sidecar's window boundary can never
+        # disagree with the store's - the two only ever split when they
+        # are evaluated at different moments.
+        cutoff_ts = int(time.time() - RETENTION_SECONDS)
         try:
             if store.empty():
                 # First boot over a legacy journal (or a fresh directory):
@@ -871,7 +978,10 @@ class LedgerPersistence:
             # The one retention bound: age. Rows past the window leave the
             # store here (boot) and every PRUNE_INTERVAL_SECONDS while
             # running - never because of a size cap.
-            carry["expired"] = store.prune(time.time() - RETENTION_SECONDS)
+            carry["expired"] = store.prune(cutoff_ts)
+            # The sidecar's own age decisions now age against this exact
+            # bound, never against save()'s later clock.
+            self._rollup.note_store_cutoff(cutoff_ts)
         except LedgerStoreError as exc:
             # Rows past the window are still excluded (and counted) by the
             # rebuild's own age check below; the prune retries next boot.
@@ -880,13 +990,26 @@ class LedgerPersistence:
         # A fresh import means the store was regenerated underneath whatever
         # sidecar exists: its watermark describes a different store, so the
         # load path must not compare the two histories.
-        if not imported and self._try_load_sidecar(store, carry):
+        if not imported and self._try_load_sidecar(store, carry, cutoff_ts):
+            # Before save(): rows this boot's prune just removed are still
+            # counted in the restored buckets (their day has not aged past
+            # the day bound), so re-fold the boundary day from what the
+            # store actually holds. That makes coverage.requests the
+            # store's post-prune row count after every boot - the
+            # faithful-image promise of the docstring above.
+            try:
+                self._rollup.reconcile_day(store, cutoff_ts=cutoff_ts)
+            except LedgerStoreError as exc:
+                # A boundary-day read that fails leaves the drift it would
+                # have healed; the store error is reported through
+                # durability(), never as a boot failure.
+                self._store_open_error = str(exc)
             self._rollup.save()
             return
         try:
             max_rowid = store.max_rowid()
             self._rollup.rebuild_from_store(store.iter_bodies(), trigger="boot",
-                                            mode="full", **carry)
+                                            mode="full", cutoff_ts=cutoff_ts, **carry)
             self._rollup.note_watermark(max_rowid)
         except LedgerStoreError as exc:
             self._store_open_error = str(exc)
@@ -895,7 +1018,8 @@ class LedgerPersistence:
             self._rollup.rebuild(_ledger_files(self.path), trigger="boot")
         self._rollup.save()
 
-    def _try_load_sidecar(self, store: LedgerStore, carry: dict[str, Any]) -> bool:
+    def _try_load_sidecar(self, store: LedgerStore, carry: dict[str, Any],
+                          cutoff_ts: int) -> bool:
         """The load path: restore the sidecar, seed the index, replay the gap.
 
         Returns False whenever anything is off; the caller then runs the
@@ -903,7 +1027,8 @@ class LedgerPersistence:
         failing over can never double-fold a row. Order matters: the index
         is seeded from lines at or below the watermark *before* the replay,
         so a replayed amendment finds its original instead of indexing
-        itself as its own predecessor.
+        itself as its own predecessor. ``cutoff_ts`` is the boot's shared
+        age bound (same value the store prune used).
         """
         try:
             if not self._rollup.load_sidecar():
@@ -927,7 +1052,6 @@ class LedgerPersistence:
                 page = store.rows_after(lower)
                 if not page:
                     break
-                now = time.time()
                 for rowid, body in page:
                     replayed += 1
                     lower = rowid
@@ -938,7 +1062,7 @@ class LedgerPersistence:
                         # this is corruption - count it, never guess.
                         self._rollup.note_source(skipped=1)
                         continue
-                    self._rollup._ingest_for_rebuild(row, now)
+                    self._rollup._ingest_for_rebuild(row, cutoff_ts)
             if carry["skipped"] or carry["expired"] or carry["status"] != "complete":
                 self._rollup.note_source(
                     skipped=carry["skipped"], expired=carry["expired"],
@@ -1273,10 +1397,12 @@ class LedgerPersistence:
         if self._store is None or time.monotonic() < self._prune_due:
             return
         self._prune_due = time.monotonic() + PRUNE_INTERVAL_SECONDS
+        cutoff_ts = int(time.time() - RETENTION_SECONDS)
         try:
-            expired = self._store.prune(time.time() - RETENTION_SECONDS)
+            expired = self._store.prune(cutoff_ts)
         except LedgerStoreError:
             return  # last_error recorded; surfaced through durability()
+        self._rollup.note_store_cutoff(cutoff_ts)
         if expired:
             self._rollup.note_source(expired=expired)
 
