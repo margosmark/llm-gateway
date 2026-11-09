@@ -72,8 +72,14 @@ or clear. Document and test the two access boundaries separately.
   device codes, prompts, completions, or provider account identifiers.
 - Keep credentials and caller-token hashes out of `GatewayConfig`, status,
   ordinary state responses, URLs, release metadata, and the request ledger.
-- No implicit provider calls: connection tests, catalogue refreshes, alias
-  tests, and device authorization are explicit owner actions.
+- No implicit provider calls — one named exception: the ChatGPT
+  account-usage read (`docs/CHATGPT_CODEX_CONTRACT.md` §4), one bounded,
+  read-only GET issued inside state assembly behind a 60s TTL when a
+  credential is present. Connection tests, catalogue refreshes, alias tests
+  and device authorization remain explicit owner actions, and no other
+  status or provider-health read calls a provider: the usage read is never
+  triggered by a `/v1` inference request, has no on-demand endpoint, and
+  never refreshes a credential.
 - Provider entitlement, limits, reset times, and undocumented model
   capabilities are **Unknown** unless backed by official evidence.
 - **The deployed production gateway is not a test fixture.** The running

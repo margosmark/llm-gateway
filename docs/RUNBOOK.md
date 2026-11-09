@@ -480,7 +480,11 @@ ledger persistence is off — enable it (§ rollup) and reload; the endpoint
 itself can be checked directly with `curl http://127.0.0.1:8765/owner/api/leaderboard`.
 
 Provider tests and catalogue refreshes are **explicit actions**. An ordinary
-page load or configuration save never calls a provider. Anthropic uses the
+page load or configuration save never calls a provider except the ChatGPT
+account-usage read (`docs/CHATGPT_CODEX_CONTRACT.md` §4): one bounded,
+read-only GET issued inside state assembly behind a 60s TTL, never triggered
+by a `/v1` inference request, with no on-demand endpoint and never refreshing
+a credential. Anthropic uses the
 native Messages API with a separately stored API key; its catalogue is loaded
 only when **Refresh model catalog** is selected. Anthropic-dialect models are
 bridged to Chat Completions and Responses; Anthropic-compatible clients can use
@@ -737,7 +741,7 @@ without editing this file by hand.
 | A local request or **Test connection** fails with *the configured local endpoint did not resolve to a private address* | Connect-time peer check: the address the socket actually reached is outside the allowlist. The save-time answer went stale — DNS changed, or the name now rebinds to a public/metadata address | Fix the DNS answer or save an IP literal. This refusal happens after the TCP handshake and **before any request byte** (before the TLS handshake on `https://`), so nothing was sent; it is the boundary that makes a rebinding hostname safe |
 | A local provider answers with *no local endpoint is configured for this provider* | No endpoint has been saved, so the provider stays *not configured* and is never contacted | Save one: Owner console → provider card → **Save endpoint** (§2). Saving an endpoint makes no connection by itself; **Refresh model catalog** is what discovers models |
 | A route says the dialect cannot be translated | The model is served over Google v1beta or includes a control that cannot be represented | Anthropic Messages models are bridged to/from OpenAI dialects; unsupported controls are refused rather than guessed. Google v1beta remains unsupported |
-| Limits show *Unknown* | The provider publishes no machine-readable allowance for that plan | That is the truthful answer. Check the provider's own console |
+| Limits show *Unknown* | The provider publishes no machine-readable allowance for that plan | That is the truthful answer. Check the provider's own console. ChatGPT account windows are the exception: `account_quota` on the ChatGPT provider row is read read-only once per 60s state poll, and `unavailable_reason` there (`credential_missing`, `http_<code>`, `timeout`) names the reason instead |
 | A request failed with *no eligible route* | Every route was excluded | The error names each excluded route and why |
 | The published catalogue is empty | No alias is published yet | Publish one in Models & Routes |
 | OpenCode shows no gateway models | The plugin cannot read `/v1/alias-catalog` - the gateway is unreachable, or it predates the endpoint | `curl` the endpoint; redeploy with `scripts/release.py`; the plugin warns in the OpenCode log and recovers on its own |

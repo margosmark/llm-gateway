@@ -220,8 +220,12 @@ described below.
 
 Paste the API key into the write-only form and choose **Save and test**. The
 explicit action stores the key and then validates it against
-`https://opencode.ai/inference/go/v1/models`; ordinary page loads still never
-call a provider. The key is stored in a private credential store,
+`https://opencode.ai/inference/go/v1/models`; ordinary page loads never
+call a provider except the ChatGPT account-usage read — one bounded,
+read-only GET issued inside state assembly behind a 60s TTL, never
+triggered by a `/v1` inference request, with no on-demand endpoint and
+never refreshing a credential (`docs/CHATGPT_CODEX_CONTRACT.md` §4). The
+key is stored in a private credential store,
 separately from any other provider, and is **never displayed again**.
 
 ### Local model servers (Ollama, llama.cpp, LM Studio)
@@ -732,8 +736,12 @@ recorded the same way, naming the route it failed on; when a provider
 refused a request's shape, the ledger and the error carry the **names** of
 the fields it refused and nothing else from its body. Provider health combines
 connection/test/catalogue metadata, model counts, local cooldowns and recent
-served-request success/failure rates; it performs no provider calls, and rates
-remain Unknown without observed requests. Token counters come from
+served-request success/failure rates; it performs no provider calls except
+the ChatGPT account-usage read — one bounded, read-only GET issued inside
+state assembly behind a 60s TTL, never triggered by a `/v1` inference
+request, with no on-demand endpoint and never refreshing a credential
+(`docs/CHATGPT_CODEX_CONTRACT.md` §4) — and rates remain Unknown without
+observed requests. Token counters come from
 reported provider usage; local cost estimates use published prices only and
 are not provider bills. The Status page aggregates usage for the last 24 hours
 and displays the price source and observation date, and it can show any
@@ -1039,11 +1047,14 @@ them.
   adapter contract. Google v1beta is not translated — the owner declined
   that work (T6, `docs/TODO.md`) — and a route the gateway cannot
   translate is refused with a clear reason rather than guessed.
-* **ChatGPT limits are Unknown.** OpenAI publishes per-plan *estimates* and
-  a web dashboard, but no machine-readable allowance API for a personal
-  plan. The gateway calls no undocumented endpoint, so actual remaining
-  allowance and reset times are Unknown. Published estimates are shown with
-  their source and date.
+* **ChatGPT model limits are Unknown; account windows are read.** OpenAI
+  publishes per-plan *estimates* and a web dashboard, but no documented
+  machine-readable allowance API. The gateway reads the account's own
+  usage endpoint read-only (once per 60s state poll, never from an
+  inference request) and shows its Session/Weekly windows as
+  `account_quota` on the ChatGPT provider row; if that read fails the
+  block reports why rather than guessing. Model-level limits stay Unknown,
+  and published estimates are shown with their source and date.
 * **The device-code flow is a beta path.** It is implemented from provider
   integration behaviour, and OpenAI documents the flow but does not endorse
   this gateway's use of it. Device-code sign-in must also be enabled for

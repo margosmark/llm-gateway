@@ -18,6 +18,8 @@ from gateway.adapters.base import CLASS_MESSAGES, AdapterError
 from gateway.adapters.chatgpt_codex import (
     ANTI_PHISHING,
     PREREQUISITE,
+    REASON_CREDENTIAL_MISSING,
+    AccountUsage,
     ChatGPTCodexAdapter,
 )
 from gateway.adapters.local_openai import LocalOpenAIAdapter
@@ -123,8 +125,10 @@ from gateway.metrics import render_metrics
 from gateway.routes import single_provider_warning, validate_alias_routes, validate_phase_routing, validate_weighted_routes
 from gateway.provider_concurrency import CappedAdapterRegistry, ProviderConcurrency, check_limit, effective_limit
 from gateway.observability import (
+    CONFIDENCE_HIGH,
     CONFIDENCE_MEDIUM,
     CONFIDENCE_NONE,
+    AccountQuotaStore,
     LimitSnapshot,
     LimitStore,
     RequestEvent,
@@ -491,6 +495,10 @@ class GatewayApp:
         )
         self.ledger = ledger
         self.limits = limits or LimitStore()
+        #: The account-quota memo that feeds ``account_quota`` on the
+        #: chatgpt_codex health row. It is read from state assembly only,
+        #: behind its own TTL - see ``gateway.observability``.
+        self.account_quota = AccountQuotaStore()
         self._release_identity = release_identity
         self.base_url = base_url
         #: Which browser surfaces this listener serves. The LAN listener
@@ -2009,6 +2017,79 @@ class GatewayApp:
         """
         return self._state_cache.serve(request)
 
+    def _account_quota_observation(self) -> AccountUsage | None:
+        """The read-only account-usage observation for this process.
+
+        ``None`` means this process holds no credential-backed ChatGPT /
+        Codex adapter to read with - fixtures register stand-ins for
+        ``chatgpt_codex`` - and then no block is published at all, rather
+        than an unobserved one dressed up as a measurement.
+
+        The credential check runs first, so an owner who has not signed in
+        (and every fixture) is answered from the store alone: no adapter
+        look-up, no outbound request, no network. The read itself is the
+        adapter's own ``fetch_account_usage()`` - same stored credential
+        as inference, no refresh, no rotation.
+        """
+        if not self.credentials.describe("chatgpt_codex").get("present"):
+            return AccountUsage(reason=REASON_CREDENTIAL_MISSING)
+        adapter = self.registry.get("chatgpt_codex")
+        if not isinstance(adapter, ChatGPTCodexAdapter):
+            return None
+        return adapter.fetch_account_usage()
+
+    def _account_quota_block(self) -> dict[str, Any] | None:
+        """The ``account_quota`` block published on the chatgpt_codex row.
+
+        Two shapes, both metadata-only:
+
+        * a **confident** observation - windows, plan, credits and the
+          reset-credit counters from the same read, ``unavailable_reason``
+          null;
+        * an **unavailable** one - the reason string, ``windows: null``
+          and every measured field null, so nothing renders as a zeroed
+          percentage or an invented reset.
+
+        Every key is present in both shapes (nulls in the unavailable one)
+        so a consumer reads one schema. ``observed_at`` is stamped here,
+        when the read happened, and is carried through the TTL untouched
+        - the console shows its age rather than a window that looks
+        current.
+        """
+        observation = self._account_quota_observation()
+        if observation is None:
+            return None
+        block: dict[str, Any] = {
+            "plan_type": observation.plan_type,
+            "source": "account_usage_api",
+            "confidence": CONFIDENCE_HIGH if observation.reason is None else CONFIDENCE_NONE,
+            "observed_at": utc_now_iso(),
+            "unavailable_reason": observation.reason,
+            "windows": None,
+            "credits": None,
+            "resets_banked": None,
+            "resets_banked_applicable": None,
+            "resets_purchase_eligible": None,
+        }
+        if observation.reason is not None:
+            return block
+        block["windows"] = [
+            {
+                "label": window.label,
+                "used_percent": window.used_percent,
+                "reset_at": window.reset_at,
+            }
+            for window in observation.windows
+        ]
+        # Raw values from the allowlisted parse: the balance as the
+        # payload reported it, the counters as ints (or null when the
+        # payload reported nothing - null is not 0).
+        block["credits"] = {"balance": observation.credits_balance}
+        block["resets_banked"] = observation.resets_banked
+        block["resets_banked_applicable"] = observation.resets_banked_applicable
+        block["resets_purchase_eligible"] = observation.resets_purchase_eligible
+        return block
+
     def _render_state(self, request: Request) -> Response:
         config = self.config.snapshot()
         may_mutate = self._can_mutate(request)
@@ -2159,6 +2240,25 @@ class GatewayApp:
             requested_days=requested_days,
             prices=price_snapshot,
         )
+        # Provider health plus the chatgpt_codex account-quota observation.
+        # The read runs here - inside state assembly, behind the store's
+        # 60s TTL - and nowhere else: no /v1 inference request reaches it,
+        # and there is deliberately no on-demand endpoint that would let a
+        # caller trigger an outbound read (the Origin/CSRF surface stays
+        # exactly what it was).
+        health = provider_health(providers, self.router.circuits.details(), ledger_snapshot)
+        if "chatgpt_codex" in config.providers:
+            account_quota = self.account_quota.snapshot(
+                self._account_quota_block,
+                # Presence + field names only: an enrolment or a
+                # disconnect invalidates the memo immediately instead of
+                # hiding behind the TTL.
+                invalidate=self.credentials.describe("chatgpt_codex"),
+            )
+            if account_quota is not None:
+                for row in health:
+                    if row["provider_id"] == "chatgpt_codex":
+                        row["account_quota"] = account_quota
         payload = {
             "initialized": config.initialized,
             "revision": config.revision,
@@ -2187,7 +2287,7 @@ class GatewayApp:
             "usage_costs": aggregate_usage(ledger_snapshot, window_hours=24, evicted_events=ledger_evicted, _prices=price_snapshot) if self.ledger else {"window_hours": 24, "coverage": {"source": "bounded_recent_events", "events_considered": 0, "incomplete": False}, "alias": {}, "provider": {}, "model": {}},
             "analytics": analytics,
             "request_statistics": {window: aggregate_statistics(ledger_snapshot, window, _prices=price_snapshot) for window in ("hour", "day", "month")} if self.ledger else {},
-            "provider_health": provider_health(providers, self.router.circuits.details(), ledger_snapshot),
+            "provider_health": health,
             "ledger_durability": self.ledger.durability() if self.ledger else {"enabled": False, "retention_days": 30, "billing_system": False},
             "cooldowns": self.router.circuits.snapshot(),
             "cooldown_details": self.router.circuits.details(),

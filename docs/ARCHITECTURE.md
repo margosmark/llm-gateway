@@ -121,8 +121,18 @@ The Status view reports whether persistence is enabled and the declared
 connection/test/catalogue metadata, model counts, current local cooldowns,
 and success/failure rates from the recent metadata ledger. Rates are based on
 requests actually served by each provider; no observations remain Unknown.
-The summary performs no provider calls and does not infer external health or
-entitlement. Local usage aggregates cover the last 24 hours and
+With one named exception the summary performs no provider calls and does not
+infer external health or entitlement: the `chatgpt_codex` row also carries an
+`account_quota` block — that account's own quota windows, read with one
+bounded, read-only GET issued inside state assembly behind a 60s TTL. It is
+never triggered by an inference request, there is no on-demand endpoint for
+it, and it never refreshes a credential. The block publishes metadata only
+(plan, window percentages, reset times, reset-credit counters) with
+`source: account_usage_api`; a missing credential or a failed read publishes
+`unavailable_reason` with `windows: null` rather than a zeroed percentage.
+The rules and the endpoint are in `CHATGPT_CODEX_CONTRACT.md` §4.
+
+Local usage aggregates cover the last 24 hours and
 are computed from token counters and published prices, with source and
 observation date. Each alias/provider/model row exposes a **known subtotal**
 (`known_amount_usd` / `amount_usd`) plus explicit unknown coverage:
@@ -286,7 +296,11 @@ the rest of the state.
    never serialised into responses, logs, exports or `/version`.
 6. The owner console may mutate configuration and enroll credentials on this
    listener. Provider tests and catalogue refreshes are explicit actions; no
-   page load or ordinary configuration save calls a provider.
+   page load or ordinary configuration save calls a provider except the one
+   named exception under *State boundaries* — the ChatGPT account-usage read:
+   one bounded, read-only GET issued inside state assembly behind a 60s TTL,
+   never triggered by a `/v1` inference request, with no on-demand endpoint
+   and never refreshing a credential (`CHATGPT_CODEX_CONTRACT.md` §4).
 7. `GET /version`, `GET /health` and `GET /metrics` remain unauthenticated;
    `/v1/*` stays keyless until an owner sets a client API key
    (`POST /owner/api/auth/client-key`, owner session required unless the

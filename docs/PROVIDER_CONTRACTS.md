@@ -482,6 +482,37 @@ Two refused fields are deliberately **not** declared:
   continuation, and dropping the field would silently change which
   conversation the request continued.
 
+### The account usage read
+
+```text
+GET https://chatgpt.com/backend-api/wham/usage
+```
+
+The account's own quota windows, read with the same stored credential the
+inference path uses (`Authorization: Bearer …` plus `ChatGPT-Account-ID`).
+Probed from inside the container: HTTP 200 in ~0.3s, with a primary
+(18,000s) and a secondary (604,800s) window, `plan_type` and `credits`.
+
+* **Read-only, and it never refreshes.** One bounded GET per observation; a
+  `401` is published as `http_401` and the credential is left to the
+  adapter's own refresh lifecycle, a stall as `timeout`. This path never
+  writes the credential store.
+* **Allowlisted by construction.** Only `rate_limit` (its two windows),
+  `credits.balance`, `plan_type` and `rate_limit_reset_credits`
+  (`available_count`, `applicable_available_count`,
+  `immediate_reset_purchase_eligible`) are read; `email`, `user_id`,
+  `account_id`, `promo`, `spend_control` and `model_usage` travel in the
+  response and are never looked at.
+* **Cadence.** The read runs inside `/owner/api/state` assembly behind a
+  60s TTL. No `/v1` inference request triggers it and there is no
+  on-demand endpoint for it, so the Origin/CSRF surface is unchanged.
+* **Failure is absence, not zeros.** A missing credential, `http_<code>`,
+  `timeout` or an unparseable body publishes `unavailable_reason` with
+  `windows: null`.
+
+See `CHATGPT_CODEX_CONTRACT.md` §4 for the full rules, including how the
+window labels are derived.
+
 ### Context windows
 
 | Field | Meaning |
@@ -523,12 +554,15 @@ one map has no effect on the other.
 ### What is not documented
 
 OpenAI publishes no supported third-party proxying path for a consumer
-ChatGPT subscription, and no machine-readable usage or allowance API for a
-personal plan. The gateway therefore:
+ChatGPT subscription, and no **documented** machine-readable usage or
+allowance API for a personal plan. The gateway therefore:
 
-* calls **no undocumented endpoint** for usage or quota;
-* reports ChatGPT limits as **Unknown**, with the published per-plan
-  estimates labelled with their source and date;
+* reads usage only through the account's own read-only endpoint above
+  (§"The account usage read"), which is undocumented and may change without
+  notice — hence every failure publishes `unavailable_reason` instead of a
+  guessed allowance, and no credential is refreshed from that path;
+* reports ChatGPT **model-level** limits as **Unknown**, with the published
+  per-plan estimates labelled with their source and date;
 * states the beta status of the device-code path in the console.
 
 ---
