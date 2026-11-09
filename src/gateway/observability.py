@@ -17,6 +17,9 @@ no response text" - is enforced in one place rather than at each call site.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 import secrets
 import threading
@@ -465,6 +468,23 @@ class AccountQuotaStore:
             self._read_at = self._clock()
             return _copy_quota_block(block)
 
+    def prime(self, block: dict[str, Any] | None, *, key: Any = None) -> None:
+        """Install an observation this process just made itself.
+
+        The redemption path re-reads usage immediately after a successful
+        reset - its guard read predates the reset, so only the fresh read
+        shows the restored windows. Priming that block here means the very
+        next state render serves it from the memo instead of issuing a
+        third read within the same second, and the console's post-redeem
+        refresh shows restored windows. ``key`` follows ``invalidate``'s
+        contract: the caller passes the credential describe() result, so a
+        later enrolling or disconnecting still wins over this prime.
+        """
+        with self._lock:
+            self._block = _copy_quota_block(block)
+            self._key = key
+            self._read_at = self._clock()
+
 
 def _copy_quota_block(block: dict[str, Any] | None) -> dict[str, Any] | None:
     """A shallow copy of a published block: cached state is never handed
@@ -476,6 +496,144 @@ def _copy_quota_block(block: dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(windows, list):
         copied["windows"] = list(windows)
     return copied
+
+
+# --- redemption audit --------------------------------------------------
+# One JSON line per owner-triggered reset redemption attempt, next to
+# ``config.json`` in the state directory, so backups and releases carry
+# the trail with everything else the owner already keeps.
+
+REDEMPTION_AUDIT_FILE = "redemption_audit.jsonl"
+DEFAULT_REDEMPTION_AUDIT_CAPACITY = 200
+
+#: The only fields a record may ever carry - an allowlist, so a future
+#: extra argument cannot widen an audit line toward identity material.
+REDEMPTION_AUDIT_FIELDS = ("ts", "actor", "provider", "outcome")
+
+#: The outcomes the redemption path records. Everything that reached the
+#: handler gets exactly one of these, refusals included: the four server
+#: answers, ``not_exhausted`` (the guard refused before any POST), and
+#: ``unavailable`` (the usage could not be confirmed, or the consume
+#: failed in a way the gateway will not retry).
+REDEMPTION_OUTCOMES = (
+    "reset",
+    "nothing_to_reset",
+    "no_credit",
+    "already_redeemed",
+    "not_exhausted",
+    "unavailable",
+)
+
+
+def _audit_field(value: Any) -> str:
+    """One audit field: redacted, capped, never empty.
+
+    The three inputs are the gateway's own vocabulary (a validated owner
+    username or a fixed machine-key/session literal, a provider id, a
+    fixed outcome word), so this is belt and braces: even a wrong future
+    caller cannot push token-shaped material or an unbounded string into
+    the trail.
+    """
+    text = redact(str(value)) if value is not None else ""
+    text = text.strip()[:64]
+    return text or "unknown"
+
+
+class RedemptionAudit:
+    """Durable who/when/outcome trail for owner-triggered redemptions.
+
+    Every attempt that reached the redemption handler is recorded -
+    success, refusal and failure alike - because "the owner clicked and
+    nothing happened" is exactly the event an audit exists to answer.
+
+    A record carries four fields and no more: ``ts`` (UTC), ``actor``
+    (``owner:<username>``, ``machine_key:<id>``, or ``owner_session`` for
+    gate-off mode), ``provider`` and ``outcome`` (one of
+    :data:`REDEMPTION_OUTCOMES`). No token, header, response fragment,
+    account identifier, prompt or reset request id fits that shape, and
+    each field passes through :func:`redact` on the way in.
+
+    Persistence is append-only JSONL, created ``0600`` in the state
+    directory. A write failure never breaks the owner's action: the
+    in-memory ring still holds the record for this process and the
+    access-log line names the action and its status either way - the
+    failure is logged instead of raised. :meth:`recent` replays the last
+    :attr:`capacity` lines, so the trail survives a restart.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        capacity: int = DEFAULT_REDEMPTION_AUDIT_CAPACITY,
+    ) -> None:
+        self._path = Path(path)
+        self._capacity = max(1, int(capacity))
+        self._lock = threading.Lock()
+        self._records: deque[dict[str, str]] = deque(maxlen=self._capacity)
+        self._load()
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def record(self, *, actor: str, provider: str, outcome: str) -> dict[str, str]:
+        """Append one attempt. Never raises."""
+        values = {
+            "ts": utc_now_iso(),
+            "actor": _audit_field(actor),
+            "provider": _audit_field(provider),
+            "outcome": _audit_field(outcome),
+        }
+        with self._lock:
+            self._records.append(values)
+            try:
+                self._append_line(json.dumps(values, sort_keys=True))
+            except OSError as exc:
+                # The action itself already stands; report the fs problem
+                # instead of turning a spent credit into a 500.
+                logging.getLogger("gateway.operations").warning(
+                    "redemption audit write failed: path=%s error=%s",
+                    self._path,
+                    type(exc).__name__,
+                )
+        return dict(values)
+
+    def recent(self, limit: int = 50) -> list[dict[str, str]]:
+        """The newest records first, as plain dicts (a snapshot copy)."""
+        count = max(0, int(limit))
+        with self._lock:
+            records = list(self._records)
+        return [dict(record) for record in records[-count:][::-1]] if count else []
+
+    def _load(self) -> None:
+        """Replay the sidecar (best-effort; a partial line is skipped)."""
+        try:
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return
+        for line in lines[-self._capacity :]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and all(
+                key in record for key in REDEMPTION_AUDIT_FIELDS
+            ):
+                self._records.append(
+                    {key: _audit_field(record[key]) for key in REDEMPTION_AUDIT_FIELDS}
+                )
+
+    def _append_line(self, line: str) -> None:
+        encoded = (line + "\n").encode("utf-8")
+        fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, encoded)
+        finally:
+            os.close(fd)
 
 
 # --- redaction ---------------------------------------------------------

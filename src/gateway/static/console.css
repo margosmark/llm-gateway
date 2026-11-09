@@ -311,6 +311,12 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 
 .route { border: 1px solid var(--border-section); border-radius: var(--radius-md); padding: 10px; margin-bottom: 8px; background: var(--panel-2); }
 .route .head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+/* Redeem banked reset (card t_571135f9): the owner-only control under
+   the quota it spends from, with its disabled reason as readable body
+   text beside the button's own dimmed state (button:disabled covers
+   the visual gate; this is the explanatory line). */
+.redeem-reset-row { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
+.redeem-reset-reason { max-width: 64ch; line-height: 1.45; }
 
 pre.token {
   background: var(--bg);

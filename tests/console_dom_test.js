@@ -2965,6 +2965,252 @@ check("declining a machine key confirmation sends nothing", function () {
   }
 });
 
+// --- reset redemption (card t_571135f9) ------------------------------------
+// The Redeem control's three-state contract and its click flow: disabled
+// at 0 banked, disabled below full exhaustion with the waste reason
+// inline, enabled only when a credit is banked AND a window sits at
+// 100% - and then one POST whose outcome is toasted verbatim, with only
+// "reset" re-fetching state so the restored windows replace the
+// exhausted ones. Everything below runs over the stubbed fetch seam; no
+// network exists in this file.
+
+function redeemQuotaFixture(banked, worst) {
+  return {
+    source: "account_usage_api",
+    observed_at: new Date().toISOString(),
+    plan_type: "plus",
+    unavailable_reason: null,
+    resets_banked: banked,
+    windows: [
+      { label: "Session", used_percent: worst, reset_at: new Date(Date.now() + 3600e3).toISOString() },
+      { label: "Weekly", used_percent: worst, reset_at: new Date(Date.now() + 86400e3).toISOString() }
+    ]
+  };
+}
+
+function redeemStateFixture(quota) {
+  const state = fixtureState();
+  state.providers = [{ provider_id: "chatgpt_codex", state: "connected", credential_present: true, last_test_at: null, last_error: null }];
+  state.provider_health = [{
+    provider_id: "chatgpt_codex",
+    connection_state: "connected",
+    last_test_outcome: "ok",
+    catalog_observed_at: "2026-11-08T00:00:00Z",
+    model_count: 3,
+    cooldown_remaining_seconds: 0,
+    recent_success_rate: 1,
+    recent_failure_rate: 0,
+    recent_requests: 9,
+    last_error: null,
+    account_quota: quota
+  }];
+  return state;
+}
+
+function redeemButton(root) {
+  return findAll(root, (n) => n.tag === "button")
+    .find((b) => b.textContent === "Redeem banked reset");
+}
+
+function redeemErrorJson(status, value) {
+  // A fetch that reached the gateway but came back as an error status -
+  // the same shape jsonResponse makes, only ok:false.
+  return settle({
+    ok: false,
+    status: status,
+    headers: { get: function () { return "application/json"; } },
+    json: function () { return settle(value, false); },
+    text: function () { return settle(JSON.stringify(value), false); }
+  }, false);
+}
+
+check("Redeem: disabled at 0 banked, disabled below 100% with the waste reason, enabled only when both hold", function () {
+  // AC3 - today's live value first: 0 banked, even at 100% exhaustion.
+  const zeroRoot = helpers.renderStatusForTest(redeemStateFixture(redeemQuotaFixture(0, 100)));
+  const zeroButton = redeemButton(zeroRoot);
+  assert.strictEqual(zeroButton.attributes.disabled, "", "0 banked disables the control");
+  const zeroText = collectText(zeroRoot).join("\n");
+  assert(zeroText.includes("0 banked"), "the count that blocks it is on the card");
+  assert(zeroText.includes("nothing to redeem"), "the reason is inline");
+  assert(String(zeroButton.attributes["aria-label"]).includes("disabled"), "the reason is the accessible name");
+
+  // Banked but only 40% through the week: disabled with the waste reason.
+  const partialRoot = helpers.renderStatusForTest(redeemStateFixture(redeemQuotaFixture(1, 40)));
+  const partialButton = redeemButton(partialRoot);
+  assert.strictEqual(partialButton.attributes.disabled, "", "banked-but-not-exhausted disables the control");
+  const partialText = collectText(partialRoot).join("\n");
+  assert(partialText.includes("redeeming at 40% would waste it"), "the waste reason is inline");
+  assert(partialText.includes("FULL 5h + weekly limits"), "the reason says what a reset would restore");
+
+  // Banked AND exhausted: enabled, no reason anywhere.
+  const readyRoot = helpers.renderStatusForTest(redeemStateFixture(redeemQuotaFixture(2, 100)));
+  const readyButton = redeemButton(readyRoot);
+  assert.strictEqual(readyButton.attributes.disabled, undefined, "2 banked at 100% enables the control");
+  const readyText = collectText(readyRoot).join("\n");
+  assert(!readyText.includes("would waste it"), "no reason is rendered when it may fire");
+  assert(readyText.includes("resets banked: 2"), "the banked count it spends from is on the card");
+
+  // Absent account_quota block: no control at all (older state, unchanged).
+  const bareState = redeemStateFixture(null);
+  assert.strictEqual(redeemButton(helpers.renderStatusForTest(bareState)), undefined,
+    "no quota block, no Redeem control - nothing appears for state that cannot decide");
+});
+
+check("a banked credit below full exhaustion never leaves the console - even a forced click sends nothing", function () {
+  // AC1 (console half): disabled with the reason, and the handler's own
+  // guard means a programmatic dispatch of the disabled button posts
+  // nothing either - the POST count stays at zero through the spy.
+  const recorded = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET" });
+    return jsonResponse({});
+  };
+  try {
+    const root = helpers.renderStatusForTest(redeemStateFixture(redeemQuotaFixture(1, 40)));
+    const button = redeemButton(root);
+    assert.strictEqual(button.attributes.disabled, "", "the control is disabled at 40%");
+    button.listeners.click();
+    assert.strictEqual(recorded.filter((r) => r.method === "POST").length, 0,
+      "the guard runs inside the click: no POST may leave the console");
+    assert.strictEqual(recorded.length, 0, "no request at all - not even a state read");
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
+check("a refusal toast carries the server's guard text verbatim and nothing is re-fetched", function () {
+  // The server re-checks and refuses (its guard is the real one): the
+  // toast shows its reason, exactly one POST went out, no state re-read.
+  const recorded = [];
+  const toastsSeen = [];
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  global.fetch = function (url, options) {
+    options = options || {};
+    recorded.push({ url: url, method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+    if (options.method === "POST") {
+      return redeemErrorJson(409, {
+        error: {
+          type: "redeem_not_exhausted",
+          message: "Refused: a reset restores your FULL 5h + weekly limits - redeeming at 40% would waste it"
+        }
+      });
+    }
+    return jsonResponse({});
+  };
+  try {
+    const toastBefore = document.body.children.length;
+    const root = helpers.renderStatusForTest(redeemStateFixture(redeemQuotaFixture(1, 100)));
+    redeemButton(root).listeners.click();
+    for (let i = toastBefore; i < document.body.children.length; i += 1) {
+      toastsSeen.push(collectText(document.body.children[i]).join("\n"));
+    }
+    const message = toastsSeen.join("\n");
+    assert(message.includes("redeeming at 40% would waste it"), "the guard's reason is toasted verbatim: " + message);
+    const posts = recorded.filter((r) => r.method === "POST");
+    assert.strictEqual(posts.length, 1, "one guarded POST, no retry");
+    assert.deepStrictEqual(posts[0].body, { action: "redeem_reset", provider_id: "chatgpt_codex" },
+      "the action names itself and its provider, nothing else");
+    assert.strictEqual(recorded.filter((r) => r.method === "GET").length, 0,
+      "a refusal never re-fetches state");
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
+check("every consume outcome maps to its own console text, and only reset re-fetches the quota", function () {
+  // AC2: four outcomes, four texts; exactly one of them (the real spend)
+  // re-reads state and renders the restored windows + spent count.
+  const realFetch = global.fetch;
+  const realSetTimeout = global.setTimeout;
+  const realWindow = global.window;
+  global.setTimeout = function () { return 0; };
+  global.window = globalThis;
+  const scenarios = [
+    { code: "reset", toast: "Reset redeemed" },
+    { code: "nothing_to_reset", toast: "credit NOT spent." },
+    { code: "no_credit", toast: "No credit available" },
+    { code: "already_redeemed", toast: "Already redeemed" }
+  ];
+  try {
+    for (const scenario of scenarios) {
+      const recorded = [];
+      const restored = redeemStateFixture(redeemQuotaFixture(scenario.code === "reset" ? 0 : 1, scenario.code === "reset" ? 0 : 100));
+      global.fetch = function (url, options) {
+        options = options || {};
+        recorded.push({ url: url, method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+        if (options.method === "POST") {
+          return jsonResponse({
+            ok: true,
+            outcome: scenario.code,
+            message: scenario.code === "reset"
+              ? "Reset redeemed - your usage limits have been reset. 1 banked resets remaining."
+              : scenario.code === "nothing_to_reset"
+                ? "Limits not exhausted - credit NOT spent."
+                : scenario.code === "no_credit"
+                  ? "No credit available - nothing was redeemed."
+                  : "Already redeemed - no second credit was spent.",
+            windows_reset: scenario.code === "reset" ? 2 : 0,
+            resets_remaining: scenario.code === "reset" ? 1 : 2,
+            circuit_open: scenario.code === "reset",
+            account_quota: restored.provider_health[0].account_quota
+          });
+        }
+        return jsonResponse(restored);
+      };
+      const toastBefore = document.body.children.length;
+      const root = helpers.renderStatusForTest(redeemStateFixture(redeemQuotaFixture(2, 100)));
+      const button = redeemButton(root);
+      assert.strictEqual(button.attributes.disabled, undefined,
+        scenario.code + ": enabled when banked and exhausted");
+      button.listeners.click();
+
+      const posts = recorded.filter((r) => r.method === "POST");
+      assert.strictEqual(posts.length, 1, scenario.code + ": exactly one POST");
+      assert.deepStrictEqual(posts[0].body, { action: "redeem_reset", provider_id: "chatgpt_codex" },
+        scenario.code + ": the POST body is the two named keys");
+      const toasts = [];
+      for (let i = toastBefore; i < document.body.children.length; i += 1) {
+        toasts.push(collectText(document.body.children[i]).join("\n"));
+      }
+      const message = toasts.join("\n");
+      assert(message.includes(scenario.toast), scenario.code + ": its own text is toasted - got: " + message);
+      const stateFetches = recorded.filter((r) => r.method === "GET" && r.url.endsWith("/api/state"));
+      if (scenario.code === "reset") {
+        assert.strictEqual(stateFetches.length, 1, "reset re-fetches state once");
+        const live = helpers.liveStateForTest();
+        assert(live && live.provider_health, "the re-fetch wrote the new state");
+        const liveQuota = live.provider_health[0].account_quota;
+        assert.strictEqual(liveQuota.resets_banked, 0, "the spent credit is gone from the live state");
+        assert.strictEqual(liveQuota.windows[0].used_percent, 0, "the live state carries the restored windows");
+        const after = collectText(helpers.renderStatusForTest(live)).join("\n");
+        assert(after.includes("resets banked: 0"), "the next render shows the spent credit gone");
+        assert(message.includes("never clears cooldowns"),
+          "a held cooldown is pointed at the manual clear, never auto-cleared: " + message);
+      } else {
+        assert.strictEqual(stateFetches.length, 0, scenario.code + ": no re-fetch, nothing changed");
+      }
+    }
+  } finally {
+    global.fetch = realFetch;
+    global.setTimeout = realSetTimeout;
+    if (realWindow === undefined) delete global.window; else global.window = realWindow;
+  }
+});
+
 if (failures.length) {
   console.error("\n" + failures.length + " check(s) failed");
   process.exit(1);
