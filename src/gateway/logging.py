@@ -42,6 +42,32 @@ from gateway.observability import redact
 operations_logger = logging.getLogger("gateway")
 
 
+#: Terminal states a streamed response can reach. The value is written to
+#: the access log verbatim, so it stays a closed set: an unknown outcome
+#: must never be able to claim ``complete``.
+STREAM_OUTCOMES = ("complete", "interrupted", "error")
+
+
+def _safe_client_request_id(value: Any) -> str | None:
+    """The validated client correlation id, or ``None``.
+
+    Deferred import: :mod:`gateway.logging` is imported while the HTTP
+    layer is still loading, so the validator is resolved on first use
+    instead of at module load. The re-validation is deliberate - an
+    access line is written from a request context, and no path may push
+    an unvalidated client value into one. Logging must never raise, so a
+    value that fails validation is dropped: not written, not echoed.
+    """
+    if not isinstance(value, str):
+        return None
+    from gateway.http.request_id import validate_client_request_id
+
+    try:
+        return validate_client_request_id(value)
+    except ValueError:
+        return None
+
+
 class RequestLogger:
     """Writes one metadata-only line per request."""
 
@@ -64,6 +90,8 @@ class RequestLogger:
         machine_key_id: str | None = None,
         machine_key_target: str | None = None,
         exception: str | None = None,
+        request_id: str | None = None,
+        client_request_id: str | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -101,6 +129,60 @@ class RequestLogger:
         # could carry client-controlled content.
         if exception:
             record["exception"] = exception
+        # Correlation: the gateway's own authoritative id, so this line
+        # joins to its ledger row, and the caller's validated id, so the
+        # operator can join both to the client's own records. Both are
+        # bounded token strings; the client value is re-validated here
+        # and dropped if it is not.
+        if request_id:
+            record["request_id"] = request_id
+        safe_client_id = _safe_client_request_id(client_request_id)
+        if safe_client_id:
+            record["client_request_id"] = safe_client_id
+        self._write(record)
+
+    def log_stream_end(
+        self,
+        *,
+        request_id: str,
+        path: str,
+        outcome: str,
+        duration_ms: int,
+        client_request_id: str | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        """One metadata-only line for the *terminal* state of a stream.
+
+        The ingress line says only that the gateway answered the request
+        - HTTP accepted, headers on the wire. This line says what the
+        stream afterwards became: ``complete`` (every frame delivered),
+        ``interrupted`` (the caller hung up before the end) or ``error``
+        (the upstream died mid-answer). Both lines carry the same
+        ``request_id`` and the same ``client_request_id``, so ingress,
+        terminal outcome and ledger row are one join - which is what
+        separates "the gateway said 200" from "the answer arrived".
+
+        No frame content, no prompt and no completion is written here:
+        the path, the ids, the outcome, the error class and a duration.
+        """
+        if not self._enabled:
+            return
+        record: dict[str, Any] = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+            "event": "stream_end",
+            "path": path,
+            "request_id": request_id,
+            "outcome": outcome if outcome in STREAM_OUTCOMES else "error",
+            "duration_ms": max(0, int(duration_ms)),
+        }
+        if error_class:
+            record["error_class"] = error_class
+        safe_client_id = _safe_client_request_id(client_request_id)
+        if safe_client_id:
+            record["client_request_id"] = safe_client_id
+        self._write(record)
+
+    def _write(self, record: dict[str, Any]) -> None:
         line = redact(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
         # backslashreplace: a lone surrogate in any field must drop nothing.
         # Encoding strictly raised UnicodeEncodeError - a ValueError - which

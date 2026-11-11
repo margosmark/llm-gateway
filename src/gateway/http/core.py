@@ -53,6 +53,12 @@ MAX_JSON_NESTING = 3000
 #: before the response headers used to leak the slot until the gateway
 #: restarted (finding F1, ``docs/REVIEW.md`` R73).
 STREAM_LEASE_CONTEXT_KEY = "stream_lease_release"
+#: The terminal-outcome callback the application registers for a streamed
+#: response (``gateway.logging.RequestLogger.log_stream_end``). The HTTP
+#: layer invokes it with ``interrupted`` when the caller hangs up before
+#: the stream ever ran; the generator itself invokes it on its own exit
+#: paths. The callback is idempotent, so both paths can call it.
+STREAM_END_CONTEXT_KEY = "stream_end"
 
 
 def _check_json_nesting(text: str) -> None:
@@ -515,18 +521,29 @@ class _RequestHandler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001, S110 - cleanup after a hang-up must not raise.
                 pass
         request_id = ""
+        end_stream = None
         if request is not None:
             context = getattr(request, "context", None)
             if isinstance(context, dict):
                 candidate = context.get("request_id")
                 if isinstance(candidate, str):
                     request_id = candidate
+                end_stream = context.pop(STREAM_END_CONTEXT_KEY, None)
         try:
             # Idempotent, and a no-op when the request never reached a
             # provider: the outcome says there was nothing to cancel.
             abort_request(request_id, "client_disconnected")
         except Exception:  # noqa: BLE001 - the abort seam is best-effort here.
             return
+        # The stream never ran (or already logged its own outcome), so
+        # this is the last place that can state what the stream became.
+        # A hang-up before the first frame is still an interruption, and
+        # without this line the ingress record would read as a plain 200.
+        if callable(end_stream):
+            try:
+                end_stream("interrupted")
+            except Exception:  # noqa: BLE001 - a log must never break a hang-up.
+                return
 
     def _send_buffered(self, response: Response, head_only: bool) -> None:
         self.send_response(response.status)
