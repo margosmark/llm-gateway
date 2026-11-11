@@ -392,7 +392,13 @@ client `X-Request-Id` is retained as `client_request_id` beside the gateway's
 authoritative `request_id`; client IDs never select or amend ledger records.
 Invalid or repeated `X-Request-Id` headers are rejected without echoing the
 value. IDs are limited to 128 ASCII letters, digits, dots, underscores,
-hyphens, colons or dashes. Retention is by AGE ONLY: rows
+hyphens, colons or dashes. Both ids also appear on the access-log line for
+the request (when the client sent one), so a log line, its ledger row and
+the caller's own records join on the same key. A streamed request writes a
+second access-log line, `event: stream_end`, carrying the same two ids and
+the stream's terminal outcome - `complete`, `interrupted` (the caller hung
+up before the end) or `error` - so "the gateway answered 200" is never
+confused with "the answer arrived". Retention is by AGE ONLY: rows
 older than 30 days are pruned on load and on a daily timer, with no size
 cap on history, so the full window survives at the measured write rate
 (~5,200 requests/day, ~156k rows over 30 days, tens of MiB on disk). The

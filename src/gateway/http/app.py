@@ -110,7 +110,7 @@ from gateway.core.routing import RoutingError, Router
 from gateway.credentials import CredentialStore
 from gateway.fallback_reasons import fallback_reason_class
 from gateway.http import messages as messages_surface
-from gateway.http.core import InvalidBodyText, Request, Response, Router as HttpRouter, STREAM_LEASE_CONTEXT_KEY, StreamResponse, json_response
+from gateway.http.core import InvalidBodyText, Request, Response, Router as HttpRouter, STREAM_END_CONTEXT_KEY, STREAM_LEASE_CONTEXT_KEY, StreamResponse, json_response
 from gateway.http.security import (
     MUTATING_METHODS,
     SecurityError,
@@ -160,6 +160,28 @@ CLIENT_REQUEST_ID_PATHS = (
     "/v1/messages",
     "/v1/systemone",
 )
+
+
+def client_request_id_of(request: Request) -> str | None:
+    """The caller's correlation id for this request, re-validated.
+
+    One accessor for every sink (access log, ledger, stream-outcome
+    line) so no path can reach one with a value the ingress gate would
+    have refused. Returns ``None`` for a missing id - the ordinary case
+    for a client that does not correlate - and for anything that fails
+    validation, without raising: attribution must never change an
+    answer.
+    """
+    context = request.context if isinstance(request.context, dict) else None
+    if not context:
+        return None
+    value = context.get("client_request_id")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return validate_client_request_id(value)
+    except ValueError:
+        return None
 
 # --- analytics: the durable daily rollup, surfaced ----------------------
 
@@ -823,12 +845,21 @@ class GatewayApp:
         """
         if self.ledger is None:
             return
+        request_id = new_request_id()
+        # Name the row on the request, so the access line and this row
+        # join by the same id. Only when routing has not already named
+        # one: an id set earlier is the join key the ingress line used,
+        # and clobbering it would split one request across two ids.
+        context = request.context if isinstance(request.context, dict) else None
+        if context is not None and not context.get("request_id"):
+            context["request_id"] = request_id
         self.ledger.record(
             RequestEvent(
-                request_id=new_request_id(),
+                request_id=request_id,
                 timestamp=utc_now_iso(),
                 requested_alias=alias or "",
                 requested_model=alias or None,
+                client_request_id=client_request_id_of(request),
                 status=status,
                 error_class=error_class,
                 latency_ms=int((time.monotonic() - started) * 1000),
@@ -871,7 +902,7 @@ class GatewayApp:
                 timestamp=utc_now_iso(),
                 requested_alias="",
                 requested_model=model,
-                client_request_id=request.context.get("client_request_id"),
+                client_request_id=client_request_id_of(request),
                 serving_provider="opencode_console",
                 serving_model=model,
                 status=200,
@@ -974,6 +1005,9 @@ class GatewayApp:
             # same never-str(exc) rule as above; client text never enters it.
             noted = request.context.get("handler_exception")
             exception = noted if isinstance(noted, str) and noted else None
+        gateway_request_id = request.context.get("request_id")
+        if not isinstance(gateway_request_id, str) or not gateway_request_id:
+            gateway_request_id = None
         self.logger.log(
             method=request.method,
             path=request.path,
@@ -988,6 +1022,8 @@ class GatewayApp:
             machine_key_id=machine_key_id,
             machine_key_target=machine_key_target,
             exception=exception,
+            request_id=gateway_request_id,
+            client_request_id=client_request_id_of(request),
         )
 
     # --- surface helpers -------------------------------------------------
@@ -1794,7 +1830,7 @@ class GatewayApp:
                 profile_id=profile.profile_id,
                 client_ip=request.client_address[0],
                 caller_phase=caller_phase,
-                client_request_id=request.context.get("client_request_id"),
+                client_request_id=client_request_id_of(request),
             )
         except RoutingError as exc:
             # A failed request must be just as attributable as a served one.
@@ -1862,8 +1898,38 @@ class GatewayApp:
         upstream_dialect = routed.request.dialect or dialect
         upstream_stream = routed.response.stream or iter(())
 
+        # The ingress line says only that the gateway answered the
+        # request - HTTP accepted, headers on the wire. This callback is
+        # what later states what the stream *became*, on every exit path,
+        # including one where the caller hangs up before the first frame
+        # (which runs no generator code at all: the HTTP layer invokes
+        # it there). Idempotent, so the two paths cannot write two
+        # terminal lines for one stream.
+        stream_started = time.monotonic()
+        terminal = {"logged": False}
+
+        def end_stream(outcome: str, error_class: str | None = None) -> None:
+            if terminal["logged"] or self.logger is None:
+                return
+            terminal["logged"] = True
+            self.logger.log_stream_end(
+                request_id=request_id,
+                path=request.path,
+                client_request_id=client_request_id_of(request),
+                outcome=outcome,
+                error_class=error_class,
+                duration_ms=int((time.monotonic() - stream_started) * 1000),
+            )
+
+        request.context[STREAM_END_CONTEXT_KEY] = end_stream
+
         def frames():
             observed: dict[str, int] = {}
+            # The default is the outcome a caller's hang-up leaves behind:
+            # the generator is closed at a yield, so only the ``finally``
+            # below runs and nothing has been delivered to the end.
+            outcome = "interrupted"
+            error_class: str | None = None
             try:
                 converted = upstream_stream if upstream_dialect == dialect else convert_stream_bytes(
                     upstream_stream, upstream_dialect, dialect, routed.request.model
@@ -1875,6 +1941,7 @@ class GatewayApp:
                     yield sse_done()
                 if self.ledger:
                     self.ledger.amend(request_id, token_counters=observed or None)
+                outcome = "complete"
             except AdapterError as exc:
                 # The upstream died *after* the route answered, while the
                 # answer was being delivered (docs/REVIEW.md R77). The
@@ -1889,6 +1956,7 @@ class GatewayApp:
                 # handled: anything else keeps propagating to
                 # socketserver.handle_error (t_7198bfa3, log not blinded).
                 error_class = classify_late_error(routed.route_context, exc)
+                outcome = "error"
                 operations_logger.error(
                     "upstream failed mid-stream (class=%s request_id=%s); "
                     "the ledger was amended and the client is told in band",
@@ -1916,6 +1984,11 @@ class GatewayApp:
                         ensure_ascii=False,
                     )
                 )
+            finally:
+                # Every exit path states its own outcome exactly once: a
+                # completed answer, a truncated one, or a caller that hung
+                # up mid-answer (GeneratorExit lands here too).
+                end_stream(outcome, error_class)
 
         return StreamResponse(
             frames(),
