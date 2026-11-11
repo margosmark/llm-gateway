@@ -29,10 +29,11 @@ import io
 import json
 import socket
 import struct
+import threading
 import time
 import unittest
 
-from gateway.adapters.base import ProviderResponse
+from gateway.adapters.base import AdapterError, ProviderResponse
 from gateway.config import Alias, RouteRef
 from gateway.logging import RequestLogger
 from gateway.observability import RequestLedger
@@ -283,7 +284,141 @@ class StreamingTerminalOutcomeTests(CorrelationHarnessCase):
         ingress = _by_event(_records(log), None)
         self.assertEqual(ingress[0]["request_id"], ends[0]["request_id"])
 
+    def test_a_pre_frame_hangup_logs_interrupted_even_when_the_abort_seam_raises(self) -> None:
+        """The terminal line must not depend on the abort seam (t_dfec4c88 F1).
 
+        A caller that resets the socket before the first frame starts no
+        generator code at all, so the generator's ``finally`` never runs
+        and this HTTP hang-up path is the *only* writer of the terminal
+        line. If ``abort_request`` then raises, the line must still be
+        written - otherwise the pre-frame hang-up leaves no trace but a
+        plain 200.
+
+        Deterministic pre-frame ordering: the adapter parks inside
+        ``invoke`` (no byte of the response exists yet), the client resets
+        the connection with ``SO_LINGER=0``, and only then is the adapter
+        released - so ``end_headers()``'s write fails before the stream
+        generator's first ``next()``.
+        """
+        import gateway.http.core as core
+
+        entered = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class _ParkedAdapter(FakeAdapter):
+            def invoke(self, request):  # a ProviderRequest; see FakeAdapter
+                self.calls.append(request)
+                entered.set()
+                release.wait(timeout=10)
+
+                def frames():
+                    yield from responses_stream("late")
+
+                return ProviderResponse(
+                    status=200,
+                    headers={},
+                    body=None,
+                    stream=frames(),
+                    content_type="text/event-stream",
+                    dialect=self.dialect,
+                )
+
+        harness, log = self.build(adapter=_ParkedAdapter())
+        original_abort = core.abort_request
+
+        def _exploding_abort(request_id: str, reason: str = "client_disconnected") -> None:
+            raise RuntimeError("abort seam exploded (t_dfec4c88 F1)")
+
+        core.abort_request = _exploding_abort
+        self.addCleanup(setattr, core, "abort_request", original_abort)
+
+        payload = json.dumps(STREAM_BODY).encode("utf-8")
+        head = (
+            f"POST /v1/responses HTTP/1.1\r\n"
+            f"Host: {harness.authority}:{harness.port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            f"X-Request-Id: stream-preboom\r\n\r\n"
+        ).encode()
+        sock = socket.create_connection((harness.host, harness.port), timeout=10)
+        try:
+            sock.sendall(head + payload)
+            self.assertTrue(entered.wait(timeout=10), "adapter never invoked")
+            # SO_LINGER 0 turns the close into a reset while the handler
+            # is still parked, so the header write fails for sure.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        finally:
+            sock.close()
+        release.set()
+
+        deadline = time.monotonic() + 10
+        ends: list[dict] = []
+        while time.monotonic() < deadline and not ends:
+            ends = _by_event(_records(log), "stream_end")
+            time.sleep(0.05)
+        self.assertEqual(len(ends), 1, _records(log))
+        self.assertEqual(ends[0]["outcome"], "interrupted")
+        self.assertEqual(ends[0]["client_request_id"], "stream-preboom")
+        ingress = _by_event(_records(log), None)
+        self.assertEqual(len(ingress), 1, ingress)
+        self.assertEqual(ingress[0]["request_id"], ends[0]["request_id"])
+
+    def test_a_mid_stream_upstream_death_states_error_with_its_class(self) -> None:
+        """The third documented outcome has a regression test (t_dfec4c88 F2).
+
+        ``docs/RUNBOOK.md`` documents ``complete | interrupted | error``.
+        ``error`` is the mid-stream ``AdapterError`` branch: the answer
+        died after the route succeeded, so the terminal line must carry
+        the provider's error class, join both ids to the ledger row, and
+        appear exactly once.
+        """
+        class _DyingAdapter(FakeAdapter):
+            def invoke(self, request):  # a ProviderRequest; see FakeAdapter
+                self.calls.append(request)
+
+                def frames():
+                    yield responses_stream("partial")[0]
+                    raise AdapterError("transient", "upstream died mid-answer")
+
+                return ProviderResponse(
+                    status=200,
+                    headers={},
+                    body=None,
+                    stream=frames(),
+                    content_type="text/event-stream",
+                    dialect=self.dialect,
+                )
+
+        harness, log = self.build(adapter=_DyingAdapter())
+        status, body, _ = harness.request(
+            "POST",
+            "/v1/responses",
+            body=STREAM_BODY,
+            headers={"X-Request-Id": "stream-error"},
+            raw=True,
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(body, bytes)
+        # The client is told in band, and [DONE] stays reserved for a
+        # complete answer.
+        self.assertIn(b"\"type\": \"transient\"", body)
+        self.assertNotIn(b"data: [DONE]", body)
+
+        ends = _by_event(_records(log), "stream_end")
+        self.assertEqual(len(ends), 1, _records(log))
+        self.assertEqual(ends[0]["outcome"], "error")
+        self.assertEqual(ends[0]["error_class"], "transient")
+        ingress = _by_event(_records(log), None)
+        self.assertEqual(len(ingress), 1, ingress)
+        self.assertEqual(ends[0]["request_id"], ingress[0]["request_id"])
+        self.assertEqual(ends[0]["client_request_id"], "stream-error")
+
+        row = self.ledger(harness).recent(limit=1)[0]
+        self.assertEqual(row["request_id"], ends[0]["request_id"])
+        self.assertEqual(row["client_request_id"], "stream-error")
+        self.assertEqual(row["error_class"], ends[0]["error_class"])
+        self.assertTrue(row["streamed"])
 
 
 
