@@ -534,7 +534,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # provider: the outcome says there was nothing to cancel.
             abort_request(request_id, "client_disconnected")
         except Exception:  # noqa: BLE001 - the abort seam is best-effort here.
-            return
+            # Fall through: the terminal line below must not depend on the
+            # abort seam succeeding. On a pre-frame hang-up this is the
+            # *only* writer of that line (a generator that never started
+            # runs no finally), so returning here would lose it.
+            pass
         # The stream never ran (or already logged its own outcome), so
         # this is the last place that can state what the stream became.
         # A hang-up before the first frame is still an interruption, and
