@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from prometheus_client.parser import text_string_to_metric_families
+try:
+    from prometheus_client.parser import text_string_to_metric_families
+except ImportError:  # pragma: no cover - exercised only on zero-dependency runners
+    text_string_to_metric_families = None
 
 from gateway.metrics import render_metrics
 from gateway.observability import RequestEvent, RequestLedger
 
 
+@unittest.skipIf(text_string_to_metric_families is None, "prometheus_client not installed (optional test-only dependency)")
 class MetricsTests(unittest.TestCase):
     def test_valid_exposition_metadata_only_and_cooldown(self):
         ledger = RequestLedger()
