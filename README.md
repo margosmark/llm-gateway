@@ -4,6 +4,11 @@ A personal, LAN-only, OpenAI-compatible LLM gateway. It lets one owner manage
 their LLM access through a browser — no editing files, no Docker commands, no
 environment variables, no JSON.
 
+> **Status (November 2026):** the original hosted deployment has been retired.
+> The project is open source (MIT) and runs anywhere Docker Compose does — see
+> [Quick Start](#quick-start). The examples below use the author's LAN address
+> (`10.10.11.109`); substitute your own host.
+
 Eight providers are registered — five cloud providers and three local
 servers:
 
