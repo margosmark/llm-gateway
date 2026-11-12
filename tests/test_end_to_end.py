@@ -808,7 +808,10 @@ class MetadataDetailsTests(unittest.TestCase):
         self.assertNotIn("credential", payload.decode())
         self.assertNotIn("prompt", payload.decode())
         self.assertNotIn("token", payload.decode())
-        from prometheus_client.parser import text_string_to_metric_families
+        try:
+            from prometheus_client.parser import text_string_to_metric_families
+        except ImportError:  # pragma: no cover - optional test-only dependency
+            self.skipTest("prometheus_client not installed (optional test-only dependency)")
         self.assertTrue(list(text_string_to_metric_families(payload.decode())))
 
     def test_metrics_is_not_routed_from_owner_mount(self) -> None:
